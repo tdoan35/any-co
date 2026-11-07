@@ -254,3 +254,30 @@ test("artists eval uses runs/spend.jsonl art_generate charges as the floor for s
   assert.equal(r.pass, false);
   assert.ok(r.issues.some((i) => /art_generate tool spend 0\.36/.test(i)), r.issues.join("; "));
 });
+
+test("T3-followup 1: a spend.jsonl with no art_generate charge for this run fails generated assets and keeps the half-of-run floor", () => {
+  const dir = buildRun("sprite-artist");
+  const runId = path.basename(dir);
+  writeFileSync(path.join(dir, "run.json"), JSON.stringify({ run_id: runId, agent: "sprite-artist", status: "done", spent_micro_usd: 4_200_000 }));
+  // the ledger holds only another run's entry (also what a stray spend.jsonl looks like)
+  writeFileSync(path.join(path.dirname(dir), "spend.jsonl"), JSON.stringify({ ts: "t", run_id: "other-run", kind: "tool", what: "art_generate", micro_usd: 180_000 }) + "\n");
+  const gate = runGate(path.join(dir, "workspace", "game"));
+  const output = (spent: number) =>
+    JSON.stringify({
+      generated: [{ id: "player", path: "game/assets/sprites/player.png", provider: "retrodiffusion", frames: 1, in_manifest: true }],
+      gate: { ok: gate.ok, failed: gate.assets.filter((a) => !a.pass).map((a) => a.id) },
+      postprocess: { snap: true, lock: true, outline: true },
+      spent_usd: spent,
+      notes: "",
+    });
+  writeFileSync(path.join(dir, "output.json"), output(0.01)); // $0.01 claimed on a $4.20 run
+  const r = evalArtists(dir);
+  assert.equal(r.pass, false);
+  assert.ok(r.issues.some((i) => /records no art_generate charge/.test(i)), r.issues.join("; "));
+  assert.ok(r.issues.some((i) => /far below the run's recorded spend 4\.2/.test(i)), r.issues.join("; "));
+  // an honest claim still fails: generated assets with no ledgered charge is the lie signal itself
+  writeFileSync(path.join(dir, "output.json"), output(4.1));
+  const r2 = evalArtists(dir);
+  assert.equal(r2.pass, false);
+  assert.deepEqual(r2.issues.filter((i) => !/records no art_generate charge/.test(i)), []);
+});

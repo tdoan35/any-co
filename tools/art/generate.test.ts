@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { decodePng, encodePng, makeImage } from "./png.ts";
-import { ChargedFailure, generate, resolveInside } from "./generate.ts";
+import { ChargedFailure, generate, neverSent, resolveInside } from "./generate.ts";
 
 const PNG_BYTES = encodePng(makeImage(2, 2));
 const PNG_B64 = Buffer.from(PNG_BYTES).toString("base64");
@@ -591,4 +591,59 @@ test("T3-fix 5: out must end in .png (multi-image naming can't collide)", async 
   );
   const r = IMPLS.art_generate.art_generate.input.safeParse({ provider: "retrodiffusion", prompt: "x", width: 16, height: 16, out: "gen/take" });
   assert.equal(r.success, false);
+});
+
+test("T3-followup 2: a submit that dies after the request was sent is charged; refused connections and 4xx are not", async () => {
+  const ws = tempWorkspace();
+  const gen = (provider: "retrodiffusion" | "pixellab", baseUrl: string, timeoutMs = 2000) =>
+    generate({ provider, prompt: "x", width: 64, height: 64, out: "a.png" }, { workspace: ws, baseUrl: { [provider]: baseUrl }, env: ENV, pollIntervalMs: 1, timeoutMs }).catch((e: unknown) => e) as Promise<Error>;
+  // socket destroyed after the body arrived (provider may have accepted the job)
+  await withServer(
+    (_req, _count, res) => res.socket?.destroy(),
+    async ({ baseUrl }) => {
+      for (const [provider, micro] of [["retrodiffusion", 180_000], ["pixellab", 20_000]] as const) {
+        const err = await gen(provider, baseUrl);
+        assert.ok(err instanceof ChargedFailure, `${provider}: expected ChargedFailure, got ${err}`);
+        assert.equal((err as ChargedFailure).cost_micro_usd, micro);
+        assert.match(err.message, /after the request was sent/);
+      }
+    },
+  );
+  // submit never answers: the deadline aborts it mid-flight
+  await withServer(
+    () => {},
+    async ({ baseUrl }) => {
+      const err = await gen("retrodiffusion", baseUrl, 100);
+      assert.ok(err instanceof ChargedFailure, String(err));
+    },
+  );
+  // 5xx answer and a 2xx without a job id: charged
+  await withServer(
+    (req, _count, res) => (req.url === "/v2/inferences" ? json(res, 503, { error: "busy" }) : json(res, 200, { usage: null })),
+    async ({ baseUrl }) => {
+      assert.ok((await gen("retrodiffusion", baseUrl)) instanceof ChargedFailure);
+      const err = await gen("pixellab", baseUrl);
+      assert.ok(err instanceof ChargedFailure && /no background_job_id/.test(err.message), String(err));
+    },
+  );
+  // 4xx answer: the provider refused the job, no charge
+  await withServer(
+    (_req, _count, res) => json(res, 401, { detail: "bad token" }),
+    async ({ baseUrl }) => {
+      const err = await gen("pixellab", baseUrl);
+      assert.ok(!(err instanceof ChargedFailure) && /rejected the request \(401\)/.test(err.message), String(err));
+    },
+  );
+  // connection refused: the request was never sent, no charge
+  const closed = await startServer(() => {});
+  const { promise, resolve } = Promise.withResolvers<void>();
+  closed.server.close(() => resolve());
+  await promise;
+  const refused = await gen("retrodiffusion", closed.baseUrl);
+  assert.ok(!(refused instanceof ChargedFailure), String(refused));
+  assert.match(refused.message, /before the request was sent.*ECONNREFUSED/);
+  // happy-eyeballs AggregateError: uncharged only if every address refused
+  assert.equal(neverSent({ cause: { errors: [{ code: "ECONNREFUSED" }, { code: "ENETUNREACH" }] } }), true);
+  assert.equal(neverSent({ cause: { errors: [{ code: "ECONNREFUSED" }, { code: "ECONNRESET" }] } }), false);
+  assert.equal(neverSent(new Error("no cause")), false);
 });
