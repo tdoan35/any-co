@@ -34,3 +34,10 @@ generation, post-processing, manifest hygiene, and honest numbers.
 The structured manifest only: each asset you generated (id, path, provider, frames,
 manifest status), the gate facts copied from art_gate, your postprocess flags, total spend,
 notes. No numbers you didn't copy from tool output.
+
+## Credits (free-trial, never topped up)
+- Omit `provider` when you pass an anchor as `reference`: art_generate uses the anchor's
+  bake-off winner. Run art_quote (free) before a batch. Animation calls need `justify`.
+- Each asset gets one generation plus two regenerations. If art_generate returns
+  `{exhausted: "all", fallback: "procedural"}`, stop generating and report it in your notes;
+  the Art Director takes the procedural floor.

@@ -13,7 +13,11 @@ import { studioStatusTools } from "./studio-status.ts";
 import { decodePng, encodePng, type RgbaImage } from "../../tools/art/png.ts";
 import { addOutline, contactSheet, lockPalette, snapToGrid, splitStrip } from "../../tools/art/ops.ts";
 import { runGate } from "../../tools/art/gate.ts";
-import { ChargedFailure, generate } from "../../tools/art/generate.ts";
+import { ChargedFailure, ProviderExhausted, balance as providerBalance, generate, isAnimation, quote as providerQuote, type GenerateResult, type ProviderName } from "../../tools/art/generate.ts";
+import {
+  MAX_REGENERATIONS, PROVIDERS, anchorWinner, countGeneration, generationCount, isExhausted, markExhausted, other, readCredits, readGallery,
+  readProviders, recordAnchorWinner, recordCredit, statePaths,
+} from "../../tools/art/credits.ts";
 import { append as ledgerAppend, read as ledgerRead, LEDGER_FILE } from "../../tools/ledger/ledger.ts";
 import { AGENTS_DIR } from "../load.ts";
 import type { Board } from "../board/index.ts";
@@ -904,15 +908,37 @@ async function applyArtPostprocess(
   return steps;
 }
 
+const providerEnum = z.enum(["pixellab", "retrodiffusion"]);
+
+/** Log a reported balance; write ONE ledger note per low threshold per provider per day. */
+function noteCredits(ctx: ToolContext, provider: ProviderName, remaining: number | null, source: string): { provider: ProviderName; remaining: number | null; low_notes: string[] } {
+  if (remaining === null || !Number.isFinite(remaining)) return { provider, remaining: null, low_notes: [] };
+  const paths = statePaths(ctx.runsDir);
+  const ledgerFile = ctx.ledgerFile ?? LEDGER_FILE;
+  const noted = (ref: string) => ledgerRead(ledgerFile).some((e) => e.kind === "decision" && e.topic === "art.credits_low" && (e.refs ?? []).includes(ref));
+  const notes = recordCredit(paths.credits, { ts: new Date().toISOString(), provider, remaining, run_id: ctx.run_id ?? "unknown", source }, noted);
+  for (const n of notes)
+    ledgerAppend({
+      kind: "decision", ts: new Date().toISOString(), agent: ctx.agent ?? "art_generate", run_id: ctx.run_id ?? "unknown", topic: "art.credits_low",
+      decision: n.threshold === "zero" ? `${provider} credits are at ${remaining}: generation moves to the other provider or the procedural floor` : `${provider} credits are low: ${remaining} left, under ${LOW_PCT}% of today's first reading ${n.first_today}`,
+      rationale: "Free-trial credits are not topped up (no purchases). Conserve: anchors only for bake-offs, quote batches, cap regenerations.",
+      refs: [n.ref, statePaths(ctx.runsDir).credits],
+    }, ledgerFile);
+  return { provider, remaining, low_notes: notes.map((n) => n.threshold) };
+}
+const LOW_PCT = 20;
+
 const artGenerate: ToolImpl = {
   description:
     "Generate pixel art with a paid provider (PixelLab or Retro Diffusion) and write PNGs into the workspace. " +
     "Every call reports cost_micro_usd and is charged to the run budget — no raw generations land unprocessed when " +
     "postprocess is set: snap downscales to the manifest grid, lock forces the manifest palette, outline takes the " +
-    "style bible's outline color. The manifest must be locked (game_clone) before postprocess can run.",
+    "style bible's outline color. The manifest must be locked (game_clone) before postprocess can run. " +
+    `Credits are free-trial and never topped up: omit provider to use the reference anchor's winning provider; an exhausted provider falls back to the other once; with both gone the result is {exhausted:"all", fallback:"procedural"} at no cost. ` +
+    `Each asset gets one generation plus ${MAX_REGENERATIONS} regenerations. Animation (frames or rd_animation/rd_advanced_animation styles) needs justify. Quote batches with art_quote first.`,
   input: z
     .object({
-      provider: z.enum(["pixellab", "retrodiffusion"]),
+      provider: providerEnum.optional().describe("omit to use the anchor-winning provider of `reference` (art_anchor_winner)"),
       prompt: z.string().min(1).max(2000),
       width: z.number().int().min(12).max(792),
       height: z.number().int().min(12).max(792),
@@ -922,6 +948,7 @@ const artGenerate: ToolImpl = {
       frames: z.number().int().optional().describe("animation frames_duration (Retro Diffusion only: 4|6|8|10|12|16)"),
       transparent: z.boolean().optional().describe("transparent background (default true)"),
       style: z.string().max(120).optional().describe("Retro Diffusion prompt_style id"),
+      justify: z.string().min(10).max(300).optional().describe("required for animation: why the cheaper ladder steps (cutout parts, in-engine motion) won't do"),
       postprocess: z
         .object({
           snap: z.boolean().optional().describe("downscale to the manifest entry's full size (size × frames) by majority vote"),
@@ -933,23 +960,133 @@ const artGenerate: ToolImpl = {
     })
     .strict(),
   async run(i, ctx) {
-    let result: Awaited<ReturnType<typeof generate>>;
-    try {
-      result = await generate(i, { workspace: ctx.workspace });
-    } catch (e) {
-      // a failure after the provider accepted the job still bills: charge it
-      if (e instanceof ChargedFailure) return { content: errText(e), is_error: true, cost_micro_usd: e.cost_micro_usd };
-      return { content: errText(e), is_error: true };
+    const paths = statePaths(ctx.runsDir);
+    const done = generationCount(paths.gallery, i.out);
+    if (done >= 1 + MAX_REGENERATIONS)
+      return { content: `refused: ${i.out} has had ${done} paid generations (1 + ${MAX_REGENERATIONS} regenerations is the cap). Fix the prompt/reference or cut to the fallback ladder.`, is_error: true };
+    if (isAnimation(i) && !i.justify)
+      return { content: "refused: animation endpoints (frames, rd_animation__*, rd_advanced_animation__*) are the expensive ones; pass justify with why cutout parts or in-engine motion won't do", is_error: true };
+    const winner = i.reference ? anchorWinner(paths.gallery, i.reference) : undefined;
+    let requested: ProviderName | undefined = i.provider;
+    if (!requested) {
+      if (!winner) return { content: `provider is required: no anchor winner is recorded${i.reference ? ` for ${i.reference}` : " (no reference given)"}. Bake-offs are for anchors; record the winner with art_anchor_winner.`, is_error: true };
+      requested = winner;
+    } else if (winner && requested !== winner && !isExhausted(paths.providers, winner)) {
+      return { content: `refused: ${i.reference}'s anchor bake-off was won by ${winner}; batch generation uses it (omit provider). Only anchors are generated on both.`, is_error: true };
     }
+
+    const exhausted: ProviderName[] = [];
+    const notes: string[] = [];
+    let result: GenerateResult | null = null;
+    let credits: ReturnType<typeof noteCredits> | null = null;
+    for (const p of [requested, other(requested)]) {
+      if (isExhausted(paths.providers, p)) {
+        exhausted.push(p);
+        continue;
+      }
+      if (p !== requested && i.frames !== undefined && p === "pixellab") {
+        notes.push("pixellab cannot animate through this interface, so there is no animation fallback");
+        continue;
+      }
+      if (p !== requested) notes.push(`${requested} is exhausted; tried ${p} once instead (same prompt and size)`);
+      try {
+        const { justify: _j, postprocess: _p, ...gen } = i;
+        result = await generate({ ...gen, provider: p }, { workspace: ctx.workspace });
+        break;
+      } catch (e) {
+        if (e instanceof ProviderExhausted) {
+          markExhausted(paths.providers, p, { remaining_balance: e.remaining_balance, reason: e.message });
+          noteCredits(ctx, p, e.remaining_balance ?? 0, "exhausted");
+          exhausted.push(p);
+          continue;
+        }
+        if (e instanceof ChargedFailure) {
+          countGeneration(paths.gallery, i.out); // it billed
+          return { content: errText(e), is_error: true, cost_micro_usd: e.cost_micro_usd };
+        }
+        return { content: errText(e), is_error: true };
+      }
+    }
+    if (!result) {
+      const all = PROVIDERS.every((p) => exhausted.includes(p));
+      return {
+        content: JSON.stringify({
+          exhausted: all ? "all" : exhausted, fallback: "procedural", cost_micro_usd: 0, notes,
+          next: "Take the fallback ladder's floor: simple shapes animated in engine (bob, flash, squash-and-stretch, particles). Log it with log_decision (topic art.provider_fallback). This is a guaranteed outcome, not a failure.",
+        }),
+        cost_micro_usd: 0,
+      };
+    }
+    const generation = countGeneration(paths.gallery, i.out);
+    const remaining = typeof result.metadata.remaining_balance === "number"
+      ? (result.metadata.remaining_balance as number)
+      : await providerBalance(result.provider, {}).catch(() => null);
+    credits = noteCredits(ctx, result.provider, remaining, "generation");
+    const extra = { generation: `${generation} of ${1 + MAX_REGENERATIONS}`, credits, ...(result.provider !== requested ? { fallback_from: requested } : {}), ...(notes.length ? { notes } : {}) };
     try {
       let postprocess: Record<string, unknown> | null = null;
       if (i.postprocess && (i.postprocess.snap || i.postprocess.lock || i.postprocess.outline))
         postprocess = await applyArtPostprocess(ctx.workspace, i.postprocess, result.images);
-      return { content: JSON.stringify({ ...result, postprocess }), cost_micro_usd: result.cost_micro_usd };
+      return { content: JSON.stringify({ ...result, postprocess, ...extra }), cost_micro_usd: result.cost_micro_usd };
     } catch (e) {
       // generation succeeded and was paid; postprocess failing must not erase the charge
-      return { content: `generated ${result.images.join(", ")} but postprocess failed: ${errText(e)}`, is_error: true, cost_micro_usd: result.cost_micro_usd };
+      return { content: `generated ${result.images.join(", ")} but postprocess failed: ${errText(e)} ${JSON.stringify(extra)}`, is_error: true, cost_micro_usd: result.cost_micro_usd };
     }
+  },
+};
+
+const artQuote: ToolImpl = {
+  description:
+    "Free cost check before a batch: Retro Diffusion's check_cost dry run (generates and charges nothing) or PixelLab's price table, " +
+    "times count, with the remaining balance. Run it before any batch of art_generate calls.",
+  input: z
+    .object({
+      provider: providerEnum,
+      prompt: z.string().min(1).max(2000),
+      width: z.number().int().min(12).max(792),
+      height: z.number().int().min(12).max(792),
+      count: z.number().int().min(1).max(200).describe("how many calls the batch will make"),
+      reference: z.string().min(1).optional(),
+      frames: z.number().int().optional(),
+      style: z.string().max(120).optional(),
+    })
+    .strict(),
+  async run({ count, ...i }, ctx) {
+    const paths = statePaths(ctx.runsDir);
+    if (isExhausted(paths.providers, i.provider)) return { content: JSON.stringify({ provider: i.provider, exhausted: true, per_call_usd: null, total_usd: null }) };
+    try {
+      const q = await providerQuote({ ...i, out: "quote.png" }, { workspace: ctx.workspace });
+      const credits = noteCredits(ctx, q.provider, q.remaining_balance, "quote");
+      const total = Math.round(q.per_call_usd * count * 1e6) / 1e6;
+      return { content: JSON.stringify({ ...q, count, total_usd: total, affordable: q.remaining_balance === null ? null : q.remaining_balance >= total, credits }) };
+    } catch (e) {
+      if (e instanceof ProviderExhausted) {
+        markExhausted(paths.providers, i.provider, { remaining_balance: e.remaining_balance, reason: e.message });
+        noteCredits(ctx, i.provider, e.remaining_balance ?? 0, "exhausted");
+      }
+      return { content: errText(e), is_error: true };
+    }
+  },
+};
+
+const artAnchorWinner: ToolImpl = {
+  description: "Record which provider won an anchor's bake-off. art_generate then defaults to it for every asset that references that anchor.",
+  input: z.object({ anchor: z.string().min(1).describe("workspace-relative anchor PNG, as you pass it to reference"), provider: providerEnum, why: z.string().min(3).max(300) }).strict(),
+  async run({ anchor, provider, why }, ctx) {
+    recordAnchorWinner(statePaths(ctx.runsDir).gallery, anchor, provider, ctx.run_id ?? "unknown", why);
+    return { content: JSON.stringify({ anchor, provider, recorded: true }) };
+  },
+};
+
+const artProviders: ToolImpl = {
+  description: "Read-only: which providers are exhausted, the latest reported balance of each, anchor winners, and per-asset generation counts.",
+  input: z.object({}).strict(),
+  async run(_i, ctx) {
+    const paths = statePaths(ctx.runsDir);
+    const credits = readCredits(paths.credits);
+    const latest = Object.fromEntries(PROVIDERS.map((p) => [p, credits.filter((c) => c.provider === p).at(-1) ?? null]));
+    const g = readGallery(paths.gallery);
+    return { content: clip(JSON.stringify({ providers: readProviders(paths.providers), latest_balance: latest, anchors: g.anchors, generations: g.generations, max_regenerations: MAX_REGENERATIONS })) };
   },
 };
 
@@ -1197,7 +1334,7 @@ export const IMPLS: Record<CapabilityName, Record<string, ToolImpl>> = {
   workspace_write: { workspace_write: workspaceWrite },
   game_repo: gameRepoTools,
   art_tools: artTools,
-  art_generate: { art_generate: artGenerate },
+  art_generate: { art_generate: artGenerate, art_quote: artQuote, art_anchor_winner: artAnchorWinner, art_providers: artProviders },
   itch_push: { itch_push: itchPush },
   itch_status: { itch_status: itchStatus },
   email_send: { email_send: emailSend },

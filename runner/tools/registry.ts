@@ -23,10 +23,10 @@ export const CAPABILITIES = {
     note: "Local tools over the run workspace and the game clone. Hosted setup not done.",
   },
   art_generate: {
-    summary: "Paid pixel-art generation (tools/art/generate.ts): PixelLab or Retro Diffusion, prompt + size + optional reference/seed/frames, PNGs into the workspace, optional deterministic postprocess",
+    summary: "Paid pixel-art generation (tools/art/generate.ts): PixelLab or Retro Diffusion, prompt + size + optional reference/seed/frames, PNGs into the workspace, optional deterministic postprocess. Credit-aware (tools/art/credits.ts): exhausted providers fall back, then a procedural floor; anchor winners, regeneration cap, free quotes (art_quote), balances",
     naive: ["bash"],
     local: true,
-    note: "Spend is budget-capped like inference (spec budgets + runner caps), not per-call approved. Keys only from env; hosted setup not done.",
+    note: "Spend is budget-capped like inference (spec budgets + runner caps), not per-call approved. Free-trial credits, never purchased: state in runs/art-providers.json, art-credits.jsonl, art-gallery.json. Keys only from env; hosted setup not done.",
   },
   gap_map: {
     summary: "Embedding map of the Steam catalog: open regions near proven demand; probe a description (tools/gapmap)",

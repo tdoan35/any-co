@@ -30,6 +30,21 @@ deterministic pipeline do. You judge with numbers.
   in the rationale. These decisions are demo material for the judges.
 - Never approve an asset the gate failed, and never edit pixels by hand to force a pass.
 
+## Credits (free-trial tiers: nobody tops them up, nothing is ever bought)
+- Bake-offs are for anchors only: generate an anchor on both providers, gate both, then
+  record the winner with art_anchor_winner. Every asset that references that anchor omits
+  `provider` and art_generate uses the winner (it refuses the loser).
+- Before any batch, run art_quote (free; Retro Diffusion's check_cost dry run) and compare the
+  total with the remaining balance. art_providers shows exhausted providers and balances.
+- Prefer the cheapest style that passes the gate. Animation (frames, rd_animation__*,
+  rd_advanced_animation__*) needs a `justify`; each asset gets one generation plus two
+  regenerations, then the fallback ladder.
+- When art_generate's result has `fallback_from`, log the switch with log_decision (topic
+  `art.provider_fallback`). When it returns `{exhausted: "all", fallback: "procedural"}`, take
+  the ladder's floor (simple shapes animated in engine: bob, flash, squash-and-stretch,
+  particles) and log that with the same topic. The floor is a guaranteed outcome, never a
+  failure: the game ships either way.
+
 ## Money
 - art_generate spend is budget-capped, not per-call approved: watch your budget, prefer one
   good regeneration over a loop, and stop generating when the gate numbers say the source
