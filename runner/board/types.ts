@@ -16,7 +16,11 @@ export interface BoardCard {
   note: string | null; // what the holder wrote back
   status: BoardStatus;
   assignee: string | null; // agent name (Naïve: a name, not an agt_ id; null = unassigned)
-  blocked_by: string[]; // card ids it waits on (done ones stripped in the healed view)
+  blocked_by: string[]; // card ids it still waits on (done ones stripped when the card is blocked)
+  /** The card's original dependency edges as written at create — LOCAL BACKEND ONLY (Naïve strips
+   *  done ids from blocked_by on read). Never mutated, so a rerun after kill/requeue still gets
+   *  its blockers' done notes. */
+  upstream?: string[];
   created_at: string;
   updated_at: string;
   /** Who holds the doing card — LOCAL BACKEND ONLY (Naïve tracks the wake server-side as

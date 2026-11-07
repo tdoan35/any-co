@@ -59,6 +59,14 @@ export class LocalBoard implements Board {
       } else if (e.t === "updated") {
         const c = s.cards.get(e.id);
         if (!c) continue;
+        // the fold is the source of truth (N2): done is terminal, and a claim that did not win —
+        // the card already held, or not claimable (todo, or healable blocked) when it landed — is
+        // ignored entirely, so a writer stalled between load and append cannot reopen a card.
+        if (c.status === "done") continue;
+        if (e.claim) {
+          const healable = c.status === "blocked" && c.blocked_by.length > 0 && c.blocked_by.every((id) => s.cards.get(id)?.status === "done");
+          if (c.claim || !(c.status === "todo" || healable)) continue;
+        }
         if (e.status !== undefined) c.status = e.status;
         if (e.note !== undefined) c.note = e.note;
         if (e.body !== undefined) c.body = e.body;
@@ -66,7 +74,7 @@ export class LocalBoard implements Board {
         if (e.blocked_by !== undefined) c.blocked_by = e.blocked_by;
         // claims are first-wins in file order (the re-fold/nonce pattern from tools/approvals):
         // two writers may both append; only the one whose nonce stuck holds the card.
-        if (e.claim && !c.claim) c.claim = e.claim;
+        if (e.claim) c.claim = e.claim;
         if (e.status !== undefined && e.status !== "doing") c.claim = null;
         c.updated_at = e.at;
       } else if (e.t === "commented") {
@@ -105,6 +113,7 @@ export class LocalBoard implements Board {
       status: c.status ?? (c.blocked_by?.length ? "blocked" : "todo"),
       assignee: c.assignee ?? null,
       blocked_by: c.blocked_by ?? [],
+      upstream: c.blocked_by ?? [],
       created_at: now,
       updated_at: now,
     };
@@ -156,7 +165,7 @@ export class LocalBoard implements Board {
       raw.claim = null;
       // a block keeps only OPEN blockers (R1): the done ones never explain a failure, and
       // leaving them in lets heal-on-read reopen a card the dispatcher just blocked.
-      if (patch.status === "blocked" || patch.status === "todo") {
+      if (patch.status === "blocked") {
         raw.blocked_by = raw.blocked_by.filter((id) => s.cards.get(id)?.status !== "done");
       }
     }

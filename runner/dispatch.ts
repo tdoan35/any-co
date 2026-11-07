@@ -2,7 +2,7 @@
 // twin of Naïve's board clock. Same rules the hosted clock applies, so the board reads the same
 // on both backends: one doing card per assignee, blocked cards wait, done needs a note.
 // scripts/studio-loop.ts is the CLI (`npm run studio`); the logic lives here so tests drive it.
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import path from "node:path";
 import { RUNS_DIR, stamp, runAgent, denyAll, type Approver, type RunResult } from "./run.ts";
@@ -10,7 +10,7 @@ import { killSwitchOn } from "./spend.ts";
 import type { AgentSpec } from "./spec.ts";
 import type { Provider } from "./types.ts";
 import type { NaiveClient } from "./providers.ts";
-import type { Board, BoardCard } from "./board/index.ts";
+import { BoardError, type Board, type BoardCard } from "./board/index.ts";
 
 export interface DispatchOptions {
   board: Board;
@@ -59,23 +59,38 @@ export interface StudioLock {
 export function acquireStudioLock(runsDir: string): StudioLock {
   mkdirSync(runsDir, { recursive: true });
   const file = path.join(runsDir, "studio.lock");
-  if (existsSync(file)) {
-    let refusal: string | null = null;
+  const mine = JSON.stringify({ pid: process.pid, host: hostname(), at: new Date().toISOString() });
+  // create-exclusive (N4): two loops started at the same instant cannot both pass a check-then-write
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const held = JSON.parse(readFileSync(file, "utf8")) as { pid?: unknown; host?: unknown; at?: unknown };
+      writeFileSync(file, mine, { flag: "wx" });
+      return { file, release: () => { try { rmSync(file); } catch { /* already gone */ } } };
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    }
+    let refusal: string | null = null;
+    let staleText = "";
+    try {
+      staleText = readFileSync(file, "utf8");
+      const held = JSON.parse(staleText) as { pid?: unknown; host?: unknown };
       const pid = typeof held.pid === "number" ? held.pid : NaN;
       const host = typeof held.host === "string" ? held.host : "";
       if (host && host !== hostname()) refusal = `pid ${pid} on ${host}`;
       else if (Number.isFinite(pid) && pidAlive(pid)) refusal = `pid ${pid} on this host`;
     } catch {
-      /* unreadable lock: stale */ 
+      /* unreadable or vanished lock: stale */
     }
-    if (refusal) {
-      throw new Error(`another studio loop holds ${file} (${refusal}); refusing to start. If it is dead, remove the file.`);
-    }
+    if (refusal) throw new Error(`another studio loop holds ${file} (${refusal}); refusing to start. If it is dead, remove the file.`);
+    // stale: move it aside (rename is atomic — of two takers only one moves the stale file), and
+    // check we moved the stale lock, not a fresh one another taker just wrote; then retry wx.
+    const grave = `${file}.stale-${process.pid}-${attempt}`;
+    try { renameSync(file, grave); } catch { continue; }
+    let moved = "";
+    try { moved = readFileSync(grave, "utf8"); } catch { /* gone */ }
+    if (moved !== staleText) { try { renameSync(grave, file); } catch { /* best effort */ } continue; }
+    try { rmSync(grave); } catch { /* already gone */ }
   }
-  writeFileSync(file, JSON.stringify({ pid: process.pid, host: hostname(), at: new Date().toISOString() }));
-  return { file, release: () => { try { rmSync(file); } catch { /* already gone */ } } };
+  throw new Error(`could not take ${file}: another studio loop is starting at the same time`);
 }
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 /** The task handed to an agent: the card, plus what its finished blockers produced. */
@@ -162,7 +177,16 @@ export class Dispatcher {
         skipped.push(`${card.id}: waits on ${open.join(", ")}`);
         continue;
       }
-      await this.start(card);
+      try {
+        await this.start(card);
+      } catch (e) {
+        if (e instanceof BoardError && (e.code === "already_claimed" || e.code === "already_working")) {
+          this.opts.log?.(`card ${card.id}: claim refused (${e.code}): ${e.message}; skipping`);
+          skipped.push(`${card.id}: claim refused (${e.code})`);
+          continue;
+        }
+        throw e;
+      }
       started++;
     }
     return { started, skipped, killed: false };
@@ -176,7 +200,8 @@ export class Dispatcher {
     const runId = `${stamp()}-${spec.name}`;
     await board.update(card.id, { status: "doing", claim: { pid: process.pid, host: hostname(), run_id: runId } });
     await board.comment(card.id, `dispatcher: claimed for local run ${runId}`, "dispatcher");
-    const blockers = await Promise.all(card.blocked_by.map((id) => board.get(id)));
+    // upstream = the original edges (N1): blocked_by loses done ids on a block, upstream never does
+    const blockers = await Promise.all((card.upstream ?? card.blocked_by).map((id) => board.get(id)));
     const task = cardTask(card, blockers);
     this.opts.log?.(`▶ ${spec.name} on card ${card.id}: ${card.title}`);
     const done = this.run(spec, card, task, runId);

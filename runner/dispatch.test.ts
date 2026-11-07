@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,7 +9,8 @@ import { loadAgent } from "./load.ts";
 import { FakeProvider } from "./providers.ts";
 import { Dispatcher, acquireStudioLock } from "./dispatch.ts";
 import { hostname } from "node:os";
-import type { Board } from "./board/index.ts";
+import { BoardError, type Board } from "./board/index.ts";
+import type { AgentSpec } from "./spec.ts";
 import { LocalBoard } from "./board/local.ts";
 import type { ModelReply, Provider, ToolUseBlock } from "./types.ts";
 import { TOOL_INDEX } from "./tools/impl.ts";
@@ -319,4 +321,105 @@ test("R5: the dispatcher claims with a comment, not a note", async () => {
   await d.wait();
   assert.equal((await board.get(card.id)).status, "done");
   assert.match((await board.get(card.id)).note!, /^done: run /);
+});
+
+test("N1: a card requeued after a kill keeps its upstream notes in the rerun task", async () => {
+  const runsDir = tmpDir();
+  const board = new LocalBoard(path.join(runsDir, "board.jsonl"));
+  const specs = new Map([
+    ["alpha-agent", await loadAgent("alpha-agent", FIX)],
+    ["beta-agent", await loadAgent("beta-agent", FIX)],
+  ]);
+  const tasks: string[] = [];
+  const gate = Promise.withResolvers<void>();
+  let betaRuns = 0;
+  const provider = (s: AgentSpec): Provider => {
+    if (s.name === "alpha-agent") {
+      const submit: ToolUseBlock = { type: "tool_use", id: "a1", name: "submit_result", input: { answer: "UPSTREAM-RESULT" } };
+      return new FakeProvider([{ content: [submit] }]);
+    }
+    const run = ++betaRuns;
+    return {
+      label: "beta",
+      async complete(req): Promise<ModelReply> {
+        tasks.push(String(req.messages.at(-1)?.content));
+        if (run === 1) {
+          await gate.promise; // run 1 parks, then answers without submitting: the runner's next turn sees KILL
+          return { content: [{ type: "text", text: "thinking" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 }, cost_micro_usd: 0, request_id: "b1", model: "beta" };
+        }
+        return { content: [{ type: "tool_use", id: `b${run}`, name: "submit_result", input: { answer: "ok" } }], stop_reason: "tool_use", usage: { input_tokens: 1, output_tokens: 1 }, cost_micro_usd: 0, request_id: `b${run}`, model: "beta" };
+      },
+    };
+  };
+  const d = new Dispatcher({ board, specs, provider, runsDir });
+  const a = await board.create({ title: "Upstream", assignee: "alpha-agent" });
+  const b = await board.create({ title: "Downstream", assignee: "beta-agent", blocked_by: [a.card.id] });
+  await d.pass();
+  await d.wait(); // alpha done
+  await d.pass(); // beta run 1 in flight
+  writeFileSync(path.join(runsDir, "KILL"), "");
+  gate.resolve();
+  await d.wait(); // killed at its next turn -> requeued to todo
+  assert.equal((await board.get(b.card.id)).status, "todo");
+  rmSync(path.join(runsDir, "KILL"));
+  await d.pass();
+  await d.wait(); // run 2
+  assert.equal((await board.get(b.card.id)).status, "done");
+  assert.equal(tasks.length, 2);
+  for (const t of tasks) assert.match(t, /UPSTREAM-RESULT/); // both runs saw the upstream note
+});
+
+test("N2: the fold ignores a stale claim landing after done (done is terminal)", async () => {
+  const file = path.join(tmpDir(), "board.jsonl");
+  const b = new LocalBoard(file);
+  const { card } = await b.create({ title: "Finished", assignee: "alpha-agent" });
+  await b.update(card.id, { status: "doing", claim: { pid: 1, host: "h", run_id: "won" } });
+  await b.update(card.id, { status: "done", note: "finished" });
+  // a writer that loaded the card while todo appends its claim late
+  appendFileSync(file, JSON.stringify({ t: "updated", at: new Date().toISOString(), id: card.id, status: "doing", claim: { nonce: "late", pid: 2, host: "h", run_id: "late", at: new Date().toISOString() } }) + "\n");
+  const seen = await new LocalBoard(file).get(card.id);
+  assert.equal(seen.status, "done");
+  assert.equal(seen.claim, null);
+  // and a losing claim on a still-doing card never replaces the winner
+  const { card: c2 } = await b.create({ title: "Held" });
+  await b.update(c2.id, { status: "doing", claim: { pid: 3, host: "h", run_id: "first" } });
+  appendFileSync(file, JSON.stringify({ t: "updated", at: new Date().toISOString(), id: c2.id, status: "doing", claim: { nonce: "loser", pid: 4, host: "h", run_id: "second", at: new Date().toISOString() } }) + "\n");
+  assert.equal((await new LocalBoard(file).get(c2.id)).claim?.run_id, "first");
+});
+
+test("N3: a refused claim skips the card instead of crashing the pass", async () => {
+  const runsDir = tmpDir();
+  const real = new LocalBoard(path.join(runsDir, "board.jsonl"));
+  const specs = new Map([["alpha-agent", await loadAgent("alpha-agent", FIX)]]);
+  const refusing: Board = {
+    create: (c) => real.create(c),
+    get: (id) => real.get(id),
+    list: () => real.list(),
+    update: async (id, patch) => {
+      if (patch.status === "doing") throw new BoardError("already_claimed", "another dispatcher got it");
+      return real.update(id, patch);
+    },
+    comment: (id, body, author) => real.comment(id, body, author),
+    comments: (id) => real.comments(id),
+  };
+  const d = new Dispatcher({ board: refusing, specs, provider: () => scripted(), runsDir });
+  const { card } = await real.create({ title: "Contested", assignee: "alpha-agent" });
+  const res = await d.pass();
+  assert.equal(res.started, 0);
+  assert.ok(res.skipped.some((s) => s.startsWith(card.id) && /already_claimed/.test(s)));
+});
+
+test("N4: two lock takers at once — exactly one wins, including over a stale lock", async () => {
+  for (const stale of [false, true]) {
+    const runsDir = tmpDir();
+    if (stale) writeFileSync(path.join(runsDir, "studio.lock"), JSON.stringify({ pid: 99999999, host: hostname(), at: "2026-11-07T00:00:00Z" }));
+    const script = `import { acquireStudioLock } from ${JSON.stringify(path.join(path.dirname(fileURLToPath(import.meta.url)), "dispatch.ts"))};
+      try { acquireStudioLock(${JSON.stringify(runsDir)}); console.log("WON"); setTimeout(() => {}, 400); } catch { console.log("LOST"); }`;
+    const outs = await Promise.all(
+      Array.from({ length: 6 }, () => new Promise<string>((resolve) => {
+        execFile(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], (_e, out) => resolve(String(out).trim()));
+      })),
+    );
+    assert.equal(outs.filter((o) => o === "WON").length, 1, `stale=${stale}: ${outs.join(",")}`);
+  }
 });
