@@ -1,5 +1,5 @@
 // Local implementations of the capabilities in registry.ts.
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { existsSync, lstatSync, readdirSync, realpathSync } from "node:fs";
@@ -658,13 +658,43 @@ const gameExec: ToolImpl = {
       const { promise, resolve } = Promise.withResolvers<{ out: string; err: string; code: number }>();
       // ANYCO_AGENT lets the game repo's pre-receive hook enforce the single-merger rule (tools/gamerepo/new-game.ts).
       const env = { ...process.env, ANYCO_AGENT: ctx.agent ?? "unknown" };
-      execFile(cmd, args, { cwd, env, timeout: (timeout_s ?? 120) * 1000, maxBuffer: 32 * 1024 * 1024 }, (error, stdout, stderr) => {
-        resolve({ out: String(stdout), err: String(stderr), code: typeof error?.code === "number" ? error.code : error ? 1 : 0 });
-      });
+      // Own process group + our own timeout: execFile's timeout only SIGTERMs the direct child, so a build.sh that
+      // started Godot (or a Godot that ignores SIGTERM) left orphans running for hours. Kill the whole group instead.
+      const limitMs = (timeout_s ?? 120) * 1000;
+      const MAX_OUT = 32 * 1024 * 1024;
+      let timedOut = false;
+      let settled = false;
+      const out: Buffer[] = [];
+      const err: Buffer[] = [];
+      let outBytes = 0;
+      const child = spawn(cmd, args, { cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+      const take = (sink: Buffer[]) => (b: Buffer) => { if (outBytes < MAX_OUT) { sink.push(b); outBytes += b.length; } };
+      child.stdout?.on("data", take(out));
+      child.stderr?.on("data", take(err));
+      const finish = (code: number) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ out: Buffer.concat(out).toString("utf8"), err: Buffer.concat(err).toString("utf8"), code });
+      };
+      child.on("error", (e) => { err.push(Buffer.from(String(e.message))); finish(127); });
+      child.on("close", (code, signal) => finish(typeof code === "number" ? code : signal ? 128 : 1));
+      const killGroup = (sig: NodeJS.Signals) => {
+        try { if (child.pid) process.kill(-child.pid, sig); } catch { /* group already gone */ }
+      };
+      const timer = setTimeout(() => {
+        timedOut = true;
+        killGroup("SIGTERM");
+        setTimeout(() => killGroup("SIGKILL"), 2000).unref();
+        // a grandchild holding the pipes open must not hold the agent: give up waiting 3 s after the kill
+        setTimeout(() => finish(124), 3000).unref();
+      }, limitMs);
       const r = await promise;
+      killGroup("SIGKILL"); // nothing from this call outlives it (background children of a finished command included)
+      if (timedOut) r.err = `${r.err}\n(timed out after ${limitMs / 1000} s; the command and its children were killed)`;
       return {
-        content: clip(`exit ${r.code}\n${r.out}${r.err ? `\nstderr:\n${r.err}` : ""}`),
-        is_error: r.code !== 0,
+        content: clip(`exit ${timedOut ? "timeout" : r.code}\n${r.out}${r.err ? `\nstderr:\n${r.err}` : ""}`),
+        is_error: timedOut || r.code !== 0,
       };
     } catch (e) {
       return { content: errText(e), is_error: true };
