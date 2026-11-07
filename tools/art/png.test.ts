@@ -282,3 +282,14 @@ test("rejects deflate bombs via the inflate output cap", () => {
   const bomb = Buffer.concat([SIG, chunk("IHDR", ihdr), chunk("IDAT", new Uint8Array(deflateSync(raw))), chunk("IEND", new Uint8Array(0))]);
   assert.throws(() => decodePng(bomb), /inflate/i);
 });
+
+test("the inflate cap comes from IHDR: a small image with an oversized IDAT stream is cut at height × (stride + 1)", () => {
+  const ihdr = new Uint8Array(13);
+  const dv = new DataView(ihdr.buffer);
+  dv.setUint32(0, 2);
+  dv.setUint32(4, 2); // 2x2 RGBA: expected 2 × (8 + 1) = 18 bytes
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  const oversized = Buffer.concat([SIG, chunk("IHDR", ihdr), chunk("IDAT", new Uint8Array(deflateSync(Buffer.alloc(1024 * 1024)))), chunk("IEND", new Uint8Array(0))]);
+  assert.throws(() => decodePng(oversized), /inflate/i);
+});
