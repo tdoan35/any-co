@@ -31,6 +31,17 @@ The game creates `qa/` at startup and owns these files in it:
 Polling is file-content based (`id` compare), not mtime: harnesss may rewrite the file
 in the same tick.
 
+**Startup and readiness.** At startup the game clears its previous outputs (truncates
+`qa/events.jsonl`, removes `qa/state.json`, `qa/run_summary.json` and `qa/shot-*.png`),
+writes `qa/control.json` as `{"id": 0, "cmd": "noop"}`, and then writes
+`qa/ack.json` as `{"id": 0, "ok": true, "ready": true}`. That ack is the ready signal: the
+harness sends its first command only after it, and the game never rewrites
+`qa/control.json` after it. Both sides write these files atomically (temp + rename).
+
+**When the ack is written.** The ack means the command has *finished*: for `step`, after
+the N frames have run and the game is paused again; for `dump_state` and `screenshot`,
+after the file is complete on disk; for `quit`, after `run_summary.json` is written.
+
 ## Commands
 
 ```json
