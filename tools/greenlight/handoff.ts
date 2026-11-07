@@ -114,6 +114,18 @@ export function pickTask(loopDir: string): string {
   return lines.join("\n");
 }
 
+/**
+ * The Chair's pick as the design task embeds it: the real Chair output keeps `rejected` and
+ * `risks_to_watch` at the top level next to `pick`; the doc checks need them on the pick.
+ */
+export function embeddedPick(chairOut: { pick: Record<string, unknown>; rejected?: unknown; risks_to_watch?: unknown }): Record<string, unknown> {
+  return {
+    ...chairOut.pick,
+    ...(chairOut.risks_to_watch ? { risks_to_watch: chairOut.risks_to_watch } : {}),
+    ...(chairOut.rejected ? { rejected: chairOut.rejected } : {}),
+  };
+}
+
 /** Task for the Game Director's design-doc mode: everything docs/design.md must answer to. */
 export function designTask(chairDir: string, runsRoot: string = RUNS): string {
   const chairAbs = path.resolve(runsRoot, chairDir);
@@ -153,7 +165,7 @@ export function designTask(chairDir: string, runsRoot: string = RUNS): string {
     ...(chair.out.risks_to_watch ?? []).map((r: string) => `- Risk to watch: ${r}`),
     "",
     "```json",
-    JSON.stringify({ ...pick, ...(chair.out.risks_to_watch ? { risks_to_watch: chair.out.risks_to_watch } : {}) }, null, 2),
+    JSON.stringify(embeddedPick(chair.out), null, 2),
     "```",
     "",
     "# The chosen pitch (final round)",
@@ -171,6 +183,7 @@ export function designTask(chairDir: string, runsRoot: string = RUNS): string {
     `- The Must table is exactly the Chair's adopted_must items and hours (${pick.adopted_must.reduce((s: number, m: { critic_hours: number }) => s + m.critic_hours, 0)}h total, at most ${MUST_HOURS_BUDGET}h).`,
     "- The Should table holds the Chair's deferred items; the Could table is yours to propose.",
     "- The Conditions section copies the Chair's conditions verbatim.",
+    "- Conditions override item text: where a condition narrows or removes something a Must item mentions, that item's `### <item>` subsection under Systems follows the condition and says so in one line starting \"Per condition:\" — the Must table wording never changes.",
     "- Nothing the Chair rejected comes back; rejected titles belong in Out of scope only as negatives.",
     "",
   ].join("\n");

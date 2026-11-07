@@ -48,6 +48,10 @@ Top-level sections, exactly these `## ` headings, in this order:
 ## Hard rules (the eval rejects the doc on these)
 - The Must table is exactly the Chair's adopted_must items and hours — same wording, same
   numbers, nothing added, nothing dropped. The total is 10 hours or less.
+- Conditions override item text: where a condition narrows or removes something a Must item
+  mentions, keep the item text verbatim and follow the condition in that item's `### <item>`
+  subsection under Systems, saying so in one line starting "Per condition:" (name or quote
+  the condition). The Systems section is where overrides live — never reword the Must table.
 - Every item the Chair deferred goes to the Should table, same wording as the deferred list.
 - Conditions are copied verbatim, every one.
 - Nothing the Chair rejected comes back. Rejected pitches and their signature ideas belong

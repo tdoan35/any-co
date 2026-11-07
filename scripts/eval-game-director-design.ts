@@ -4,6 +4,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { checkDesignDoc, REQUIRED_SECTIONS, docAtCommit, sectionText, type ChairPick, type DesignManifest } from "../tools/greenlight/design.ts";
+import { embeddedPick, RUNS } from "../tools/greenlight/handoff.ts";
 import { read as readLedger, type DecisionEntry } from "../tools/ledger/ledger.ts";
 
 const dir = process.argv[2];
@@ -31,6 +32,17 @@ let checks = 0, ok = 0;
 const issues: string[] = [];
 const check = (cond: boolean, msg: string) => { checks++; if (cond) ok++; else issues.push(msg); };
 
+// The task names the Chair run in its Refs line; re-read that run's output so a hand-edited task
+// can't move the goalposts.
+const chairRef = task.match(/^Refs: chair run (\S+?),/m)?.[1];
+const chairOutPath = chairRef ? path.join(RUNS, chairRef, "output.json") : "";
+if (chairRef && existsSync(chairOutPath)) {
+  const fresh = embeddedPick(JSON.parse(readFileSync(chairOutPath, "utf8")));
+  check(JSON.stringify(fresh) === JSON.stringify(pick), `the task's embedded pick differs from chair run ${chairRef}'s output.json`);
+} else {
+  check(false, `chair run ${chairRef ?? "(no Refs line)"} not found under runs/; cannot verify the embedded pick`);
+}
+
 check(out.branch === "agent/game-director-design", `branch "${out.branch}" is not the agent branch game_clone creates`);
 check(out.doc_path === "docs/design.md", `doc_path "${out.doc_path}" is not docs/design.md`);
 
@@ -40,7 +52,7 @@ if (!existsSync(clone)) {
   issues.push("no game clone at workspace/game; run game_clone in the run");
   checks++;
 } else {
-  const at = docAtCommit(clone, String(out.commit ?? ""), String(out.doc_path ?? "docs/design.md"));
+  const at = docAtCommit(clone, String(out.commit ?? ""), String(out.doc_path ?? "docs/design.md"), String(out.branch ?? "agent/game-director-design"));
   check(at.doc !== undefined, `cannot read the doc at commit ${out.commit} in the clone: ${at.error}`);
   doc = at.doc ?? "";
 }
