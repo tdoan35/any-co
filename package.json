@@ -31,6 +31,7 @@
     "studio": "node --env-file-if-exists=.env --import tsx scripts/studio-loop.ts",
     "approvals": "node --import tsx tools/approvals/approvals.ts",
     "eval:greenlight-chair": "node --env-file-if-exists=.env --import tsx scripts/eval-greenlight-chair.ts",
+    "eval:game-director-design": "node --env-file-if-exists=.env --import tsx scripts/eval-game-director-design.ts",
     "new-game": "node --import tsx tools/gamerepo/new-game.ts",
     "art": "node --import tsx tools/art/art.ts",
     "eval:art-director": "node --env-file-if-exists=.env --import tsx scripts/eval-art-director.ts",

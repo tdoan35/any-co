@@ -1,12 +1,12 @@
 // Greenlight hand-offs between agents, as task text, plus code-computed Critic verdicts.
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { verdict, type Verdict } from "./feasibility.ts";
+import { MUST_HOURS_BUDGET, verdict, type Verdict } from "./feasibility.ts";
 
-const RUNS = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "..", "runs");
-const readRun = (id: string) => ({
-  run: JSON.parse(readFileSync(path.join(RUNS, id, "run.json"), "utf8")),
-  out: JSON.parse(readFileSync(path.join(RUNS, id, "output.json"), "utf8")),
+export const RUNS = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "..", "runs");
+const readRun = (id: string, runsRoot: string = RUNS) => ({
+  run: JSON.parse(readFileSync(path.join(runsRoot, id, "run.json"), "utf8")),
+  out: JSON.parse(readFileSync(path.join(runsRoot, id, "output.json"), "utf8")),
 });
 
 export interface Judged extends Partial<Verdict> {
@@ -112,4 +112,79 @@ export function pickTask(loopDir: string): string {
   }
   lines.push("# Pitches", "", "```json", JSON.stringify(d.out.pitches, null, 2), "```", "", "# Original brief", "", readFileSync(loop.brief, "utf8"));
   return lines.join("\n");
+}
+
+/**
+ * The Chair's pick as the design task embeds it: the real Chair output keeps `rejected` and
+ * `risks_to_watch` at the top level next to `pick`; the doc checks need them on the pick.
+ */
+export function embeddedPick(chairOut: { pick: Record<string, unknown>; rejected?: unknown; risks_to_watch?: unknown }): Record<string, unknown> {
+  return {
+    ...chairOut.pick,
+    ...(chairOut.risks_to_watch ? { risks_to_watch: chairOut.risks_to_watch } : {}),
+    ...(chairOut.rejected ? { rejected: chairOut.rejected } : {}),
+  };
+}
+
+/** Task for the Game Director's design-doc mode: everything docs/design.md must answer to. */
+export function designTask(chairDir: string, runsRoot: string = RUNS): string {
+  const chairAbs = path.resolve(runsRoot, chairDir);
+  const chair = readRun(path.basename(chairAbs), path.dirname(chairAbs));
+  // pickTask wrote "Refs: ... loop <name>." into the Chair's task; the loop holds the pitches.
+  const loopName = String(chair.run.task).match(/\bloop (greenlight-[A-Za-z0-9_-]+)/)?.[1];
+  if (!loopName) throw new Error(`no loop ref in the Chair run's task; expected "Refs: ... loop greenlight-..."`);
+  const loopDir = path.join(runsRoot, loopName);
+  const loop = JSON.parse(readFileSync(path.join(loopDir, "loop.json"), "utf8"));
+  const last = loop.rounds[loop.rounds.length - 1];
+  const director = readRun(last.director_run, runsRoot);
+  const pick = chair.out.pick;
+  const pitch = director.out.pitches.find((p: { working_title: string }) => p.working_title === pick.working_title);
+  if (!pitch) throw new Error(`pick "${pick.working_title}" is not among the final-round pitches in ${last.director_run}`);
+  // The Player Voice findings the pitch addressed: full sized lines from the brief. Wants are
+  // copied statements, so the brief line starts with the want; punctuation may drift, and some
+  // wants are shortened paraphrases of the brief line, so fall back to a normalized prefix match.
+  const briefPath = path.resolve(runsRoot, "..", String(loop.brief));
+  const briefLines = readFileSync(briefPath, "utf8").split("\n");
+  const norm = (s: string) => s.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  const briefWantLines = briefLines.filter((l) => /^- .+ \(\d+% of /.test(l));
+  const findings = (pitch.wants_addressed as Array<{ want: string }>).map((w) => {
+    const exact = briefWantLines.find((l) => l.startsWith(`- ${w.want} (`)) ?? briefWantLines.find((l) => norm(l).startsWith(norm(w.want)));
+    return exact ?? `- ${w.want} (sizing not found in the brief)`;
+  });
+  return [
+    "Design doc: the Greenlight Chair picked the game. Write `docs/design.md` in your game-repo clone",
+    "(game_clone → game_write → git commit on your agent branch), log the design.scope decision, and",
+    "submit the manifest. The doc's section names and the hard rules are in your instructions.",
+    `Refs: chair run ${path.basename(path.resolve(chairDir))}, loop ${loopName}, director run ${last.director_run}, brief ${loop.brief}.`,
+    "",
+    "# The Chair's decision (verbatim)",
+    "",
+    "- Pick: " + pick.working_title,
+    "- Why: " + pick.why,
+    ...pick.art_and_qa.map((a: string) => `- Art/QA: ${a}`),
+    ...(chair.out.risks_to_watch ?? []).map((r: string) => `- Risk to watch: ${r}`),
+    "",
+    "```json",
+    JSON.stringify(embeddedPick(chair.out), null, 2),
+    "```",
+    "",
+    "# The chosen pitch (final round)",
+    "",
+    "```json",
+    JSON.stringify(pitch, null, 2),
+    "```",
+    "",
+    "# Player Voice findings this pitch addressed (sized, from the brief)",
+    "",
+    ...findings,
+    "",
+    "# Hard rules (checked in code by the eval)",
+    "",
+    `- The Must table is exactly the Chair's adopted_must items and hours (${pick.adopted_must.reduce((s: number, m: { critic_hours: number }) => s + m.critic_hours, 0)}h total, at most ${MUST_HOURS_BUDGET}h).`,
+    "- The Should table holds the Chair's deferred items; the Could table is yours to propose.",
+    "- The Conditions section copies the Chair's conditions verbatim.",
+    "- Conditions override item text: where a condition narrows or removes something a Must item mentions, that item's `### <item>` subsection under Systems follows the condition and says so in one line starting \"Per condition:\" — the Must table wording never changes.",
+    "- Nothing the Chair rejected comes back; rejected titles belong in Out of scope only as negatives.",
+    "",
+  ].join("\n");
 }

@@ -75,6 +75,7 @@ TODO: fill in as they exist.
 - gap map: `tools/gapmap/README.md` (embed → build → render)
 - art pipeline: `npm run art -- lock|snap|outline|strip|sheet|gate ...` (`tools/art/README.md`)
 - eval Market Analyst: `npm run eval:market-analyst -- runs/<run_id>` (see `agents/market-analyst/eval/`)
+- eval Game Director design doc: `npm run eval:game-director-design -- runs/<run_id>` (design hand-off: `node --import tsx scripts/greenlight-handoff.ts --design runs/<chair-run>`)
 - kill switch: `touch runs/KILL` (remove to resume); or `STUDIO_KILL=1`
 
 ## Conventions
