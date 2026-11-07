@@ -72,6 +72,12 @@ export const CAPABILITIES = {
     local: true,
     note: "Local: per-run clone at runs/<id>/workspace/game, branch agent/<name>; only the Tech Lead merges. Hosted: the harness clones the repo into the agent's computer.",
   },
+  media_capture: {
+    summary: "Trailer/GIF/screenshot capture against docs/contracts (tools/media): stills by tick or event, engine movie mode, ffmpeg edit plans (mp4/GIF), ffprobe",
+    naive: ["bash", "read"],
+    local: true,
+    note: "Local: launches the desktop build from the run's game clone (launch file inside the clone, or GODOT_BIN); needs ffmpeg/ffprobe on PATH (FFMPEG_BIN/FFPROBE_BIN). Outputs under the workspace's media/. Hosted setup not done.",
+  },
   image_view: {
     summary: "Look at a PNG image from the workspace or game clone (art_view): the model sees the image itself, plus dimensions; optional integer upscale for tiny pixel art",
     naive: [],
