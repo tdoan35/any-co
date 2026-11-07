@@ -13,6 +13,7 @@ import type { Approver } from "../../runner/run.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const APPROVALS_FILE = process.env.STUDIO_APPROVALS_FILE ?? path.join(ROOT, "runs", "approvals.jsonl");
+
 export type ApprovalEvent =
   | { event: "requested"; id: string; ts: string; agent: string; run_id: string; tool: string; input: unknown }
   | { event: "approved" | "denied"; id: string; ts: string; who: string; note?: string; nonce: string }
@@ -108,8 +109,8 @@ function logDecision(rec: ApprovalRecord, decision: "approved" | "denied" | "exp
  *  Identity is the event's random nonce, not its timestamp: two decisions in the same millisecond
  *  are still different events, and only one of them is the file-order first. */
 function winnerOf(id: string, event: "approved" | "denied" | "expired", nonce: string, file: string): ApprovalRecord | null {
-  const first = readEvents(file).find((e): e is Extract<ApprovalEvent, { nonce: string }> => e.id === id && "nonce" in e);
-  if (first?.nonce !== nonce || first.event !== event) return null; // another process's event won
+  const first = readEvents(file).find((e): e is Extract<ApprovalEvent, { event: "approved" | "denied" | "expired" }> => e.id === id && e.event !== "requested");
+  if (first?.nonce !== nonce || first.event !== event) return null; // another process's event won — or a pre-nonce one, which always means lost
   return get(id, file) ?? null;
 }
 
@@ -139,7 +140,6 @@ function expire(id: string, file: string, ledgerFile: string): boolean {
   logDecision(rec, "expired", ts, "timeout", undefined, ledgerFile);
   return true;
 }
-
 
 /** An Approver for unattended runs: record the request, poll for a decision, expire on timeout. */
 export function queueApprover(opts: { timeoutMs: number; pollMs?: number; file?: string; ledgerFile?: string }): Approver {

@@ -158,3 +158,17 @@ test("first terminal event wins: later decide and expiry are ignored", async () 
   assert.equal(approvalsOf(readLedger(ledger)).length, 2); // only the new request's expired entry
   assert.equal(get(id, f)?.state, "approved");
 });
+
+test("a pre-nonce terminal event still wins the fold; nothing ledgers on top of it", () => {
+  const { f, ledger } = files();
+  const id = request({ agent: "a", run_id: "r", tool: "t", input: {} }, f);
+  // A terminal event written by pre-nonce code (an older CLI / a run from before the upgrade).
+  appendFileSync(f, JSON.stringify({ event: "denied", id, ts: "2026-11-07T20:00:00.000Z", who: "old-cli" }) + "\n");
+  // A later nonce-carrying decision from new code lands second and must not count itself the winner.
+  appendFileSync(f, JSON.stringify({ event: "approved", id, ts: "2026-11-07T20:00:00.500Z", who: "operator", nonce: "cafebabecafebabe" }) + "\n");
+  const rec = get(id, f);
+  assert.equal(rec?.state, "denied");
+  assert.equal(rec?.who, "old-cli"); // the fold's winner is the FIRST terminal event, nonce or not
+  assert.equal(approvalsOf(readLedger(ledger)).length, 0);
+  assert.equal(decide(id, true, "operator", undefined, f, ledger), null); // nothing left to decide, nothing ledgered
+});
