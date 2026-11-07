@@ -8,8 +8,11 @@ export default defineAgent({
   description: "Eng: implements one gameplay ticket per task in its own clone and branch; self-tests against the contracts and hands the branch to the Tech Lead.",
   dept: "eng",
   runner: "local",
-  model: "z-ai/glm-5.3",
-  budget: { cap_usd: 6, max_task_usd: 1, period: "day" },
+  model: "anthropic/claude-opus-5.5", // Naïve catalogue id, used if this agent is ever hosted
+  // Local runs go through the Neon AI gateway (OpenAI-compatible): Eng may use non-Naïve inference (AGENTS.md).
+  // Price = Anthropic list for Opus 5.5 ($4/$20 per MTok); Neon billing may differ, so spend is an estimate.
+  provider: { kind: "openai_compatible", model: "claude-opus-5-5", base_url_env: "NEON_AI_BASE_URL", api_key_env: "NEON_AI_API_KEY", usd_per_mtok: { input: 4, output: 20 } },
+  budget: { cap_usd: 40, max_task_usd: 6, period: "day" }, // Opus via Neon; one feature ticket per run
   tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow" },
   output_schema: z
     .object({
