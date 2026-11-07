@@ -264,6 +264,9 @@ const ledgerTools: Record<string, ToolImpl> = {
     async run({ limit }, ctx) {
       const all = ledgerRead(ctx.ledgerFile ?? LEDGER_FILE);
       const counts = all.reduce<Record<string, number>>((a, e) => ((a[e.kind] = (a[e.kind] ?? 0) + 1), a), {});
+      // A human approve/deny on the approval gate is a human intervention (rule 4); auto-approve and expiry are not.
+      const human = all.filter((e) => e.kind === "approval" && e.decision !== "expired" && !e.who.startsWith("auto")).length;
+      counts.intervention = (counts.intervention ?? 0) + human;
       return { content: JSON.stringify({ total: all.length, counts, recent: all.slice(-limit).reverse() }) };
     },
   },

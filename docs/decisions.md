@@ -2,6 +2,8 @@
 
 One entry per harness decision: date, decision, why. Newest first.
 
+- **2026-11-07:** Approval gate (`tools/approvals`): every `ask`-gated tool call records a request in an append-only queue `runs/approvals.jsonl` (`STUDIO_APPROVALS_FILE`); current state is a fold over events where the first terminal event wins. Humans decide from the terminal (`npm run approvals -- list | show | approve | deny`, deny requires a note, who="operator"); unattended runs default to `--approvals queue` (tty stays the default on a TTY) and poll for a decision until `--approval-timeout-min` (default 30) expires it. Every terminal decision is ledgered as a new `approval` entry — including `--approve-all` (who="auto (--approve-all)") and timeout (who="timeout") — and `ledger_recent` counts human approve/deny as interventions (auto/timeout are not). The studio window lists pending approvals as read-only inbox items; chat with the Studio Head stays its only write path, so later send capabilities (itch upload, outreach) plug into the same gate.
+
 - **2026-11-07:** Studio orchestration (T4): one `Board` interface (`runner/board/`) with two
   backends chosen by `STUDIO_BOARD=local|naive`. Local: append-only `runs/board.jsonl`
   (`STUDIO_BOARD_FILE`), state = fold over events, torn last line tolerated; naive:
