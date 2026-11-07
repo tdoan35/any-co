@@ -1,0 +1,46 @@
+{
+  "name": "any-co-harness",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "tsc",
+    "naive:check": "node --env-file=.env --import tsx scripts/naive-check.ts",
+    "agents": "node --env-file-if-exists=.env --import tsx scripts/agents.ts",
+    "test": "node --import tsx --test 'runner/**/*.test.ts' 'tools/**/*.test.ts' 'window/server/**/*.test.ts' && python3 tools/catalog/smoke_test.py",
+    "agent": "node --env-file-if-exists=.env --import tsx scripts/run-agent.ts",
+    "eval:market-analyst": "node --env-file-if-exists=.env --import tsx scripts/eval-market-analyst.ts",
+    "gapmap:embed": "node --env-file=.env --import tsx tools/gapmap/embed.ts",
+    "gapmap:build": "node --import tsx tools/gapmap/build.ts",
+    "gapmap:render": "node --import tsx tools/gapmap/render.ts",
+    "eval:player-voice": "node --env-file-if-exists=.env --import tsx scripts/eval-player-voice.ts",
+    "window:dev": "npm run dev -w @anyco/window",
+    "window:build": "npm run build -w @anyco/window",
+    "window:typecheck": "npm run typecheck -w @anyco/window",
+    "window:electron": "npm run electron:dev -w @anyco/window",
+    "eval:game-director": "node --env-file-if-exists=.env --import tsx scripts/eval-game-director.ts",
+    "eval:feasibility-critic": "node --env-file-if-exists=.env --import tsx scripts/eval-feasibility-critic.ts",
+    "window:server": "node --env-file-if-exists=.env --import tsx window/server/index.ts",
+    "window:check": "node --import tsx window/server/check.ts",
+    "window:live": "node window/scripts/live.mjs",
+    "window:live:electron": "node window/scripts/live.mjs electron",
+    "ledger": "node --import tsx tools/ledger/ledger.ts",
+    "eval:greenlight-chair": "node --env-file-if-exists=.env --import tsx scripts/eval-greenlight-chair.ts"
+  },
+  "dependencies": {
+    "@usenaive-sdk/managed-agents": "^0.12.1",
+    "umap-js": "^1.4.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "workspaces": [
+    "window",
+    "window/packages/*"
+  ]
+}

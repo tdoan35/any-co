@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "allowImportingTsExtensions": true,
+    "lib": ["ES2024"]
+  },
+  "include": ["./*.ts", "../../runner/**/*.ts", "../../agents/**/*.ts"],
+  "exclude": ["../../runner/**/*.test.ts"]
+}

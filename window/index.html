@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en" class="h-full antialiased">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="any-co game studio: an autonomous studio run by agents." />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="alternate icon" href="/favicon.ico" />
+    <title>any-co game studio</title>
+    <!-- Apply the saved theme before first paint (no light→dark flash). -->
+    <script>try{if(localStorage.getItem('theme')==='dark')document.documentElement.classList.add('dark')}catch(e){}</script>
+    <!-- Apply saved fonts before first paint too (see src/lib/fonts.ts). -->
+    <script>try{var f=JSON.parse(localStorage.getItem('fonts')||'{}'),s=document.documentElement.style;if(f.sans)s.setProperty('--app-font-sans',f.sans.family);if(f.mono)s.setProperty('--app-font-mono',f.mono.family)}catch(e){}</script>
+    <!-- Electron's preload has already run; reserve the title bar before first paint. -->
+    <script>if(window.fabricDesktop)document.documentElement.classList.add('desktop')</script>
+  </head>
+  <body class="min-h-full font-sans">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

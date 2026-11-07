@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+  "target": "es2023",
+  "lib": ["es2024"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["node"],
+    "allowImportingTsExtensions": true
+  },
+  "include": ["scripts/**/*.ts", "runner/**/*.ts", "agents/**/*.ts", "tools/**/*.ts"]
+}

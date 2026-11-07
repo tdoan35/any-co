@@ -1,0 +1,21 @@
+# data and studio output
+data/
+games/
+
+# secrets
+.env
+.env.*
+!.env.example
+
+# deps / build
+node_modules/
+dist/
+.venv/
+__pycache__/
+*.pyc
+
+# runtime
+runs/
+logs/
+*.log
+.DS_Store

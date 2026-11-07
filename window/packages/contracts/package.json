@@ -1,0 +1,11 @@
+{
+  "name": "@fabric/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared types and schemas. Frozen at CP-0 (tag contracts-v1); changes go through the integrator.",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "typecheck": "tsc -p tsconfig.json", "test": "vitest run" },
+  "dependencies": { "zod": "^4.6.5" },
+  "devDependencies": { "vitest": "^5.0.3" }
+}

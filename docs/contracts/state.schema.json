@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "anyco/game-state/1",
+  "title": "Game state dump",
+  "type": "object",
+  "required": ["schema_version", "scene", "tick", "run", "player", "resources", "entities", "errors"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "crashed": { "type": "boolean" },
+    "scene": { "type": "string", "minLength": 1, "maxLength": 40 },
+    "tick": { "type": "integer", "minimum": 0 },
+    "run": {
+      "type": "object",
+      "required": ["started", "over", "seed", "elapsed_ticks"],
+      "additionalProperties": false,
+      "properties": {
+        "started": { "type": "boolean" },
+        "over": { "type": "boolean" },
+        "seed": { "type": "integer" },
+        "elapsed_ticks": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "player": {
+      "type": "object",
+      "required": ["x", "y"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" }
+      },
+      "additionalProperties": { "type": ["number", "integer", "string", "boolean"] }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": { "type": "integer", "minimum": 0 }
+    },
+    "entities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "x", "y", "w", "h"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "type": { "type": "string", "minLength": 1, "maxLength": 40 },
+          "x": { "type": "number" },
+          "y": { "type": "number" },
+          "w": { "type": "number", "minimum": 0 },
+          "h": { "type": "number", "minimum": 0 }
+        },
+        "additionalProperties": { "type": ["number", "integer", "string", "boolean"] }
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["tick", "message"],
+        "properties": {
+          "tick": { "type": "integer", "minimum": 0 },
+          "message": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}
