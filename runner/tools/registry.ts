@@ -22,6 +22,12 @@ export const CAPABILITIES = {
     local: true,
     note: "Local tools over the run workspace and the game clone. Hosted setup not done.",
   },
+  art_generate: {
+    summary: "Paid pixel-art generation (tools/art/generate.ts): PixelLab or Retro Diffusion, prompt + size + optional reference/seed/frames, PNGs into the workspace, optional deterministic postprocess",
+    naive: ["bash"],
+    local: true,
+    note: "Spend is budget-capped like inference (spec budgets + runner caps), not per-call approved. Keys only from env; hosted setup not done.",
+  },
   gap_map: {
     summary: "Embedding map of the Steam catalog: open regions near proven demand; probe a description (tools/gapmap)",
     naive: ["bash", "read"],
@@ -44,6 +50,12 @@ export const CAPABILITIES = {
     naive: [],
     local: true,
     summary: "Studio decision ledger: log_decision, ledger_recent (tools/ledger)",
+  },
+  board: {
+    summary: "The studio work board: create cards (assign work, blocked_by for order), read cards, comment (runner/board)",
+    naive: ["board_read", "board_write"],
+    local: true,
+    note: "Hosted names from docs/team/board.md: board_read lists/reads, board_write does create/update/comment/assign. On the naive backend, local agent names never go in assignee (assignment wakes a hosted session); the runner keeps them in the card body header (runner/board/naive.ts).",
   },
   web_fetch: { summary: "Fetch a public URL as text", naive: ["web_fetch"], local: true },
   web_search: {

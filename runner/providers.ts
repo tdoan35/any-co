@@ -22,13 +22,24 @@ export function isTransient(e: any): boolean {
   return /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|network|UND_ERR|aborted|timeout/i.test(msg);
 }
 
+/** Rate limits (429) reset per minute on gateways like Neon's (1.2M input tokens/min per account), so they get a
+ *  slower, longer schedule than other transient errors: 15 s, 30 s, 45 s, then 60 s, up to RATE_LIMIT_TRIES tries. */
+export const RATE_LIMIT_TRIES = 8;
+export function retryWaitMs(e: unknown, attempt: number, baseMs: number): number {
+  const status = (e as any)?.status ?? (e as any)?.response?.status;
+  if (status === 429) return Math.min(15_000 * attempt, 60_000) + Math.floor(Math.random() * 1000);
+  return baseMs * 2 ** (attempt - 1) + Math.floor(Math.random() * 250);
+}
+
 export async function withRetry<T>(fn: () => Promise<T>, label: string, tries = 5, baseMs = 1000): Promise<T> {
   for (let i = 1; ; i++) {
     try {
       return await fn();
     } catch (e) {
-      if (i >= tries || !isTransient(e)) throw e;
-      const wait = baseMs * 2 ** (i - 1) + Math.floor(Math.random() * 250);
+      const status = (e as any)?.status ?? (e as any)?.response?.status;
+      const limit = status === 429 ? Math.max(tries, RATE_LIMIT_TRIES) : tries;
+      if (i >= limit || !isTransient(e)) throw e;
+      const wait = retryWaitMs(e, i, baseMs);
       console.warn(`  ${label}: transient error (${String((e as any)?.message ?? e).slice(0, 120)}), retry ${i}/${tries - 1} in ${wait} ms`);
       await sleep(wait);
     }

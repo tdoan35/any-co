@@ -13,6 +13,7 @@ import { SpendLedger, killSwitchOn, limitsFor } from "./spend.ts";
 import { wireMessages } from "./images.ts";
 import type { Block, Message, Provider, ToolDef, ToolResultBlock, ToolUseBlock } from "./types.ts";
 import type { NaiveClient } from "./providers.ts";
+import type { Board } from "./board/index.ts";
 
 export const RUNS_DIR = path.join(ROOT, "runs");
 const SUBMIT = "submit_result";
@@ -82,6 +83,8 @@ export interface RunOptions {
   resume?: ResumeState;
   /** Heartbeat refresh interval for run.json liveness (default 60 s; also refreshed per turn). */
   heartbeatMs?: number;
+  /** Studio board for board_* tools, when this run should reach it (the dispatcher passes one). */
+  board?: Board;
 }
 
 /** State carried over from a crashed run; only runner/resume.ts builds one. */
@@ -130,7 +133,7 @@ export async function runAgent(spec: AgentSpec, opts: RunOptions): Promise<RunRe
   })();
   const schema = outputJsonSchema(spec);
   const tools = toolDefs(spec, schema);
-  const ctx: ToolContext = { workspace, naive: opts.naive, agent: spec.name, run_id: runId, runsDir };
+  const ctx: ToolContext = { workspace, naive: opts.naive, agent: spec.name, run_id: runId, runsDir, board: opts.board };
 
   const transcript = path.join(dir, "transcript.jsonl");
   const event = (type: string, data: Record<string, unknown>) => {
@@ -406,7 +409,7 @@ function summarize(content: Block[]): string {
     .join(", ") || "(empty)";
 }
 
-function stamp(d = new Date()): string {
+export function stamp(d = new Date()): string {
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }

@@ -63,6 +63,8 @@ TODO: fill in as they exist.
 - studio window: `npm run window:live` (adapter + browser UI on real runs/), `npm run window:live:electron` (adapter + desktop);
   `window:dev` / `window:electron` = mock data only; `window:server` = adapter alone; `window:check` = validate real runs vs UI contract
 - test: `npm test` (spec loader + catalog smoke); `npm run typecheck`
+- run the studio: `npm run studio` — board dispatcher (local agents on due cards; `--once`, `--max-parallel N`, `--poll-s S`);
+  board backend `STUDIO_BOARD=local|naive` (see runbook.md "Start the studio")
 - agent specs: `npm run agents -- list | show <name> | validate [--remote]`
 - run one agent locally: `npm run agent -- <name> --task "..." [--model id] [--max-usd N]` → `runs/<run_id>/`
 - run toy task end to end: `npm run agent -- toy-catalog-reporter --task "Report the catalog dataset facts."`
@@ -73,6 +75,7 @@ TODO: fill in as they exist.
 - gap map: `tools/gapmap/README.md` (embed → build → render)
 - art pipeline: `npm run art -- lock|snap|outline|strip|sheet|gate ...` (`tools/art/README.md`)
 - eval Market Analyst: `npm run eval:market-analyst -- runs/<run_id>` (see `agents/market-analyst/eval/`)
+- eval Game Director design doc: `npm run eval:game-director-design -- runs/<run_id>` (design hand-off: `node --import tsx scripts/greenlight-handoff.ts --design runs/<chair-run>`)
 - kill switch: `touch runs/KILL` (remove to resume); or `STUDIO_KILL=1`
 
 ## Conventions
