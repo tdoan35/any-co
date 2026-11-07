@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { decodePng, encodePng, makeImage } from "./png.ts";
-import { ChargedFailure, generate, resolveInside } from "./generate.ts";
+import { ChargedFailure, generate, neverSent, resolveInside } from "./generate.ts";
 
 const PNG_BYTES = encodePng(makeImage(2, 2));
 const PNG_B64 = Buffer.from(PNG_BYTES).toString("base64");
@@ -327,8 +327,9 @@ test("missing keys, path escapes, and timeouts fail loudly", async () => {
 
 import { IMPLS, type ToolContext } from "../../runner/tools/impl.ts";
 
+/** Credit state (art-providers.json, art-credits.jsonl, art-gallery.json) and the ledger stay in the temp workspace, never the repo's runs/. */
 function capabilityCtx(workspace: string): ToolContext {
-  return { workspace, naive: null };
+  return { workspace, naive: null, runsDir: path.join(workspace, "_runs"), ledgerFile: path.join(workspace, "_runs", "ledger.jsonl"), run_id: "test-run", agent: "art-director" };
 }
 
 /** 32x32: a 2x block image — central 16x16 region (block cells 4..11) opaque, rest transparent. */
@@ -546,7 +547,7 @@ test("T3-fix 2: postprocess snap targets the full asset (frames × grid), not on
       async ({ baseUrl }) => {
         process.env.RETRO_DIFFUSION_BASE_URL = baseUrl;
         const out = await IMPLS.art_generate.art_generate.run(
-          { provider: "retrodiffusion", prompt: "walk cycle", width: 256, height: 64, out: "game/assets/sprites/walk.png", frames: 4, postprocess: { snap: true } },
+          { provider: "retrodiffusion", prompt: "walk cycle", width: 256, height: 64, out: "game/assets/sprites/walk.png", frames: 4, justify: "walk cycle needs real frames", postprocess: { snap: true } },
           capabilityCtx(ws),
         );
         assert.equal(out.is_error, undefined, out.content);
@@ -591,4 +592,234 @@ test("T3-fix 5: out must end in .png (multi-image naming can't collide)", async 
   );
   const r = IMPLS.art_generate.art_generate.input.safeParse({ provider: "retrodiffusion", prompt: "x", width: 16, height: 16, out: "gen/take" });
   assert.equal(r.success, false);
+});
+
+test("T3-followup 2: a submit that dies after the request was sent is charged; refused connections and 4xx are not", async () => {
+  const ws = tempWorkspace();
+  const gen = (provider: "retrodiffusion" | "pixellab", baseUrl: string, timeoutMs = 2000) =>
+    generate({ provider, prompt: "x", width: 64, height: 64, out: "a.png" }, { workspace: ws, baseUrl: { [provider]: baseUrl }, env: ENV, pollIntervalMs: 1, timeoutMs }).catch((e: unknown) => e) as Promise<Error>;
+  // socket destroyed after the body arrived (provider may have accepted the job)
+  await withServer(
+    (_req, _count, res) => res.socket?.destroy(),
+    async ({ baseUrl }) => {
+      for (const [provider, micro] of [["retrodiffusion", 180_000], ["pixellab", 20_000]] as const) {
+        const err = await gen(provider, baseUrl);
+        assert.ok(err instanceof ChargedFailure, `${provider}: expected ChargedFailure, got ${err}`);
+        assert.equal((err as ChargedFailure).cost_micro_usd, micro);
+        assert.match(err.message, /after the request was sent/);
+      }
+    },
+  );
+  // submit never answers: the deadline aborts it mid-flight
+  await withServer(
+    () => {},
+    async ({ baseUrl }) => {
+      const err = await gen("retrodiffusion", baseUrl, 100);
+      assert.ok(err instanceof ChargedFailure, String(err));
+    },
+  );
+  // 5xx answer and a 2xx without a job id: charged
+  await withServer(
+    (req, _count, res) => (req.url === "/v2/inferences" ? json(res, 503, { error: "busy" }) : json(res, 200, { usage: null })),
+    async ({ baseUrl }) => {
+      assert.ok((await gen("retrodiffusion", baseUrl)) instanceof ChargedFailure);
+      const err = await gen("pixellab", baseUrl);
+      assert.ok(err instanceof ChargedFailure && /no background_job_id/.test(err.message), String(err));
+    },
+  );
+  // 4xx answer: the provider refused the job, no charge
+  await withServer(
+    (_req, _count, res) => json(res, 401, { detail: "bad token" }),
+    async ({ baseUrl }) => {
+      const err = await gen("pixellab", baseUrl);
+      assert.ok(!(err instanceof ChargedFailure) && /rejected the request \(401\)/.test(err.message), String(err));
+    },
+  );
+  // connection refused: the request was never sent, no charge
+  const closed = await startServer(() => {});
+  const { promise, resolve } = Promise.withResolvers<void>();
+  closed.server.close(() => resolve());
+  await promise;
+  const refused = await gen("retrodiffusion", closed.baseUrl);
+  assert.ok(!(refused instanceof ChargedFailure), String(refused));
+  assert.match(refused.message, /before the request was sent.*ECONNREFUSED/);
+  // happy-eyeballs AggregateError: uncharged only if every address refused
+  assert.equal(neverSent({ cause: { errors: [{ code: "ECONNREFUSED" }, { code: "ENETUNREACH" }] } }), true);
+  assert.equal(neverSent({ cause: { errors: [{ code: "ECONNREFUSED" }, { code: "ECONNRESET" }] } }), false);
+  assert.equal(neverSent(new Error("no cause")), false);
+});
+
+// ---- T19: credit-aware generation (free-trial tiers, never buy credits) ----
+
+import { ProviderExhausted } from "./generate.ts";
+import { readCredits, readGallery, readProviders, statePaths } from "./credits.ts";
+import { runCommand } from "./art.ts";
+import { read as readLedger } from "../ledger/ledger.ts";
+
+/** One fake server for both providers; `rd`/`pl` say how each answers its submit. */
+function twoProviders(state: { rd: "ok" | "broke"; pl: "ok" | "broke"; rdRemaining?: number[] }) {
+  let rdCall = 0;
+  return (req: CapturedRequest, _count: number, res: ServerResponse) => {
+    if (req.method === "POST" && req.url === "/v2/inferences") {
+      if (req.body?.check_cost) return json(res, 200, { balance_cost: 0.18, model: "check_cost", base64_images: [], remaining_balance: 4.5 });
+      if (state.rd === "broke") return json(res, 402, { error: { code: "not_enough_balance", message: "Not enough balance.", request_id: "r" } });
+      return json(res, 202, { status: "accepted", task_id: `t-${++rdCall}` });
+    }
+    if (req.url?.startsWith("/v2/inferences/tasks/")) {
+      const n = Number(req.url.split("-").pop());
+      return json(res, 200, { status: "succeeded", result: { base64_images: [PNG_B64], balance_cost: 0.18, remaining_balance: state.rdRemaining?.[n - 1] ?? 4 } });
+    }
+    if (req.method === "POST" && req.url === "/v2/generate-image-v2") {
+      if (state.pl === "broke") return json(res, 402, { detail: "Insufficient credits" });
+      return json(res, 202, { background_job_id: "pl-1", status: "processing", usage: { type: "usd", usd: 0.02 } });
+    }
+    if (req.url === "/v2/background-jobs/pl-1") return json(res, 200, { id: "pl-1", status: "completed", usage: { type: "usd", usd: 0.02 }, last_response: { images: [{ type: "base64", base64: PNG_B64 }] } });
+    if (req.url === "/v2/balance") return json(res, 200, { credits: { usd: 0.9 }, subscription: {} });
+    return json(res, 404, {});
+  };
+}
+
+async function withProviders(state: Parameters<typeof twoProviders>[0], fn: (h: Harness, ctx: ToolContext) => Promise<void>) {
+  const ws = tempWorkspace();
+  const ctx = capabilityCtx(ws);
+  const prev = { ...process.env };
+  Object.assign(process.env, { RETRO_DIFFUSION_API_KEY: "rdpk-t19", PIXELLAB_API_KEY: "pl-t19" });
+  try {
+    await withServer(twoProviders(state), async (h) => {
+      process.env.RETRO_DIFFUSION_BASE_URL = h.baseUrl;
+      process.env.PIXELLAB_BASE_URL = h.baseUrl;
+      await fn(h, ctx);
+    });
+  } finally {
+    for (const k of ["RETRO_DIFFUSION_API_KEY", "PIXELLAB_API_KEY", "RETRO_DIFFUSION_BASE_URL", "PIXELLAB_BASE_URL"]) {
+      if (prev[k] === undefined) delete process.env[k];
+      else process.env[k] = prev[k];
+    }
+  }
+}
+const gen = (input: Record<string, unknown>, ctx: ToolContext) => IMPLS.art_generate.art_generate.run({ prompt: "x", width: 16, height: 16, ...input }, ctx);
+const posts = (h: Harness, url: string) => h.requests.filter((r) => r.method === "POST" && r.url === url && !r.body?.check_cost).length;
+
+test("T19-1: PixelLab and Retro Diffusion 402s are ProviderExhausted (uncharged), not plain errors", async () => {
+  await withProviders({ rd: "broke", pl: "broke" }, async ({ baseUrl }) => {
+    for (const provider of ["retrodiffusion", "pixellab"] as const) {
+      const err = await generate({ provider, prompt: "x", width: 16, height: 16, out: "a.png" }, { workspace: tempWorkspace(), baseUrl: { [provider]: baseUrl }, env: { ...ENV }, ...FAST }).catch((e: unknown) => e);
+      assert.ok(err instanceof ProviderExhausted && err.provider === provider, String(err));
+      assert.ok(!(err instanceof ChargedFailure));
+    }
+  });
+});
+
+test("T19-1/2: a 402 marks the provider exhausted, is never retried, falls back to the other once, and the next call skips it", async () => {
+  await withProviders({ rd: "broke", pl: "ok" }, async (h, ctx) => {
+    const r = await gen({ provider: "retrodiffusion", out: "game/assets/a.png" }, ctx);
+    assert.equal(r.is_error, undefined, r.content);
+    const out = JSON.parse(r.content);
+    assert.equal(out.provider, "pixellab");
+    assert.equal(out.fallback_from, "retrodiffusion");
+    assert.match(out.notes.join(" "), /retrodiffusion is exhausted; tried pixellab once/);
+    assert.equal(r.cost_micro_usd, 20_000);
+    assert.equal(posts(h, "/v2/inferences"), 1, "the 402 is not retried");
+    const state = readProviders(statePaths(ctx.runsDir).providers);
+    assert.equal(state.retrodiffusion?.exhausted, true);
+    assert.ok(state.retrodiffusion?.ts);
+    // refused immediately on the next call: Retro Diffusion is not contacted again
+    const r2 = await gen({ provider: "retrodiffusion", out: "game/assets/b.png" }, ctx);
+    assert.equal(JSON.parse(r2.content).provider, "pixellab");
+    assert.equal(posts(h, "/v2/inferences"), 1);
+    // the PixelLab balance read lands in the credits log and the result
+    assert.equal(out.credits.remaining, 0.9);
+    // a human clears it with the CLI
+    process.env.ART_PROVIDERS_FILE = statePaths(ctx.runsDir).providers;
+    try {
+      const cli = runCommand(["providers", "--clear", "retrodiffusion"]);
+      assert.equal(cli.exitCode, 0, JSON.stringify(cli.json));
+      assert.equal(readProviders(statePaths(ctx.runsDir).providers).retrodiffusion, undefined);
+      assert.equal(runCommand(["providers", "--clear", "nope"]).exitCode, 2);
+    } finally {
+      delete process.env.ART_PROVIDERS_FILE;
+    }
+  });
+});
+
+test("T19-2: both providers exhausted → procedural floor at zero cost, not an error; ledger notes the zero balance once", async () => {
+  await withProviders({ rd: "broke", pl: "broke" }, async (h, ctx) => {
+    const r = await gen({ provider: "pixellab", out: "game/assets/a.png" }, ctx);
+    assert.equal(r.is_error, undefined, r.content);
+    assert.equal(r.cost_micro_usd, 0);
+    const out = JSON.parse(r.content);
+    assert.equal(out.exhausted, "all");
+    assert.equal(out.fallback, "procedural");
+    assert.match(out.next, /art\.provider_fallback/);
+    const again = JSON.parse((await gen({ provider: "retrodiffusion", out: "game/assets/b.png" }, ctx)).content);
+    assert.equal(again.exhausted, "all");
+    assert.equal(posts(h, "/v2/inferences") + posts(h, "/v2/generate-image-v2"), 2, "each provider was asked once, ever");
+    const zero = readLedger(ctx.ledgerFile).filter((e) => e.kind === "decision" && e.topic === "art.credits_low");
+    assert.equal(zero.length, 2, "one zero-balance note per provider");
+    assert.deepEqual(readGallery(statePaths(ctx.runsDir).gallery).generations, {}, "nothing generated, nothing counted");
+  });
+});
+
+test("T19-3: an asset gets one generation plus two regenerations; the 4th call is refused before any request", async () => {
+  await withProviders({ rd: "ok", pl: "ok" }, async (h, ctx) => {
+    for (let n = 1; n <= 3; n++) {
+      const r = await gen({ provider: "retrodiffusion", out: "game/assets/hero.png" }, ctx);
+      assert.equal(JSON.parse(r.content).generation, `${n} of 3`);
+    }
+    const fourth = await gen({ provider: "retrodiffusion", out: "assets/../game/assets/hero.png" }, ctx);
+    assert.equal(fourth.is_error, true);
+    assert.match(fourth.content, /3 paid generations/);
+    assert.equal(posts(h, "/v2/inferences"), 3);
+  });
+});
+
+test("T19-3: animation endpoints need justify; refused without a request", async () => {
+  await withProviders({ rd: "ok", pl: "ok" }, async (h, ctx) => {
+    for (const extra of [{ frames: 4 }, { style: "rd_animation__walking_and_idle" }, { style: "rd_advanced_animation__attack" }]) {
+      const r = await gen({ provider: "retrodiffusion", out: "game/assets/w.png", ...extra }, ctx);
+      assert.equal(r.is_error, true);
+      assert.match(r.content, /justify/);
+    }
+    assert.equal(posts(h, "/v2/inferences"), 0);
+    const ok = await gen({ provider: "retrodiffusion", out: "game/assets/w.png", frames: 4, justify: "the walk cycle carries the hook" }, ctx);
+    assert.equal(ok.is_error, undefined, ok.content);
+  });
+});
+
+test("T19-3: anchor winners: batch calls default to the winner and refuse the loser; art_quote uses the free check_cost", async () => {
+  await withProviders({ rd: "ok", pl: "ok" }, async (h, ctx) => {
+    const noWinner = await gen({ out: "game/assets/a.png", reference: "game/assets/hero-anchor.png" }, ctx);
+    assert.match(noWinner.content, /no anchor winner/);
+    await IMPLS.art_generate.art_anchor_winner.run({ anchor: "game/assets/hero-anchor.png", provider: "pixellab", why: "lower anchor drift" }, ctx);
+    mkdirSync(path.join(ctx.workspace, "game", "assets"), { recursive: true });
+    writeFileSync(path.join(ctx.workspace, "game", "assets", "hero-anchor.png"), PNG_BYTES);
+    const r = await gen({ out: "game/assets/a.png", reference: "game/assets/hero-anchor.png" }, ctx);
+    assert.equal(JSON.parse(r.content).provider, "pixellab", r.content);
+    const loser = await gen({ provider: "retrodiffusion", out: "game/assets/b.png", reference: "game/assets/hero-anchor.png" }, ctx);
+    assert.equal(loser.is_error, true);
+    assert.match(loser.content, /won by pixellab/);
+
+    const q = await IMPLS.art_generate.art_quote.run({ provider: "retrodiffusion", prompt: "x", width: 16, height: 16, count: 10 }, ctx);
+    const quote = JSON.parse(q.content);
+    assert.equal(quote.source, "check_cost");
+    assert.equal(quote.total_usd, 1.8);
+    assert.equal(quote.affordable, true);
+    const dry = h.requests.find((x) => x.body?.check_cost === true)!;
+    assert.equal(dry.headers["idempotency-key"], undefined, "check_cost carries no Idempotency-Key");
+    assert.equal(q.cost_micro_usd, undefined, "the quote is free");
+  });
+});
+
+test("T19-4: every reported balance lands in art-credits.jsonl; the low-20% note is written once", async () => {
+  await withProviders({ rd: "ok", pl: "ok", rdRemaining: [10, 1.5, 1.0, 0.9] }, async (_h, ctx) => {
+    for (let n = 0; n < 4; n++) {
+      const r = await gen({ provider: "retrodiffusion", out: `game/assets/s${n}.png` }, ctx);
+      assert.equal(JSON.parse(r.content).credits.remaining, [10, 1.5, 1.0, 0.9][n]);
+    }
+    const lines = readCredits(statePaths(ctx.runsDir).credits);
+    assert.deepEqual(lines.map((l) => [l.provider, l.remaining, l.run_id]), [10, 1.5, 1.0, 0.9].map((v) => ["retrodiffusion", v, "test-run"]));
+    const low = readLedger(ctx.ledgerFile).filter((e) => e.kind === "decision" && e.topic === "art.credits_low");
+    assert.equal(low.length, 1, JSON.stringify(low));
+    assert.match((low[0] as { decision: string }).decision, /under 20% of today's first reading 10/);
+  });
 });

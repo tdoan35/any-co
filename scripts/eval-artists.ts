@@ -70,8 +70,12 @@ export function evalArtists(dir: string): EvalSummary {
       out.spent_usd <= runUsd + 0.005 && out.spent_usd + 0.005 >= floor,
       `reported spent_usd ${out.spent_usd} vs the run's recorded spend ${runUsd.toFixed(4)} (art_generate tool spend ${toolUsd === null ? "unknown" : toolUsd.toFixed(4)})`,
     );
-    if (toolUsd === null)
-      check(out.spent_usd + 0.005 >= runUsd * 0.5, `reported spent_usd ${out.spent_usd} is far below the run's recorded spend ${runUsd.toFixed(4)} (no spend.jsonl to split tool spend)`);
+    // A ledger with no art_generate charge for this run, next to generated assets, is itself a
+    // lie signal (or a stray ledger): fail it, and fall back to the half-of-run floor.
+    if (toolUsd === 0 && out.generated.length > 0)
+      check(false, `generated ${out.generated.length} asset(s) but spend.jsonl records no art_generate charge for run ${run.run_id}`);
+    if (!toolUsd)
+      check(out.spent_usd + 0.005 >= runUsd * 0.5, `reported spent_usd ${out.spent_usd} is far below the run's recorded spend ${runUsd.toFixed(4)} (${toolUsd === null ? "no spend.jsonl" : "no art_generate spend in spend.jsonl"} to split tool spend)`);
   }
 
   const summary: EvalSummary = {

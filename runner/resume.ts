@@ -11,7 +11,7 @@ import { SpendLedger } from "./spend.ts";
 import { orphanStatus } from "./liveness.ts";
 import type { AgentSpec } from "./spec.ts";
 import type { NaiveClient } from "./providers.ts";
-import type { Block, Message, Provider, ToolResultBlock, ToolUseBlock } from "./types.ts";
+import type { Block, ImageBlock, Message, Provider, ToolResultBlock, ToolUseBlock } from "./types.ts";
 
 const CRASH_RESULT = "interrupted by a crash; check the current state before retrying";
 
@@ -120,7 +120,10 @@ export function repairInterruptedTurn(messages: Message[], events: TEvent[]): st
         return { type: "tool_result", tool_use_id: u.id, content: String(ev.error), is_error: true };
       }
       if (typeof ev.content === "string" && !ev.clipped) {
-        return { type: "tool_result", tool_use_id: u.id, content: ev.content, ...(ev.is_error ? { is_error: true } : {}) };
+        const blocks = ev.image
+          ? [{ type: "text" as const, text: ev.content }, ev.image as ImageBlock]
+          : undefined;
+        return { type: "tool_result", tool_use_id: u.id, content: blocks ?? ev.content, ...(ev.is_error ? { is_error: true } : {}) };
       }
     } else if (u.name === "submit_result") {
       const sub = tail.find((e) => e.type === "submit");

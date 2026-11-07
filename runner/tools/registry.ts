@@ -23,10 +23,10 @@ export const CAPABILITIES = {
     note: "Local tools over the run workspace and the game clone. Hosted setup not done.",
   },
   art_generate: {
-    summary: "Paid pixel-art generation (tools/art/generate.ts): PixelLab or Retro Diffusion, prompt + size + optional reference/seed/frames, PNGs into the workspace, optional deterministic postprocess",
+    summary: "Paid pixel-art generation (tools/art/generate.ts): PixelLab or Retro Diffusion, prompt + size + optional reference/seed/frames, PNGs into the workspace, optional deterministic postprocess. Credit-aware (tools/art/credits.ts): exhausted providers fall back, then a procedural floor; anchor winners, regeneration cap, free quotes (art_quote), balances",
     naive: ["bash"],
     local: true,
-    note: "Spend is budget-capped like inference (spec budgets + runner caps), not per-call approved. Keys only from env; hosted setup not done.",
+    note: "Spend is budget-capped like inference (spec budgets + runner caps), not per-call approved. Free-trial credits, never purchased: state in runs/art-providers.json, art-credits.jsonl, art-gallery.json. Keys only from env; hosted setup not done.",
   },
   gap_map: {
     summary: "Embedding map of the Steam catalog: open regions near proven demand; probe a description (tools/gapmap)",
@@ -77,6 +77,12 @@ export const CAPABILITIES = {
     naive: ["bash", "read"],
     local: true,
     note: "Local: launches the desktop build from the run's game clone (launch file inside the clone, or GODOT_BIN); needs ffmpeg/ffprobe on PATH (FFMPEG_BIN/FFPROBE_BIN). Outputs under the workspace's media/. Hosted setup not done.",
+  },
+  image_view: {
+    summary: "Look at a PNG image from the workspace or game clone (art_view): the model sees the image itself, plus dimensions; optional integer upscale for tiny pixel art",
+    naive: [],
+    local: true,
+    note: "Local only: sends an image block to the model; the PNG is copied content-addressed into the run dir. Hosted equivalent not set up.",
   },
   // ----- gated sends (T7): every send is ask-gated by the spec and ledgered via the approval gate -----
   itch_push: {

@@ -1,4 +1,4 @@
-// Art pipeline CLI: lock | snap | outline | strip | sheet | gate — JSON on stdout.
+// Art pipeline CLI: lock | snap | outline | strip | sheet | gate | providers — JSON on stdout.
 // Run: npm run art -- <command> ...   (node --import tsx tools/art/art.ts)
 // The runner's `art_tools` capability wraps the same library functions.
 
@@ -8,6 +8,8 @@ import { parseArgs } from "node:util";
 import { decodePng, encodePng, type RgbaImage } from "./png.ts";
 import { addOutline, contactSheet, lockPalette, snapToGrid, splitStrip } from "./ops.ts";
 import { runGate, type GateReport } from "./gate.ts";
+import { PROVIDERS, clearProvider, readCredits, readProviders, statePaths } from "./credits.ts";
+import type { ProviderName } from "./generate.ts";
 
 function readPng(file: string): RgbaImage {
   return decodePng(new Uint8Array(readFileSync(file)));
@@ -20,7 +22,7 @@ function writePng(file: string, img: RgbaImage): void {
 
 export type CommandResult =
   | { kind: "ok"; json: Record<string, unknown>; exitCode: number }
-  | { kind: "error"; json: { error: string }; exitCode: 2 }
+  | { kind: "error"; json: { error: string }; exitCode: 2 };
 
 const USAGE = `usage: art.ts <command> ...
   lock    <in.png> <out.png> --palette "#rrggbb,#rrggbb,..." [--alpha-threshold N]
@@ -28,7 +30,8 @@ const USAGE = `usage: art.ts <command> ...
   outline <in.png> <out.png> --color "#rrggbb" [--mode outer]
   strip   <in.png> --frames N [--out-dir DIR]     (default DIR: <in>-frames/)
   sheet   <out.png> --frames "a.png,b.png,..." [--anchor N] [--scale N] [--gap N]
-  gate    <game-repo-dir> [--schema <asset.schema.json>]`;
+  gate    <game-repo-dir> [--schema <asset.schema.json>]
+  providers [--clear <pixellab|retrodiffusion>]     (credit state: exhausted flags, balances; clearing is human-only)`;
 
 function num(name: string, value: unknown): number {
   const n = Number(value);
@@ -110,6 +113,17 @@ export function runCommand(argv: string[]): CommandResult {
         if (!repoDir) throw new Error("usage: gate <game-repo-dir> [--schema <asset.schema.json>]");
         const report: GateReport = runGate(repoDir, { schemaPath: values.schema });
         return { kind: "ok", json: report as unknown as Record<string, unknown>, exitCode: report.ok ? 0 : 1 };
+      }
+      case "providers": {
+        const { values } = parseArgs({ args: rest, options: { clear: { type: "string" } } });
+        const paths = statePaths();
+        if (values.clear !== undefined) {
+          if (!(PROVIDERS as string[]).includes(values.clear)) throw new Error(`--clear takes ${PROVIDERS.join(" or ")}, got "${values.clear}"`);
+          clearProvider(paths.providers, values.clear as ProviderName);
+        }
+        const credits = readCredits(paths.credits);
+        const latest = Object.fromEntries(PROVIDERS.map((p) => [p, credits.filter((c) => c.provider === p).at(-1) ?? null]));
+        return { kind: "ok", json: { file: paths.providers, ...(values.clear ? { cleared: values.clear } : {}), providers: readProviders(paths.providers), latest_balance: latest }, exitCode: 0 };
       }
       default:
         return { kind: "error", json: { error: command ? `unknown command "${command}"` : `missing command\n${USAGE}` }, exitCode: 2 };
