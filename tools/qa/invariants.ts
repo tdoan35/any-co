@@ -1,11 +1,26 @@
-// QA invariants: pure checks over collected qa/ files (state.json, events.jsonl, run_summary.json).
-// No I/O here so the CLI and tests feed the same data. Numbers in every verdict.
-// The schema validator covers exactly the features state.schema.json uses (no $ref/allOf etc.):
-// type, const, required, properties, additionalProperties, items, minLength, maxLength, minimum.
+// QA invariants: pure checks over collected qa/ files (state dumps, events.jsonl, run_summary.json).
+// No process I/O so the CLI and tests feed the same data. Numbers in every verdict.
+// The schema validator covers exactly the keywords state.schema.json uses and throws on any other,
+// so a schema change can't silently weaken the check.
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
 export const KNOWN_SCHEMA_VERSION = 1;
+
+/** Standard events and their required data keys (docs/contracts/events.md). */
+export const STANDARD_EVENTS: Record<string, string[]> = {
+  run_start: ["seed"],
+  spawn: ["id", "type", "x", "y"],
+  hit: ["target", "source", "amount"],
+  death: ["target", "cause"],
+  levelup: ["level"],
+  wave: ["wave"],
+  stage: ["stage"],
+  pickup: ["item", "count"],
+  menu_open: ["menu"],
+  run_end: ["outcome"],
+  error: ["message"],
+};
 
 export interface Check {
   name: string;
@@ -14,7 +29,7 @@ export interface Check {
 }
 
 export interface RunFiles {
-  /** Successive qa/state.json dumps, chronological. */
+  /** State dumps taken during the run (dump_state after each step chunk) plus the final one, chronological. */
   states: unknown[];
   finalState: unknown;
   events: unknown[];
@@ -22,43 +37,30 @@ export interface RunFiles {
 }
 
 export interface InvariantOptions {
-  /** Max identical consecutive dumps tolerated while the run is not over (softlock check). Default 2. */
+  /** Max identical consecutive dumps (tick fields ignored) tolerated while the run is not over. Default 2. */
   identicalDumps?: number;
   /** peaks.entities must be <= this. Default 500. */
   maxEntities?: number;
+  /** Simulation ticks per simulated second, for elapsed_s (contract says "e.g. 1/60 s"). Default 60. */
+  tickRate?: number;
 }
 
-const DEFAULTS: Required<InvariantOptions> = { identicalDumps: 2, maxEntities: 500 };
+const DEFAULTS: Required<InvariantOptions> = { identicalDumps: 2, maxEntities: 500, tickRate: 60 };
 
-// Minimal typed views over untrusted JSON. Guard once, use fields with confidence.
-const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+const STATE_SCHEMA_FILE = path.join(import.meta.dirname, "..", "..", "docs", "contracts", "state.schema.json");
+
+type Obj = Record<string, unknown>;
+const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
 const num = (v: unknown): number | undefined => (typeof v === "number" ? v : undefined);
-const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
-const arr = (v: unknown): unknown[] | undefined => (Array.isArray(v) ? v : undefined);
+const field = (v: unknown, k: string): unknown => (isObj(v) ? v[k] : undefined);
+const json = (v: unknown): string => JSON.stringify(v) ?? String(v);
 
-function schemaVersion(s: unknown): unknown {
-  return isObj(s) ? s["schema_version"] : undefined;
-}
-function eventFields(e: unknown): { event: unknown; data: unknown } {
-  if (!isObj(e)) return { event: undefined, data: undefined };
-  return { event: e["event"], data: isObj(e["data"]) ? e["data"] : undefined };
-}
-function stateErrors(s: unknown): unknown[] {
-  if (!isObj(s)) return [];
-  return arr(s["errors"]) ?? [];
-}
-function stateResources(s: unknown): Record<string, unknown> {
-  if (!isObj(s) || !isObj(s["resources"])) return {};
-  return s["resources"];
-}
-function stateRun(s: unknown): Record<string, unknown> | undefined {
-  return isObj(s) && isObj(s["run"]) ? s["run"] : undefined;
-}
-function counts(summary: unknown): Record<string, unknown> {
-  return isObj(summary) && isObj(summary["counts"]) ? summary["counts"] : {};
-}
-function peaksEntities(summary: unknown): number | undefined {
-  return isObj(summary) && isObj(summary["peaks"]) ? num(summary["peaks"]["entities"]) : undefined;
+/** A dump with its tick counters removed: a softlocked game keeps ticking but nothing else changes (D5). */
+function withoutTicks(s: unknown): string {
+  if (!isObj(s)) return json(s);
+  const { tick: _tick, run, ...rest } = s;
+  const runRest = isObj(run) ? (({ elapsed_ticks: _e, ...r }) => r)(run) : run;
+  return json({ ...rest, run: runRest });
 }
 
 export function runInvariants(files: RunFiles, opts: InvariantOptions = {}): Check[] {
@@ -67,116 +69,124 @@ export function runInvariants(files: RunFiles, opts: InvariantOptions = {}): Che
   const add = (name: string, pass: boolean, detail: string) => checks.push({ name, pass, detail });
   const finalState = isObj(files.finalState) ? files.finalState : undefined;
   const summary = isObj(files.runSummary) ? files.runSummary : undefined;
+  const events = files.events.filter(isObj);
 
-  // --- schema_version present and understood
-  const versions = files.states.map(schemaVersion);
+  // --- schema_version on every payload: dumps, every event, run_summary (README golden rule)
+  const badVersions: string[] = [];
+  files.states.forEach((s, i) => field(s, "schema_version") !== KNOWN_SCHEMA_VERSION && badVersions.push(`state[${i}]=${json(field(s, "schema_version"))}`));
+  files.events.forEach((e, i) => field(e, "schema_version") !== KNOWN_SCHEMA_VERSION && badVersions.push(`event[${i}]=${json(field(e, "schema_version"))}`));
+  if (summary === undefined) badVersions.push("run_summary missing");
+  else if (summary["schema_version"] !== KNOWN_SCHEMA_VERSION) badVersions.push(`run_summary=${json(summary["schema_version"])}`);
   add(
     "schema_version_known",
-    versions.length > 0 && versions.every((v) => v === KNOWN_SCHEMA_VERSION),
-    `state dumps schema_version=${JSON.stringify(versions)}, known=${KNOWN_SCHEMA_VERSION}`,
+    files.states.length > 0 && badVersions.length === 0,
+    badVersions.length === 0
+      ? `${files.states.length} dump(s), ${files.events.length} event(s), run_summary all schema_version=${KNOWN_SCHEMA_VERSION}`
+      : `${badVersions.length} payload(s) not v${KNOWN_SCHEMA_VERSION}: ${badVersions.slice(0, 5).join(", ")}${files.states.length === 0 ? "; no state dumps" : ""}`,
   );
 
-  // --- final state valid against state.schema.json
-  const schema = JSON.parse(
-    readFileSync(path.join(import.meta.dirname, "..", "..", "docs", "contracts", "state.schema.json"), "utf8"),
-  ) as unknown;
-  const schemaErrors = files.finalState !== undefined ? validateValue(schema, files.finalState, "$") : ["no final state dump"];
-  add("state_matches_schema", schemaErrors.length === 0, schemaErrors.slice(0, 5).join("; ") || "valid");
+  // --- every dump valid against state.schema.json
+  const schema: unknown = JSON.parse(readFileSync(STATE_SCHEMA_FILE, "utf8"));
+  const schemaErrors =
+    files.states.length === 0
+      ? ["no state dump"]
+      : files.states.flatMap((s, i) => validateValue(schema, s, `state[${i}]`));
+  add("state_matches_schema", schemaErrors.length === 0, schemaErrors.slice(0, 5).join("; ") || `${files.states.length} dump(s) valid`);
+
+  // --- standard events carry their required data keys (events.md)
+  const missingKeys: string[] = [];
+  events.forEach((e, i) => {
+    const name = e["event"];
+    if (typeof name !== "string" || !(name in STANDARD_EVENTS)) return;
+    const data = e["data"];
+    for (const k of STANDARD_EVENTS[name]!) if (!isObj(data) || !(k in data)) missingKeys.push(`event[${i}] ${name}.data.${k}`);
+  });
+  add("event_data_keys", missingKeys.length === 0, missingKeys.slice(0, 5).join("; ") || "all standard events complete");
 
   // --- no error events, empty errors[], not crashed
-  const errorEvents = files.events.filter((e) => eventFields(e).event === "error");
-  const allStateErrors = files.states.flatMap(stateErrors);
-  const crashed =
-    files.states.some((s) => isObj(s) && s["crashed"] === true) || (summary !== undefined && summary["crashed"] === true);
+  const errorEvents = events.filter((e) => e["event"] === "error").length;
+  const stateErrors = files.states.reduce<number>((n, s) => n + (Array.isArray(field(s, "errors")) ? (field(s, "errors") as unknown[]).length : 0), 0);
+  const crashed = files.states.some((s) => field(s, "crashed") === true) || summary?.["crashed"] === true;
   add(
     "no_errors",
-    errorEvents.length === 0 && allStateErrors.length === 0 && !crashed,
-    `${errorEvents.length} error event(s), ${allStateErrors.length} state error(s), crashed=${crashed}`,
+    errorEvents === 0 && stateErrors === 0 && !crashed,
+    `${errorEvents} error event(s), ${stateErrors} state error(s), crashed=${crashed}`,
   );
 
-  // --- run completes: run_end with outcome win|loss|quit, matching run_summary, run.over true
-  const runEnds = files.events.filter((e) => eventFields(e).event === "run_end");
-  const runEndData = runEnds.map((e) => eventFields(e).data);
-  const validOutcome = (v: unknown): v is "win" | "loss" | "quit" => v === "win" || v === "loss" || v === "quit";
-  const outcome = runEndData.length === 1 ? (runEndData[0] as Record<string, unknown> | undefined)?.["outcome"] : undefined;
+  // --- run completes: exactly one run_end with outcome win|loss|quit, matching run_summary, run.over true
+  const runEnds = events.filter((e) => e["event"] === "run_end");
+  const outcome = runEnds.length === 1 ? field(runEnds[0]!["data"], "outcome") : undefined;
   const summaryOutcome = summary?.["outcome"];
-  const runOver = stateRun(finalState)?.["over"];
+  const runOver = field(finalState?.["run"], "over");
   add(
     "run_completes",
-    runEnds.length === 1 && validOutcome(outcome) && outcome === summaryOutcome && runOver === true,
-    `run_end x${runEnds.length} outcome=${JSON.stringify(outcome)}, summary=${JSON.stringify(summaryOutcome)}, run.over=${JSON.stringify(runOver)}`,
+    runEnds.length === 1 && (outcome === "win" || outcome === "loss" || outcome === "quit") && outcome === summaryOutcome && runOver === true,
+    `run_end x${runEnds.length} outcome=${json(outcome)}, summary=${json(summaryOutcome)}, run.over=${json(runOver)}`,
   );
 
-  // --- no softlock: ticks monotonic; <= N identical consecutive dumps while run not over
-  const ticks = files.states.map((s) => num(isObj(s) ? s["tick"] : undefined));
-  const ticksAdvance = ticks.every((t, i) => i === 0 || t === undefined || ticks[i - 1] === undefined || t >= ticks[i - 1]!);
-  let maxIdentical = 1;
-  let run = 1;
-  for (let i = 1; i < files.states.length; i++) {
-    const same = JSON.stringify(files.states[i]) === JSON.stringify(files.states[i - 1]);
-    run = same ? run + 1 : 1;
-    maxIdentical = Math.max(maxIdentical, run);
+  // --- no softlock: while running, ticks strictly increase between dumps, and the state (tick fields ignored)
+  //     doesn't repeat more than N times in a row (D5)
+  const running = files.states.filter((s) => field(field(s, "run"), "over") !== true);
+  const ticks = running.map((s) => num(field(s, "tick")));
+  const stalled = ticks.findIndex((t, i) => i > 0 && (t === undefined || ticks[i - 1] === undefined || t <= ticks[i - 1]!));
+  let maxIdentical = running.length > 0 ? 1 : 0;
+  let streak = 1;
+  for (let i = 1; i < running.length; i++) {
+    streak = withoutTicks(running[i]) === withoutTicks(running[i - 1]) ? streak + 1 : 1;
+    maxIdentical = Math.max(maxIdentical, streak);
   }
-  const notOverDumps = files.states.filter((s) => stateRun(s)?.["over"] !== true).length;
-  const softlocked = notOverDumps > 1 && maxIdentical > o.identicalDumps;
   add(
     "no_softlock",
-    ticksAdvance && !softlocked,
-    `ticks monotonic=${ticksAdvance}, max identical consecutive dumps=${maxIdentical} (limit ${o.identicalDumps}), ${notOverDumps} dump(s) with run not over`,
+    stalled === -1 && maxIdentical <= o.identicalDumps,
+    `${running.length} dump(s) while running; ticks ${stalled === -1 ? "strictly increasing" : `stalled at dump ${stalled} (${json(ticks[stalled - 1])} -> ${json(ticks[stalled])})`}; max identical consecutive (ticks ignored)=${maxIdentical} (limit ${o.identicalDumps})`,
   );
 
   // --- entity count bounded; resources non-negative
-  const peakEntities = peaksEntities(summary);
-  const negative: string[] = [];
-  for (const s of files.states) {
-    for (const [k, v] of Object.entries(stateResources(s))) {
-      const n = num(v);
-      if (n !== undefined && n < 0) negative.push(`${k}=${n}`);
-    }
-  }
+  const peakEntities = num(field(summary?.["peaks"], "entities"));
   add(
     "entities_bounded",
     peakEntities !== undefined && peakEntities <= o.maxEntities,
-    `peaks.entities=${JSON.stringify(peakEntities)} limit=${o.maxEntities}`,
+    `peaks.entities=${json(peakEntities)} limit=${o.maxEntities}`,
   );
-  add("resources_non_negative", negative.length === 0, negative.slice(0, 5).join(",") || "all >= 0");
+  const negative: string[] = [];
+  files.states.forEach((s, i) => {
+    const res = field(s, "resources");
+    if (!isObj(res)) return;
+    for (const [k, v] of Object.entries(res)) if (typeof v === "number" && v < 0) negative.push(`state[${i}].${k}=${v}`);
+  });
+  add("resources_non_negative", negative.length === 0, negative.slice(0, 5).join(", ") || "all >= 0");
 
-  // --- telemetry: counts equal standard-event tallies; elapsed_s consistent with run_ticks
-  const standard = ["run_start", "spawn", "hit", "death", "levelup", "wave", "stage", "pickup", "menu_open", "run_end", "error"];
+  // --- telemetry counts (D8): tally every event name; standard names must match exactly;
+  //     non-standard keys in counts are a contract deviation (telemetry.md: counts are standard-event totals)
   const tallies: Record<string, number> = {};
-  for (const e of files.events) {
-    const name = str(eventFields(e).event);
-    if (name !== undefined && standard.includes(name)) tallies[name] = (tallies[name] ?? 0) + 1;
-  }
-  const claimed = counts(summary);
-  const mismatches = Object.keys({ ...claimed, ...tallies }).filter(
-    (k) => (num(claimed[k]) ?? 0) !== (num(tallies[k]) ?? 0),
-  );
+  for (const e of events) if (typeof e["event"] === "string") tallies[e["event"]] = (tallies[e["event"]] ?? 0) + 1;
+  const claimed = isObj(summary?.["counts"]) ? (summary!["counts"] as Obj) : {};
+  const mismatches = Object.keys(STANDARD_EVENTS)
+    .filter((k) => k in claimed || k in tallies)
+    .filter((k) => (num(claimed[k]) ?? 0) !== (tallies[k] ?? 0))
+    .map((k) => `${k}: summary ${json(claimed[k] ?? 0)} vs events ${tallies[k] ?? 0}`);
+  add("telemetry_counts_match", summary !== undefined && mismatches.length === 0, summary === undefined ? "no run_summary" : mismatches.join("; ") || "standard counts match events");
+  const nonStandard = Object.keys(claimed).filter((k) => !(k in STANDARD_EVENTS));
   add(
-    "telemetry_counts_match",
-    mismatches.length === 0,
-    mismatches.map((k) => `${k}: summary ${String(claimed[k])} vs events ${tallies[k] ?? 0}`).join("; ") || "all match",
+    "telemetry_counts_standard_only",
+    nonStandard.length === 0,
+    nonStandard.length === 0 ? "counts has only standard events" : `non-standard keys in counts: ${nonStandard.map((k) => `${k}=${json(claimed[k])} (events ${tallies[k] ?? 0})`).join(", ")}`,
   );
 
-  const tickRate = 60; // sim ticks per simulated second; time-scale changes wall speed only (controls.md)
   const runTicks = num(summary?.["run_ticks"]);
   const elapsed = num(summary?.["elapsed_s"]);
-  const elapsedOk =
-    runTicks !== undefined && elapsed !== undefined
-      ? Math.abs(runTicks / tickRate - elapsed) <= Math.max(1, (runTicks / tickRate) * 0.01)
-      : false;
+  const expected = runTicks !== undefined ? runTicks / o.tickRate : undefined;
   add(
     "telemetry_elapsed_matches_ticks",
-    elapsedOk,
-    `run_ticks=${JSON.stringify(runTicks)} / ${tickRate} vs elapsed_s=${JSON.stringify(elapsed)}`,
+    expected !== undefined && elapsed !== undefined && Math.abs(expected - elapsed) <= Math.max(1 / o.tickRate, expected * 0.01),
+    `run_ticks=${json(runTicks)} / ${o.tickRate} = ${json(expected)} vs elapsed_s=${json(elapsed)}`,
   );
 
   const finalTick = num(finalState?.["tick"]);
-  const tickAgrees = finalTick === undefined || runTicks === undefined ? true : finalTick === runTicks;
   add(
     "final_tick_matches_summary",
-    tickAgrees,
-    `final state tick=${JSON.stringify(finalTick)} vs run_ticks=${JSON.stringify(runTicks)}`,
+    finalTick !== undefined && runTicks !== undefined && finalTick === runTicks,
+    `final state tick=${json(finalTick)} vs run_ticks=${json(runTicks)}`,
   );
 
   return checks;
@@ -185,9 +195,7 @@ export function runInvariants(files: RunFiles, opts: InvariantOptions = {}): Che
 // --- determinism: diff two final states, report first differing path
 export function firstDifference(a: unknown, b: unknown, at = "$"): string | null {
   if (a === b) return null;
-  const aObj = isObj(a);
-  const bObj = isObj(b);
-  if (aObj && bObj) {
+  if (isObj(a) && isObj(b)) {
     for (const k of [...new Set([...Object.keys(a), ...Object.keys(b)])].sort()) {
       const d = firstDifference(a[k], b[k], `${at}.${k}`);
       if (d) return d;
@@ -202,80 +210,63 @@ export function firstDifference(a: unknown, b: unknown, at = "$"): string | null
     }
     return null;
   }
-  return `${at}: ${safeJson(a)} vs ${safeJson(b)}`;
+  return `${at}: ${json(a)} vs ${json(b)}`;
 }
 
-function safeJson(v: unknown): string {
-  try {
-    return JSON.stringify(v) ?? String(v);
-  } catch {
-    return String(v);
-  }
-}
-
-// --- minimal validator for the schema features state.schema.json uses
-interface SchemaNode {
-  type?: string | string[];
-  const?: unknown;
-  enum?: unknown[];
-  minLength?: number;
-  maxLength?: number;
-  minimum?: number;
-  items?: SchemaNode;
-  properties?: Record<string, SchemaNode>;
-  required?: string[];
-  additionalProperties?: boolean | SchemaNode;
-}
-
-function isSchema(v: unknown): v is SchemaNode {
-  return isObj(v);
-}
+// --- validator for the JSON Schema keywords state.schema.json uses
+const SUPPORTED_KEYWORDS: Record<string, true> = {
+  $schema: true, $id: true, title: true, description: true,
+  type: true, const: true, enum: true, minLength: true, maxLength: true, minimum: true,
+  items: true, properties: true, required: true, additionalProperties: true,
+};
 
 export function validateValue(schema: unknown, value: unknown, at: string): string[] {
-  if (!isSchema(schema)) return [`${at}: invalid schema node`];
-  const errors: string[] = [];
-  if (schema.type) {
-    const ts = Array.isArray(schema.type) ? schema.type : [schema.type];
-    const ok = ts.some((t) =>
+  if (!isObj(schema)) throw new Error(`${at}: schema node is not an object`);
+  for (const k of Object.keys(schema)) {
+    if (!Object.hasOwn(SUPPORTED_KEYWORDS, k)) throw new Error(`${at}: unsupported schema keyword "${k}" (extend tools/qa/invariants.ts)`);
+  }
+  if (schema["type"] !== undefined) {
+    const types = Array.isArray(schema["type"]) ? (schema["type"] as unknown[]) : [schema["type"]];
+    const ok = types.some((t) =>
       t === "object" ? isObj(value)
       : t === "array" ? Array.isArray(value)
       : t === "integer" ? Number.isInteger(value)
-      : t === "number" ? typeof value === "number" && !Number.isNaN(value)
+      : t === "number" ? typeof value === "number" && Number.isFinite(value)
       : t === "string" ? typeof value === "string"
       : t === "boolean" ? typeof value === "boolean"
       : t === "null" ? value === null
       : false,
     );
-    if (!ok) return [`${at}: expected type ${ts.join("|")}`];
+    if (!ok) return [`${at}: expected type ${types.join("|")}, got ${json(value)}`];
   }
-  if ("const" in schema && value !== schema.const) return [`${at}: expected const ${JSON.stringify(schema.const)}`];
-  if (schema.enum && !schema.enum.includes(value)) return [`${at}: not in enum ${JSON.stringify(schema.enum)}`];
+  if ("const" in schema && value !== schema["const"]) return [`${at}: expected const ${json(schema["const"])}, got ${json(value)}`];
+  if (Array.isArray(schema["enum"]) && !schema["enum"].includes(value)) return [`${at}: not in enum ${json(schema["enum"])}`];
+
+  const errors: string[] = [];
   if (typeof value === "string") {
-    if (schema.minLength !== undefined && value.length < schema.minLength) errors.push(`${at}: shorter than minLength ${schema.minLength}`);
-    if (schema.maxLength !== undefined && value.length > schema.maxLength) errors.push(`${at}: longer than maxLength ${schema.maxLength}`);
+    const min = num(schema["minLength"]);
+    const max = num(schema["maxLength"]);
+    if (min !== undefined && value.length < min) errors.push(`${at}: shorter than minLength ${min}`);
+    if (max !== undefined && value.length > max) errors.push(`${at}: longer than maxLength ${max}`);
   }
-  if (typeof value === "number" && schema.minimum !== undefined && value < schema.minimum) {
-    errors.push(`${at}: below minimum ${schema.minimum}`);
+  if (typeof value === "number") {
+    const min = num(schema["minimum"]);
+    if (min !== undefined && value < min) errors.push(`${at}: ${value} below minimum ${min}`);
   }
-  if (Array.isArray(value) && schema.items) {
-    value.forEach((item, i) => errors.push(...validateValue(schema.items, item, `${at}[${i}]`)));
+  if (Array.isArray(value) && schema["items"] !== undefined) {
+    value.forEach((item, i) => errors.push(...validateValue(schema["items"], item, `${at}[${i}]`)));
   }
-  if (isObj(value) && schema.properties) {
-    for (const req of schema.required ?? []) {
-      if (!(req in value)) errors.push(`${at}: missing "${req}"`);
-    }
-    for (const [k, sub] of Object.entries(schema.properties)) {
-      if (k in value) errors.push(...validateValue(sub, value[k], `${at}.${k}`));
-    }
-    const additional = schema.additionalProperties;
-    if (additional === false) {
-      for (const k of Object.keys(value)) {
-        if (!(k in schema.properties)) errors.push(`${at}: additional property "${k}"`);
-      }
-    } else if (isSchema(additional)) {
-      for (const [k, v] of Object.entries(value)) {
-        if (!(k in schema.properties)) errors.push(...validateValue(additional, v, `${at}.${k}`));
-      }
+  // Object keywords apply to every object value, with or without `properties` (D6: `resources` has none).
+  if (isObj(value)) {
+    const props = isObj(schema["properties"]) ? schema["properties"] : {};
+    const required = Array.isArray(schema["required"]) ? schema["required"] : [];
+    for (const req of required) if (typeof req === "string" && !(req in value)) errors.push(`${at}: missing "${req}"`);
+    for (const [k, sub] of Object.entries(props)) if (k in value) errors.push(...validateValue(sub, value[k], `${at}.${k}`));
+    const additional = schema["additionalProperties"];
+    for (const [k, v] of Object.entries(value)) {
+      if (k in props) continue;
+      if (additional === false) errors.push(`${at}: additional property "${k}"`);
+      else if (isObj(additional)) errors.push(...validateValue(additional, v, `${at}.${k}`));
     }
   }
   return errors;

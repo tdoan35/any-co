@@ -1,8 +1,10 @@
 // QA contract driver: launches a game and speaks the qa/ file protocol (docs/contracts/controls.md).
-// The game owns qa/ack.json, qa/events.jsonl, qa/state.json, qa/run_summary.json;
-// the harness owns qa/control.json. Handshake is file-content id compare, never mtime.
+// The harness owns qa/control.json; the game owns ack/events/state/run_summary. Handshake is
+// file-content id compare, never mtime. All harness writes are atomic (temp + rename).
+// Readiness (controls.md): the game starts by clearing its outputs, writing control {id:0,noop}
+// and ack {id:0,ok,ready}; the harness sends its first command only after that ack.
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync, rmSync } from "node:fs";
 import path from "node:path";
 
 export const CONTRACT_FLAGS = [
@@ -50,6 +52,7 @@ export interface Ack {
   id: number;
   ok: boolean;
   error?: string;
+  ready?: boolean;
   [k: string]: unknown;
 }
 
@@ -63,7 +66,7 @@ export interface RunEnd {
 export interface Driver {
   /** Write the next command to qa/control.json and wait for the matching ack. */
   send(cmd: Omit<Command, "id">, timeoutMs?: number): Promise<Ack>;
-  /** Events so far (tolerates a torn final line, like the ledger reader). */
+  /** Events so far (tolerates a torn final line). */
   events(): object[];
   readState(): unknown;
   readRunSummary(): unknown;
@@ -71,7 +74,8 @@ export interface Driver {
   done(): Promise<RunEnd>;
   /** True once the process has ended (exit, signal, spawn error). */
   hasEnded(): boolean;
-  kill(signal?: NodeJS.Signals): void;
+  /** SIGTERM, then SIGKILL after the grace (default 2s). */
+ kill(graceMs?: number): void;
   readonly dir: string;
   readonly qaDir: string;
 }
@@ -83,6 +87,28 @@ export interface LaunchOptions extends Partial<ContractArgs> {
   cwd: string;
   /** Per-command ack timeout. Default 30s. */
   ackTimeoutMs?: number;
+  /** Clear stale qa outputs (events/state/run_summary/ack/shot-*.png) before launch. Default true. */
+  clean?: boolean;
+}
+
+/** Stale qa files from a previous run would be judged as this run's results (D2). */
+export function cleanQaOutputs(qaDir: string): void {
+  for (const f of ["events.jsonl", "state.json", "run_summary.json", "ack.json"]) {
+    rmSync(path.join(qaDir, f), { force: true });
+  }
+  try {
+    for (const f of readdirSync(qaDir)) {
+      if (/^shot-.*\.png$/.test(f)) rmSync(path.join(qaDir, f), { force: true });
+    }
+  } catch {
+    /* no dir yet */
+  }
+}
+
+function atomicWrite(file: string, content: string): void {
+  const tmp = `${file}.tmp-${process.pid}`;
+  writeFileSync(tmp, content);
+  renameSync(tmp, file);
 }
 
 export function launch(opts: LaunchOptions): Driver {
@@ -91,9 +117,14 @@ export function launch(opts: LaunchOptions): Driver {
     throw new Error(`cmd must be a non-empty string[] argv, got ${JSON.stringify(cmd)}`);
   }
   const qaDir = path.join(cwd, "qa");
-  mkdirSync(qaDir, { recursive: true });
+  if (opts.clean !== false) {
+    mkdirSync(qaDir, { recursive: true });
+    cleanQaOutputs(qaDir);
+  } else {
+    mkdirSync(qaDir, { recursive: true });
+  }
   const control = path.join(qaDir, "control.json");
-  writeFileSync(control, ""); // no id yet; game treats missing/empty as nothing to do
+  atomicWrite(control, ""); // no id yet
 
   const argv = [...cmd, ...flagArgs({ qa: true, ...opts })];
   const child: ChildProcess = spawn(argv[0]!, argv.slice(1), {
@@ -104,6 +135,7 @@ export function launch(opts: LaunchOptions): Driver {
   let stderr = "";
   let ended: RunEnd | null = null;
   let endWaiters: Array<(r: RunEnd) => void> = [];
+  let killTimer: ReturnType<typeof setTimeout> | null = null;
   let killed = false;
   child.stdout!.on("data", () => {}); // drained; events come via qa/events.jsonl
   child.stderr!.on("data", (d) => {
@@ -111,6 +143,10 @@ export function launch(opts: LaunchOptions): Driver {
   });
   const onEnd = () => {
     if (ended) return;
+    if (killTimer) {
+      clearTimeout(killTimer);
+      killTimer = null;
+    }
     ended = killed
       ? { reason: "signal", code: child.exitCode, signal: child.signalCode, stderr }
       : { reason: "exit", code: child.exitCode, signal: child.signalCode, stderr };
@@ -119,6 +155,11 @@ export function launch(opts: LaunchOptions): Driver {
   };
   child.on("exit", onEnd);
   child.on("error", (err) => {
+    if (ended) return;
+    if (killTimer) {
+      clearTimeout(killTimer);
+      killTimer = null;
+    }
     ended = { reason: "spawn-error", code: null, signal: null, stderr: `${stderr}${err.message}` };
     for (const w of endWaiters) w(ended);
     endWaiters = [];
@@ -135,66 +176,91 @@ export function launch(opts: LaunchOptions): Driver {
     dir: cwd,
     qaDir,
     send(cmd, timeoutMs = opts.ackTimeoutMs ?? 30_000) {
-      // A dead child never acks: fail the send as soon as the process is gone.
-      const dead = ended !== null ? Promise.reject(new Error(`process ended (${ended.reason}) before ack`)) : null;
-      if (dead) return dead as Promise<Ack>;
-      return Promise.race([
-        sendCommand(control, qaDir, cmd, timeoutMs),
-        new Promise<Ack>((_, rej) => {
-          const t = setInterval(() => {
-            if (ended !== null) {
-              clearInterval(t);
-              rej(new Error(`process ended (${ended!.reason}) while waiting for ack`));
-            }
-          }, 20);
-          void timeoutMs;
-        }),
-      ]);
+      return sendCommand(control, qaDir, () => ended !== null, cmd, timeoutMs);
     },
     events: () => readEvents(path.join(qaDir, "events.jsonl")),
-    readState: () => (existsSync(path.join(qaDir, "state.json")) ? JSON.parse(readFileSync(path.join(qaDir, "state.json"), "utf8")) : null),
-    readRunSummary: () =>
-      existsSync(path.join(qaDir, "run_summary.json"))
-        ? JSON.parse(readFileSync(path.join(qaDir, "run_summary.json"), "utf8"))
-        : null,
+    readState: () => readJson(path.join(qaDir, "state.json")),
+    readRunSummary: () => readJson(path.join(qaDir, "run_summary.json")),
     done,
     hasEnded: () => ended !== null,
-    kill(signal) {
+    kill(graceMs = 2_000) {
       killed = true;
-      if (child.exitCode === null && child.signalCode === null) child.kill(signal ?? "SIGTERM");
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      child.kill("SIGTERM");
+      // A game ignoring SIGTERM must not hang the CLI (D9): escalate to SIGKILL.
+      killTimer = setTimeout(() => {
+        if (child.exitCode !== null || child.signalCode !== null) return;
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* already gone */
+        }
+      }, graceMs);
+      killTimer.unref?.();
     },
   };
   return driver;
 }
 
-async function sendCommand(control: string, qaDir: string, cmd: Omit<Command, "id">, timeoutMs: number): Promise<Ack> {
-  const id = nextId();
-  writeFileSync(control, JSON.stringify({ id, ...cmd })); // atomic enough: content-id compare, not mtime
+/** Wait for the game's ready ack ({id:0,ready:true}) before the first command (D1, controls.md). */
+export async function waitReady(qaDir: string, timeoutMs = 30_000, isEnded: () => boolean = () => false): Promise<void> {
   const ackPath = path.join(qaDir, "ack.json");
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    if (existsSync(ackPath)) {
-      try {
-        const ack = JSON.parse(readFileSync(ackPath, "utf8")) as Ack;
-        if (ack?.id === id) return ack; // id compare, per controls.md; stale acks ignored
-      } catch {
-        /* torn write mid-poll; retry */
-      }
-    }
-    if (Date.now() > deadline) {
-      throw new Error(`ack timeout: no ack with id ${id} in ${qaDir} after ${timeoutMs}ms`);
-    }
+    if (isEnded()) throw new Error(`process ended before ready ack in ${qaDir}`);
+    const ack = readJson(ackPath) as Ack | null;
+    if (ack && ack.id === 0 && ack.ready === true) return;
+    if (Date.now() > deadline) throw new Error(`ready timeout: no {id:0,ready:true} ack in ${qaDir} after ${timeoutMs}ms`);
     await sleep(10);
+  }
+}
+
+async function sendCommand(
+  control: string,
+  qaDir: string,
+  isEnded: () => boolean,
+  cmd: Omit<Command, "id">,
+  timeoutMs: number,
+): Promise<Ack> {
+  const id = nextId();
+  atomicWrite(control, JSON.stringify({ id, ...cmd }));
+  const ackPath = path.join(qaDir, "ack.json");
+  const deadline = Date.now() + timeoutMs;
+  const watcher = setInterval(() => {
+    // A dead child never acks: reject as soon as it is gone (checked via closure flag).
+    void isEnded;
+  }, 20);
+  try {
+    for (;;) {
+      if (isEnded()) throw new Error(`process ended while waiting for ack id ${id}`);
+      const ack = readJson(ackPath) as Ack | null;
+      if (ack && ack.id === id) return ack; // id compare; stale acks ignored
+      if (Date.now() > deadline) {
+        throw new Error(`ack timeout: no ack with id ${id} in ${qaDir} after ${timeoutMs}ms`);
+      }
+      await sleep(10);
+    }
+  } finally {
+    clearInterval(watcher);
   }
 }
 
 let lastId = 0;
 function nextId(): number {
-  return ++lastId; // increasing ids, harness-owned (controls.md)
+  return ++lastId; // increasing ids, harness-owned (controls.md); id 0 is the game's ready marker
 }
 
 export function resetIds(): void {
   lastId = 0;
+}
+
+function readJson(file: string): unknown {
+  if (!existsSync(file)) return null;
+  try {
+    return JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    return null; // torn write mid-poll; caller retries or fails on evidence
+  }
 }
 
 function readEvents(file: string): object[] {
