@@ -7,8 +7,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { decodePng, encodePng, makeImage } from "../art/png.ts";
 import { capture, launchArgv } from "./capture.ts";
-import { FFMPEG, edit, hasFfmpeg, probe } from "./edit.ts";
-import { IMPLS } from "../../runner/tools/impl.ts";
+import { FFMPEG, assertNotPlaylist, edit, hasFfmpeg, probe } from "./edit.ts";
+import { IMPLS, mediaLaunch } from "../../runner/tools/impl.ts";
 
 // The fake game is a test double for "a desktop build that implements docs/contracts" (never under games/).
 const FAKE = path.join(path.dirname(fileURLToPath(import.meta.url)), "testdata", "fake-game.mjs");
@@ -194,12 +194,14 @@ test("capability: launch/policy/output confinement, capture into media/<name>/, 
   const ws = mkdtempSync(path.join(tmpdir(), "media-cap-"));
   const game = path.join(ws, "game");
   mkdirSync(game, { recursive: true });
+  mkdirSync(path.join(game, "dist", "desktop"), { recursive: true });
+  copyFileSync(FAKE, path.join(game, "dist", "desktop", "fake-game.mjs"));
+  chmodSync(path.join(game, "dist", "desktop", "fake-game.mjs"), 0o755);
   copyFileSync(FAKE, path.join(game, "fake-game.mjs"));
-  chmodSync(path.join(game, "fake-game.mjs"), 0o755);
   writeFileSync(path.join(game, "trailer.jsonl"), "");
   const ctx = { workspace: ws, naive: null };
   const t = IMPLS.media_capture;
-  const call = (i: Record<string, unknown>) => t.media_capture.run(t.media_capture.input.parse({ name: "run1", mode: "ticks", ticks: [30], launch: ["fake-game.mjs"], seed: 1, policy: "script:trailer.jsonl", width: 64, height: 64, timeout_s: 10, ...i }), ctx);
+  const call = (i: Record<string, unknown>) => t.media_capture.run(t.media_capture.input.parse({ name: "run1", mode: "ticks", ticks: [30], launch: ["dist/desktop/fake-game.mjs"], seed: 1, policy: "script:trailer.jsonl", width: 64, height: 64, timeout_s: 10, ...i }), ctx);
 
   const ok = await call({});
   assert.equal(ok.is_error, undefined, ok.content);
@@ -207,8 +209,12 @@ test("capability: launch/policy/output confinement, capture into media/<name>/, 
   assert.deepEqual(res.shots.map((s: { file: string; tick: number }) => [s.file, s.tick]), [["media/run1/shot-000030-1.png", 30]]);
 
   assert.match((await call({ launch: ["/bin/sh", "-c", "echo pwned"] })).content, /escapes the workspace/);
-  assert.match((await call({ launch: ["sh", "-c", "echo pwned"] })).content, /inside the game clone or the engine/);
+  assert.match((await call({ launch: ["sh", "-c", "echo pwned"] })).content, /the engine/);
+  assert.match((await call({ launch: ["godot", "-c", "echo pwned"] })).content, /"-c" is not allowed/);
+  assert.match((await call({ launch: ["sh"] })).content, /the engine \("godot"\) or a desktop build under the clone's dist\//);
+  assert.match((await call({ launch: ["fake-game.mjs"] })).content, /under the clone's dist\//, "a script in the clone root is not a build");
   assert.match((await call({ launch: ["../outside"] })).content, /escapes/);
+  assert.match((await call({ launch: ["dist/desktop/fake-game.mjs", "--script", "x.gd"] })).content, /"--script" is not allowed/);
   assert.match((await call({ policy: "script:missing.jsonl" })).content, /does not exist/);
   assert.match((await call({ policy: "script:../../etc/passwd" })).content, /escapes/);
   assert.match((await call({ mode: "movie" })).content, /exit_after_ticks/);
@@ -228,4 +234,35 @@ test("capability: launch/policy/output confinement, capture into media/<name>/, 
     const p = JSON.parse((await t.media_probe.run({ path: "media/run1/card.gif" }, ctx)).content);
     assert.equal(p.video.codec, "gif");
   }
+});
+
+test("R16-2: engine launch args are allowlisted; --path must be the clone", () => {
+  const ws = mkdtempSync(path.join(tmpdir(), "media-launch-"));
+  const clone = path.join(ws, "game");
+  mkdirSync(clone);
+  assert.deepEqual(mediaLaunch(clone, ["godot", "--path", ".", "--rendering-method", "gl_compatibility", "--windowed"]), ["godot", "--path", clone, "--rendering-method", "gl_compatibility", "--windowed"]);
+  assert.deepEqual(mediaLaunch(clone, ["godot"]), ["godot"]);
+  for (const bad of [["--script", "x.gd"], ["-s", "x.gd"], ["--main-pack", "x.pck"], ["--editor"], ["-e"], ["--path", "/elsewhere"], ["--path", ".."], ["--rendering-method", "a b"], ["--rendering-method"]])
+    assert.throws(() => mediaLaunch(clone, ["godot", ...bad]), /not allowed|--path must be the game clone|escapes/, bad.join(" "));
+});
+
+test("R16-4: playlists and non-media containers are refused before ffmpeg reads them", { skip: NO_FF }, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "media-edit-"));
+  const { video } = synthetic(root);
+  // an HLS playlist dressed as an mp4, pointing outside the workspace
+  writeFileSync(path.join(root, "media", "clip.mp4"), `#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:2.0,\n${video}\n#EXT-X-ENDLIST\n`);
+  writeFileSync(path.join(root, "media", "list.mp4"), `ffconcat version 1.0\nfile '${video}'\n`);
+  const out = { path: "media/x.mp4", format: "mp4" as const, width: 64, height: 48, fps: 10 };
+  for (const f of ["media/clip.mp4", "media/list.mp4"]) {
+    await assert.rejects(edit({ schema_version: 1, clips: [{ source: f, start_s: 0, end_s: 1 }], output: out }, confined(root)), /playlist/);
+    await assert.rejects(probe(path.join(root, f)), /playlist/);
+  }
+  assert.throws(() => assertNotPlaylist(path.join(root, "media", "clip.mp4")), /playlist/);
+  // a still that is not a PNG
+  writeFileSync(path.join(root, "media", "fake.png"), "#EXTM3U\n");
+  await assert.rejects(edit({ schema_version: 1, clips: [{ still: "media/fake.png", duration_s: 1 }], output: out }, confined(root)), /playlist|not a PNG/);
+  // a container outside the allowlist (MPEG-TS)
+  const ts = path.join(root, "media", "a.ts");
+  execFileSync(FFMPEG(), ["-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=64x48:rate=10", "-t", "1", "-pix_fmt", "yuv420p", ts]);
+  await assert.rejects(edit({ schema_version: 1, clips: [{ source: "media/a.ts", start_s: 0, end_s: 0.5 }], output: out }, confined(root)), /allowed containers/);
 });

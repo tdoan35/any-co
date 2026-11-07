@@ -26,7 +26,11 @@ Launch argv: `<launch…> [--write-movie <file>] [<separator>] --qa --seed N --t
 - **movie**: engine movie mode (`--write-movie`, docs/decisions.md engine spike) with
   `--exit-after-ticks`; waits for the exit and checks the file.
 
-Every mode has an overall deadline. After `quit` the game gets a grace period, then its process
+Before spawning, `capture()` removes `qa/ack.json` and `qa/control.json`, and it only accepts a ready
+ack written after the spawn (mtime). A movie capture leaves `{id:0, ready:true}` behind, which used
+to pass for the next game before it booted (R16-1). The game's process group is registered with
+`tools/proc/reaper.ts`, so it dies with the runner on exit, SIGINT/SIGTERM/SIGHUP, or kill -9 (via a
+watchdog). Every mode has an overall deadline. After `quit` the game gets a grace period, then its process
 group gets SIGTERM, then SIGKILL. Stills are checked against `--resolution` (screenshot.md), and a
 mismatch is reported in `notes`.
 
@@ -44,8 +48,14 @@ source's end, a cap breach (the output is deleted), or a malformed plan fails wi
 
 ## Runner capability `media_capture`
 Tools `media_capture`, `media_edit`, `media_probe`. Inputs are workspace-relative (the game clone
-is `<workspace>/game`) and outputs go under `<workspace>/media/`. `launch[0]` must be a file inside
-the clone (a desktop export, a run script) or the engine binary (`GODOT_BIN`, default `godot`). A
+is `<workspace>/game`) and outputs go under `<workspace>/media/`. `launch[0]` must be the engine
+binary (`GODOT_BIN`, default `godot`) or a desktop build under the clone's `dist/`. Extra args are
+allowlisted: `--headless`, `--windowed`, `--rendering-method|--rendering-driver|--display-driver|--audio-driver <name>`,
+and for the engine `--path .` (the clone only). `--script`, `--main-pack`, `--editor` and the like are
+refused. Trust gap: `dist/` sits in an agent-writable clone, so don't grant media_capture alongside
+write access to `game/` without accepting that. Inputs to ffmpeg/ffprobe run with
+`-protocol_whitelist file`; playlists (HLS, ffconcat, DASH) are refused by their header and by
+probed format, and clip demuxers are pinned to mov/avi/matroska/gif/apng (R16-4). A
 `script:` policy path must exist in the clone. No spec grants it yet.
 
 Needs `ffmpeg`/`ffprobe` on PATH (`FFMPEG_BIN`/`FFPROBE_BIN` override) for edit, probe and the

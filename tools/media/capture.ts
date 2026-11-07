@@ -11,6 +11,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from "nod
 import path from "node:path";
 import { decodePng } from "../art/png.ts";
 import { QaClient } from "./protocol.ts";
+import { track } from "../proc/reaper.ts";
 
 export type CaptureMode =
   | { kind: "ticks"; ticks: number[] }
@@ -91,6 +92,8 @@ export async function capture(o: CaptureOptions): Promise<CaptureResult> {
   qa.clearHandshake();
   const spawnedAt = Date.now() - 1; // mtime granularity slack; the files were just removed anyway
   const child = spawn(argv[0], argv.slice(1), { cwd: o.gameDir, env: { ...process.env, ...o.env }, detached: true, stdio: ["ignore", "ignore", "pipe"] });
+  // if the runner exits, is signalled, or is SIGKILLed mid-capture, the game's group goes with it
+  const reaper = child.pid ? track(child.pid) : null;
   let stderr = "";
   child.stderr!.on("data", (d) => (stderr = (stderr + String(d)).slice(-4000)));
   let exitInfo: { code: number | null; signal: string | null } | null = null;
@@ -200,6 +203,7 @@ export async function capture(o: CaptureOptions): Promise<CaptureResult> {
   // A quit lets the game exit on its own; anything left running after the grace period is killed.
   if (quitSent || o.mode.kind === "movie") for (const t0 = Date.now(); !exited() && Date.now() - t0 < graceMs; ) await sleep(10);
   killed = await stop(child, exited, graceMs);
+  reaper?.untrack();
   if (killed && !failure) notes.push("the game did not exit after quit; killed");
   if (failure) {
     const err = failure as Error;

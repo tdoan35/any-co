@@ -20,6 +20,7 @@ import {
 } from "../../tools/art/credits.ts";
 import { capture as mediaCapture, POLICY as MEDIA_POLICY, type CaptureMode } from "../../tools/media/capture.ts";
 import { edit as mediaEdit, probe as mediaProbe } from "../../tools/media/edit.ts";
+import { track as trackGroup } from "../../tools/proc/reaper.ts";
 import { append as ledgerAppend, read as ledgerRead, LEDGER_FILE } from "../../tools/ledger/ledger.ts";
 import type { ImageBlock } from "../types.ts";
 import { AGENTS_DIR } from "../load.ts";
@@ -674,6 +675,7 @@ const gameExec: ToolImpl = {
       const err: Buffer[] = [];
       let outBytes = 0;
       const child = spawn(cmd, args, { cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+      const reaper = child.pid ? trackGroup(child.pid) : null; // runner exit/signal/kill -9 reaps the group too
       const take = (sink: Buffer[]) => (b: Buffer) => { if (outBytes < MAX_OUT) { sink.push(b); outBytes += b.length; } };
       child.stdout?.on("data", take(out));
       child.stderr?.on("data", take(err));
@@ -697,6 +699,7 @@ const gameExec: ToolImpl = {
       }, limitMs);
       const r = await promise;
       killGroup("SIGKILL"); // nothing from this call outlives it (background children of a finished command included)
+      reaper?.untrack();
       if (timedOut) r.err = `${r.err}\n(timed out after ${limitMs / 1000} s; the command and its children were killed)`;
       return {
         content: clip(`exit ${timedOut ? "timeout" : r.code}\n${r.out}${r.err ? `\nstderr:\n${r.err}` : ""}`),
@@ -1419,14 +1422,40 @@ function mediaOut(workspace: string, rel: string): string {
   return resolveInWorkspace(workspace, norm);
 }
 
-/** The launch argv's executable: a file inside the clone, or the engine binary by name. */
-function mediaLaunch(clone: string, launch: string[]): string[] {
+// Launch args are allowlisted (review R16-2): engine flags that pick a renderer/driver or a window
+// mode only. Anything that runs other code or another project (--script/-s, --main-pack, --editor,
+// --path elsewhere, -e, --debug-server…) is refused.
+const LAUNCH_FLAGS = new Set(["--headless", "--windowed"]);
+const LAUNCH_VALUE_FLAGS = new Set(["--rendering-method", "--rendering-driver", "--display-driver", "--audio-driver"]);
+const LAUNCH_VALUE = /^[A-Za-z0-9_.-]{1,40}$/;
+
+/**
+ * The launch argv: the engine binary by name (GODOT_BIN, default "godot") run on the clone, or a
+ * built desktop export under the clone's dist/ (build.md). Trust note: dist/ is inside an
+ * agent-writable clone, so an agent that can also write there could plant its own executable.
+ */
+export function mediaLaunch(clone: string, launch: string[]): string[] {
   const [bin, ...rest] = launch;
   const engine = process.env.GODOT_BIN ?? "godot";
-  if (bin === engine) return launch;
-  const p = resolveInWorkspace(clone, bin);
-  if (!existsSync(p)) throw new Error(`launch[0] must be a file inside the game clone or the engine ("${engine}"); "${bin}" is neither`);
-  return [p, ...rest];
+  const isEngine = bin === engine;
+  let exe = bin;
+  if (!isEngine) {
+    exe = resolveInWorkspace(clone, bin);
+    if (!exe.startsWith(path.join(clone, "dist") + path.sep)) throw new Error(`launch[0] must be the engine ("${engine}") or a desktop build under the clone's dist/ (build.sh output); "${bin}" is neither`);
+    if (!existsSync(exe)) throw new Error(`launch[0] ${bin} does not exist in the clone (run build.sh first)`);
+  }
+  const out: string[] = [];
+  for (let k = 0; k < rest.length; k++) {
+    const a = rest[k];
+    if (LAUNCH_FLAGS.has(a)) out.push(a);
+    else if (LAUNCH_VALUE_FLAGS.has(a) && LAUNCH_VALUE.test(rest[k + 1] ?? "")) out.push(a, rest[++k]);
+    else if (isEngine && a === "--path") {
+      const target = rest[++k] ?? "";
+      if (resolveInWorkspace(clone, target) !== clone) throw new Error(`--path must be the game clone itself (".") , got "${target}"`);
+      out.push(a, clone);
+    } else throw new Error(`launch argument "${a}" is not allowed (allowed: ${[...LAUNCH_FLAGS, ...LAUNCH_VALUE_FLAGS].join(", ")}${isEngine ? ", --path ." : ""})`);
+  }
+  return [exe, ...out];
 }
 
 const mediaTools: Record<string, ToolImpl> = {
@@ -1440,8 +1469,8 @@ const mediaTools: Record<string, ToolImpl> = {
       .object({
         name: z.string().regex(MEDIA_NAME).describe("output folder media/<name>/"),
         mode: z.enum(["ticks", "events", "movie"]),
-        launch: z.array(z.string().min(1)).min(1).max(12).describe('argv prefix, e.g. ["godot", "--path", "."] or ["dist/macos/game"]'),
-        separator: z.string().max(4).optional().describe('between engine args and game flags, e.g. "--" for Godot'),
+        launch: z.array(z.string().min(1)).min(1).max(12).describe('argv prefix: ["godot", "--path", "."] (engine on the clone) or ["dist/<target>/<game>"]; extra args only --headless, --windowed, --rendering-method/--rendering-driver/--display-driver/--audio-driver <name>'),
+        separator: z.literal("--").optional().describe('put "--" between engine args and game flags (Godot user args)'),
         seed: z.number().int().nonnegative(),
         time_scale: z.number().min(0.1).max(20).default(1),
         policy: z.string().regex(MEDIA_POLICY).describe("random | greedy | script:PATH (PATH relative to the game clone)"),
