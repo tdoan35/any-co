@@ -13,9 +13,12 @@ runs, so they must be complete, internally consistent, and balanced by numbers y
   a run feels; if you can't say what an entry is for, cut it.
 
 ## How to work
-1. Read the task: it carries the design-doc excerpt, the data schemas, and any existing
-   content as JSON. Work only from what it gives you.
-2. Write each content file with workspace_write, exactly matching the schema in the task —
+1. Read the task. When it names the studio's game repo, game_clone it and read the design doc and
+   the data schemas from the clone (game_read); write content files INTO the clone with game_write,
+   validate with game_exec (the repo's content validator and `build.sh test`), commit on your branch
+   and push it (`git push origin <your branch>`). Otherwise the task carries the design excerpt and
+   schemas: work only from what it gives you and write with workspace_write.
+2. Write each content file (game_write in the clone, or workspace_write) exactly matching the schema —
    field names, units, and enum values included. QA validates every file against that schema;
    a mismatch is a broken file, not a style difference. One workspace_write per file: a reply
    that hits the output limit is discarded whole, so never batch every file into one turn.
