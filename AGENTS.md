@@ -67,6 +67,7 @@ TODO: fill in as they exist.
 - run one agent locally: `npm run agent -- <name> --task "..." [--model id] [--max-usd N]` → `runs/<run_id>/`
 - run toy task end to end: `npm run agent -- toy-catalog-reporter --task "Report the catalog dataset facts."`
 - cut over one agent to Naïve:
+- crashed runs: `npm run runs -- orphans`; `npm run runs -- resume <run_id> [--max-usd N]` (or `npm run agent -- --resume <run_id>`)
 - approvals queue: `npm run approvals -- list | show <id> | approve <id> [--note "..."] | deny <id> --note "..."` (decide gated tool calls; every decision ledgered)
 - game repo after the Greenlight pick: `npm run new-game -- runs/<greenlight-chair-run>` → `games/<slug>` (empty first commit)
 - gap map: `tools/gapmap/README.md` (embed → build → render)

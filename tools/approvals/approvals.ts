@@ -128,17 +128,37 @@ export function decide(id: string, approve: boolean, who: string, note?: string,
   return rec;
 }
 
-/** A request nobody answered in time expires; not a human action, but ledgered like every terminal
- *  decision. Returns true only when this expiry is the winning terminal event. */
-function expire(id: string, file: string, ledgerFile: string): boolean {
-  if (get(id, file)?.state !== "pending") return false;
+/** Expire a pending request; not a human action, but ledgered like every terminal decision
+ *  (`who` names the cause, e.g. "timeout" or "run ended"). Returns the decided record only
+ *  when this expiry is the winning terminal event. */
+function expireWith(id: string, who: string, file: string, ledgerFile: string): ApprovalRecord | null {
+  if (get(id, file)?.state !== "pending") return null;
   const ts = new Date().toISOString();
   const nonce = randomBytes(8).toString("hex");
   appendEvent({ event: "expired", id, ts, nonce }, file);
   const rec = winnerOf(id, "expired", nonce, file);
-  if (!rec) return false;
-  logDecision(rec, "expired", ts, "timeout", undefined, ledgerFile);
-  return true;
+  if (!rec) return null;
+  logDecision(rec, "expired", ts, who, undefined, ledgerFile);
+  return rec;
+}
+
+/** A request nobody answered in time expires. */
+function expire(id: string, file: string, ledgerFile: string): boolean {
+  return expireWith(id, "timeout", file, ledgerFile) !== null;
+}
+
+/** Expire every pending request of one run: the run crashed or ended, so its interrupted
+ *  calls are answered by the runner with the crash notice and never run — approving later
+ *  would ledger an intervention for a call that cannot happen. Ledgered as expired with
+ *  who "run ended", never as a human intervention. */
+export function expireForRun(run_id: string, file = APPROVALS_FILE, ledgerFile = LEDGER_FILE): ApprovalRecord[] {
+  const out: ApprovalRecord[] = [];
+  for (const r of pending(file)) {
+    if (r.run_id !== run_id) continue;
+    const rec = expireWith(r.id, "run ended", file, ledgerFile);
+    if (rec) out.push(rec);
+  }
+  return out;
 }
 
 /** An Approver for unattended runs: record the request, poll for a decision, expire on timeout. */
