@@ -86,6 +86,10 @@ export async function capture(o: CaptureOptions): Promise<CaptureResult> {
   mkdirSync(o.outDir, { recursive: true });
   if (o.mode.kind === "movie") mkdirSync(path.dirname(o.mode.file), { recursive: true });
 
+  // Stale handshake files from an earlier run must not pass for this game's ready ack.
+  const qa = new QaClient(o.gameDir, o.pollMs ?? 5, () => !exited());
+  qa.clearHandshake();
+  const spawnedAt = Date.now() - 1; // mtime granularity slack; the files were just removed anyway
   const child = spawn(argv[0], argv.slice(1), { cwd: o.gameDir, env: { ...process.env, ...o.env }, detached: true, stdio: ["ignore", "ignore", "pipe"] });
   let stderr = "";
   child.stderr!.on("data", (d) => (stderr = (stderr + String(d)).slice(-4000)));
@@ -101,7 +105,6 @@ export async function capture(o: CaptureOptions): Promise<CaptureResult> {
   spawnError.catch(() => {});
   const exited = () => exitInfo !== null;
 
-  const qa = new QaClient(o.gameDir, o.pollMs ?? 5, () => !exited());
   const shots: Shot[] = [];
   const notes: string[] = [];
   let eventsSeen = 0;
@@ -141,7 +144,7 @@ export async function capture(o: CaptureOptions): Promise<CaptureResult> {
       }
       return;
     }
-    await Promise.race([qa.ready(deadline), spawnError]);
+    await Promise.race([qa.ready(deadline, spawnedAt), spawnError]);
     if (o.mode.kind === "ticks") {
       await qa.send({ cmd: "pause" }, deadline);
       let tick = await currentTick();

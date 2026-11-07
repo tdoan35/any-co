@@ -87,6 +87,26 @@ test("a game that ignores quit is killed after the grace period, and the result 
   assert.equal(alive(Number(readFileSync(path.join(game, "qa", "pid"), "utf8"))), false);
 });
 
+test("R16-1: a leftover ready ack from an earlier run does not pass for a slow-starting game", async () => {
+  const { game, out } = tempGame();
+  mkdirSync(path.join(game, "qa"), { recursive: true });
+  writeFileSync(path.join(game, "qa", "ack.json"), JSON.stringify({ id: 0, ok: true, ready: true }));
+  writeFileSync(path.join(game, "qa", "control.json"), JSON.stringify({ id: 0, cmd: "noop" }));
+  const t0 = Date.now();
+  const r = await capture({ ...base(game, out), timeoutMs: 8000, env: { FAKE_STARTUP_MS: "1000" }, mode: { kind: "ticks", ticks: [40, 90] } });
+  assert.deepEqual(r.shots.map((s) => s.tick), [40, 90]);
+  assert.ok(Date.now() - t0 >= 1000, "capture waited for the real (post-boot) ready ack");
+});
+
+test("R16-1: movie footage, then stills, in the same clone (the trailer workflow)", { skip: NO_FF }, async () => {
+  const { root, game, out } = tempGame();
+  await capture({ ...base(game, out), env: { FAKE_FFMPEG: FFMPEG(), FAKE_STARTUP_MS: "300" }, mode: { kind: "movie", file: path.join(root, "media", "m", "footage.avi"), exit_after_ticks: 60 } });
+  // movie mode sends no commands, so it leaves {id:0, ready:true} behind
+  assert.equal(JSON.parse(readFileSync(path.join(game, "qa", "ack.json"), "utf8")).ready, true);
+  const r = await capture({ ...base(game, out), env: { FAKE_STARTUP_MS: "300" }, mode: { kind: "ticks", ticks: [25] } });
+  assert.deepEqual(r.shots.map((s) => s.tick), [25]);
+});
+
 test("a launch that cannot start fails loudly", async () => {
   const { game, out } = tempGame();
   await assert.rejects(capture({ ...base(game, out), launch: [path.join(game, "no-such-binary")], mode: { kind: "ticks", ticks: [1] } }), /could not start the game|ENOENT|exited/);

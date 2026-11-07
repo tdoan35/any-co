@@ -2,7 +2,8 @@
 // Test double for tools/media: a fake "desktop build" that speaks the qa/ protocol from
 // docs/contracts (controls, events, screenshot, state-dump) with no game in it. It ticks on a
 // timer, emits standard events on a fixed schedule, and writes solid-colour PNGs on screenshot.
-// FAKE_MODE=no-ready never acks startup; FAKE_MODE=ignore-quit acks quit but keeps running.
+// FAKE_MODE=no-ready never acks startup; FAKE_MODE=ignore-quit acks quit but keeps running;
+// FAKE_STARTUP_MS delays startup like a real engine boot.
 import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
@@ -19,6 +20,9 @@ const exitAfter = flag("--exit-after-ticks") ? Number(flag("--exit-after-ticks")
 const movie = flag("--write-movie");
 const scale = Number(flag("--time-scale") ?? "1");
 
+// FAKE_STARTUP_MS: engine boot time before the game touches qa/ (Godot takes ~1 s).
+const startupMs = Number(process.env.FAKE_STARTUP_MS ?? "0");
+if (startupMs > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, startupMs);
 const qa = "qa";
 mkdirSync(qa, { recursive: true });
 const atomic = (file, text) => {

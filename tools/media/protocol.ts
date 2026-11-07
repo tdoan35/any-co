@@ -2,13 +2,21 @@
 // DUPLICATION NOTE: tools/qa (another seat, another branch) builds the full QA driver over the same
 // protocol. This copy is deliberately small (ready, send/ack, events tail); consolidate into one
 // shared module once both land.
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 export interface Ack { id: number; ok: boolean; error?: string; [k: string]: unknown }
 export interface GameEvent { schema_version: number; tick: number; event: string; data: Record<string, unknown> }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function mtimeMs(file: string): number {
+  try {
+    return statSync(file).mtimeMs;
+  } catch {
+    return -1;
+  }
+}
 
 function readJson(file: string): any {
   try {
@@ -27,12 +35,22 @@ export class QaClient {
     this.qaDir = path.join(gameDir, "qa");
   }
 
-  /** Wait for the startup ack `{id: 0, ok: true, ready: true}`. */
-  async ready(deadline: number): Promise<void> {
+  /**
+   * Remove the handshake files a previous run left behind (controls.md: the game rewrites
+   * control.json {id:0} and ack.json only once it is up). A stale `{id:0, ready:true}` — e.g. from
+   * a movie capture, which sends no commands — would otherwise pass ready() before the game starts,
+   * and the game's startup would then overwrite our first command. Call before spawning.
+   */
+  clearHandshake(): void {
+    for (const f of ["ack.json", "control.json", "ack.json.tmp", "control.json.tmp"]) rmSync(path.join(this.qaDir, f), { force: true });
+  }
+
+  /** Wait for the startup ack `{id: 0, ok: true, ready: true}`, written no earlier than `notBefore` (ms epoch). */
+  async ready(deadline: number, notBefore = 0): Promise<void> {
     const ackFile = path.join(this.qaDir, "ack.json");
     for (;;) {
       const a = readJson(ackFile);
-      if (a && a.id === 0 && a.ok === true && a.ready === true) return;
+      if (a && a.id === 0 && a.ok === true && a.ready === true && mtimeMs(ackFile) >= notBefore) return;
       this.check(deadline, "the game's ready ack (qa/ack.json id 0)");
       await sleep(this.pollMs);
     }
