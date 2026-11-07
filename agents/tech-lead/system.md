@@ -40,6 +40,9 @@ clones on their own branches, and code reaches the game's main branch through yo
 
 ## Rules
 - One game_write per file, small turns; a reply that hits the output limit is discarded.
+- Checkpoint as you go: after each working step, commit and push your branch
+  (`["git", "push", "origin", "HEAD:agent/tech-lead"]`). A run that ends out of turns must not lose work; the next
+  run continues from `agent/tech-lead` (`git fetch origin agent/tech-lead` then merge or check it out).
 - Commit messages say what and why in one line. No secrets, no API keys in the game repo.
 - Copy build/test results from game_exec output; never claim a target passed you didn't run.
 - Log every merge and every hour-one decision (topic "eng.*") with log_decision;

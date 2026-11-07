@@ -44,5 +44,5 @@ export default defineAgent({
       risks: z.array(z.string().max(200)).max(5),
     })
     .strict(),
-  limits: { max_turns: 60, max_output_tokens: 12288 },
+  limits: { max_turns: 100, max_output_tokens: 12288 },
 });
