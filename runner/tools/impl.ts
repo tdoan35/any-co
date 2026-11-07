@@ -1,5 +1,6 @@
 // Local implementations of the capabilities in registry.ts.
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { isIP } from "node:net";
@@ -822,6 +823,108 @@ const emailSend: ToolImpl = {
   },
 };
 
+// ---------- site_deploy / site_status: the studio site as a Naïve App ----------
+// SDK shape (docs/capabilities -> apps): apps.deploy(id, path -> base64 contents, content_hash?);
+// builds run async (queued -> building -> ready on read), apps.redeploy(id, fromDeployment) ships an
+// earlier deployment's kept files again (rollback, nothing uploaded). App id comes from env only.
+
+const SITE_MAX_FILES = 500;
+const SITE_MAX_BYTES = 2 * 1024 * 1024;
+
+/** Collect a directory into the deploy file map: key = prefix + relative path. */
+async function collectSiteFiles(abs: string, prefix: string, includeHidden: boolean, files: Map<string, Buffer>) {
+  for (const entry of await readdir(abs, { withFileTypes: true })) {
+    if (entry.name.startsWith(".") && !includeHidden) continue;
+    const p = path.join(abs, entry.name);
+    if (entry.isDirectory()) await collectSiteFiles(p, `${prefix}${entry.name}/`, includeHidden, files);
+    else if (entry.isFile()) {
+      if (files.size >= SITE_MAX_FILES) throw new Error(`site deploy tops out at ${SITE_MAX_FILES} files`);
+      const buf = await readFile(p);
+      if (buf.byteLength > SITE_MAX_BYTES) throw new Error(`${prefix}${entry.name} is ${Math.round(buf.byteLength / 1024)} KB; the per-file cap is ${SITE_MAX_BYTES / 1024} KB`);
+      files.set(prefix + entry.name, buf);
+    }
+  }
+}
+
+const siteDeploy: ToolImpl = {
+  description:
+    "Publish the studio site to the studio's Naïve App: the web build (default dist/web) plus site/ if the marketing agents wrote one. " +
+    "The operator approves every deploy; builds run async, so check site_status for ready. rollback_to ships an earlier deployment again (also approved).",
+  input: z
+    .object({
+      dir: z.string().min(1).max(200).default("dist/web").describe("Web-root dir inside your clone (build.sh build-web output)"),
+      site_dir: z.string().min(1).max(200).default("site").describe("Extra dir inside your clone published under site/ (landing page, devlog); skipped when absent"),
+      include_hidden: z.boolean().default(false).describe("Ship dotfiles too (default: skipped)"),
+      rollback_to: z.string().min(4).max(80).optional().describe("Deployment id to ship again instead of uploading files"),
+    })
+    .strict(),
+  async run({ dir = "dist/web", site_dir = "site", include_hidden = false, rollback_to }, ctx) {
+    if (!ctx.naive) return { content: "site_deploy needs a Naïve client (NAIVE_API_KEY)", is_error: true };
+    const appId = process.env.STUDIO_SITE_APP_ID;
+    if (!appId)
+      return { content: "STUDIO_SITE_APP_ID is not set; the operator creates the studio app once (docs/naive-notes.md, Apps) and sets its id in env", is_error: true };
+    try {
+      if (rollback_to) {
+        const d = await ctx.naive.apps.redeploy(appId, rollback_to);
+        return { content: JSON.stringify({ deployment: d.id, status: d.status, url: d.url, rolled_back_to: rollback_to }) };
+      }
+      const clone = path.join(ctx.workspace, "game");
+      const buildIdFile = path.join(clone, "dist", "build_id");
+      if (!existsSync(buildIdFile)) throw new Error("no dist/build_id in your clone; run build.sh first");
+      const buildId = (await readFile(buildIdFile, "utf8")).trim();
+      const webRoot = resolveInWorkspace(clone, dir);
+      if (!(await stat(webRoot)).isDirectory()) throw new Error(`"${dir}" is not a directory in your clone`);
+      const files = new Map<string, Buffer>();
+      await collectSiteFiles(webRoot, "", include_hidden, files);
+      const siteRoot = resolveInWorkspace(clone, site_dir);
+      if (existsSync(siteRoot) && (await stat(siteRoot)).isDirectory()) await collectSiteFiles(siteRoot, "site/", include_hidden, files);
+      if (files.size === 0) throw new Error(`"${dir}" is empty; nothing to deploy`);
+      files.set("build_id.txt", Buffer.from(`${buildId}\n`, "utf8"));
+      // Stable digest over sorted (name, bytes) pairs: the platform echoes it, so unchanged sites can be skipped.
+      const digest = createHash("sha256");
+      const map: Record<string, string> = {};
+      for (const [name, buf] of [...files].sort(([a], [b]) => (a < b ? -1 : 1))) {
+        map[name] = buf.toString("base64");
+        digest.update(name).update(buf);
+      }
+      const d = await ctx.naive.apps.deploy(appId, map, digest.digest("hex"));
+      const app = await ctx.naive.apps.get(appId);
+      return { content: JSON.stringify({ deployment: d.id, status: d.status, url: d.url, app_url: app.url, build_id: buildId, files: files.size }) };
+    } catch (e) {
+      return { content: clip(`site deploy failed: ${errText(e)}`, 2000), is_error: true };
+    }
+  },
+};
+
+const siteStatus: ToolImpl = {
+  description: "Read-only: the studio site's app status and URL, the latest deployment's build_id, and the last 5 deployments.",
+  input: z.object({}).strict(),
+  async run(_i, ctx) {
+    if (!ctx.naive) return { content: "site_status needs a Naïve client (NAIVE_API_KEY)", is_error: true };
+    const appId = process.env.STUDIO_SITE_APP_ID;
+    if (!appId) return { content: "STUDIO_SITE_APP_ID is not set; the operator creates the studio app once (docs/naive-notes.md, Apps) and sets its id in env", is_error: true };
+    try {
+      const app = await ctx.naive.apps.get(appId);
+      const deps = await ctx.naive.apps.deployments(appId, { limit: 5 });
+      let buildId: string | null = null;
+      if (deps.data[0]) {
+        const kept = await ctx.naive.apps.deploymentFiles(appId, deps.data[0].id);
+        const raw = kept.files["build_id.txt"];
+        if (raw) buildId = Buffer.from(raw, "base64").toString("utf8").trim();
+      }
+      return {
+        content: JSON.stringify({
+          app: { id: app.id, name: app.name, status: app.status, url: app.url },
+          build_id: buildId,
+          deployments: deps.data.map((d) => ({ id: d.id, status: d.status, url: d.url, created_at: d.created_at })),
+        }),
+      };
+    } catch (e) {
+      return { content: clip(`site status failed: ${errText(e)}`, 2000), is_error: true };
+    }
+  },
+};
+
 /** Each capability provides one or more model-facing tools. */
 export const IMPLS: Record<CapabilityName, Record<string, ToolImpl>> = {
   catalog_query: catalogTools,
@@ -838,6 +941,8 @@ export const IMPLS: Record<CapabilityName, Record<string, ToolImpl>> = {
   itch_push: { itch_push: itchPush },
   itch_status: { itch_status: itchStatus },
   email_send: { email_send: emailSend },
+  site_deploy: { site_deploy: siteDeploy },
+  site_status: { site_status: siteStatus },
 };
 
 /** Model-facing tool name → its capability and implementation. */

@@ -112,3 +112,13 @@ Re-check https://usenaive.ai/docs/llms.txt when in doubt (`vetta.sh/docs` redire
   inbox on a Naïve-verified domain and returns `{ accepted, from, to, sent_at }`. There is no
   `reply_to` in the send shape. The local `email_send` tool takes the identity/inbox ids from
   env (`NAIVE_EMAIL_IDENTITY_ID`, `NAIVE_EMAIL_INBOX_ID`) until the studio provisions them.
+- **Apps = hosted sites, deploy is one call** (checked Nov 7, SDK types + docs/api/apps.md):
+  create the app once (`apps.create({name, type: "frontend_only"})` → id + url; org-level,
+  outlives sessions — the operator does this live). `apps.deploy(id, files, content_hash?)`
+  ships the whole site in one request; `files` maps paths to **base64** contents (the SDK does
+  NOT encode for you), min 1 file. Builds are async: `queued → building → ready` advances on
+  read — poll `apps.deployments(id, {limit})` or `apps.get`. `apps.redeploy(id, fromDeployment)`
+  ships an earlier deployment's kept files again (rollback; nothing uploaded).
+  `apps.deploymentFiles(id, depId)` reads a deployment's file map back (base64). `content_hash`
+  is client-computed, stored as sent, echoed on reads — compare with the newest deployment to
+  skip unchanged uploads. The harness tool is `site_deploy` (app id from `STUDIO_SITE_APP_ID`).

@@ -1,17 +1,18 @@
 import { z } from "zod";
 import { defineAgent } from "../../runner/spec.ts";
 
-// Builds and staging are local work. Sends that leave the machine go through gated tools:
-// itch_push is ask-gated (the operator approves each push, dry-run is the default) and every
-// decision lands in the approval queue and the ledger. Steam uploads stay staged-only for now.
+// Builds and staging are local work. Sends that leave the machine go through gated tools the
+// operator approves one by one: itch_push (dry-run by default) and site_deploy (the studio site
+// as a Naïve App, with rollback); every decision lands in the approval queue and the ledger.
+// Steam uploads stay staged-only for now.
 export default defineAgent({
   name: "build-release",
-  description: "Eng: runs web and Windows builds through build.sh, stages every release artifact, and pushes to itch through the operator-gated itch_push.",
+  description: "Eng: runs web and Windows builds through build.sh, stages every artifact, and ships it: itch pushes and studio-site deploys through operator-gated tools.",
   dept: "eng",
   runner: "local",
   model: "z-ai/glm-5.3",
   budget: { cap_usd: 4, max_task_usd: 1, period: "day" },
-  tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow", web_fetch: "allow", itch_push: "ask", itch_status: "allow" },
+  tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow", web_fetch: "allow", itch_push: "ask", itch_status: "allow", site_deploy: "ask", site_status: "allow" },
   output_schema: z
     .object({
       build_id: z.string().min(1).max(60).describe("From dist/build_id, exactly"),

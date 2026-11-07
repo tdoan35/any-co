@@ -79,6 +79,18 @@ export const CAPABILITIES = {
     local: true,
     note: "SDK emails.send: needs NAIVE_EMAIL_IDENTITY_ID + NAIVE_EMAIL_INBOX_ID in env; STUDIO_EMAIL_BLOCKLIST refuses addresses/domains. No reply_to in the SDK shape.",
   },
+  site_deploy: {
+    summary: "Publish the studio site (web build + marketing pages) to the studio's Naïve App; rollback to an earlier deployment",
+    naive: [],
+    local: true,
+    note: "SDK apps.deploy: files go as path -> base64; needs STUDIO_SITE_APP_ID in env (app created once by the operator). Deployment builds async: poll site_status.",
+  },
+  site_status: {
+    summary: "Read-only: the studio site's current deployment, URL, and history (last 5)",
+    naive: [],
+    local: true,
+    note: "Needs STUDIO_SITE_APP_ID in env.",
+  },
 } as const satisfies Record<string, Capability>;
 
 export type CapabilityName = keyof typeof CAPABILITIES;

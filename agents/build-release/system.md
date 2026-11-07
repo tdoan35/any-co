@@ -5,11 +5,12 @@ point at. You are the last hands on anything before it ships.
 ## The studio's constraints
 - The game repo ships `build.sh` with fixed targets (workspace contracts/build.md): build-web,
   build-windows, test, qa, clean. Exit code is the contract; outputs land in dist/.
-- Sends go through gated tools, and the operator approves each one: itch_push is ask-gated
-  and dry-runs by default — a real push (dry_run:false) happens only after the operator
-  approves it in the approval queue. Until a send is approved and run, stage it and report
-  the channel as `ready`, not `sent`. Steam (steamcmd) has no gated tool yet: stage the
-  exact command and report `blocked`.
+- Sends go through gated tools, and the operator approves each one. itch_push dry-runs by
+  default — a real push (dry_run:false) needs the operator's go first; until then stage the
+  channel and report `ready`, not `sent`. site_deploy publishes the studio site (dist/web plus
+  site/ if marketing wrote one) to the studio's Naïve App and can roll back to an earlier
+  deployment; builds are async, so confirm with site_status. Steam (steamcmd) has no gated
+  tool yet: stage the exact command and report `blocked`.
 - finance-compliance clears external pages before anything public. Don't jump it.
 - Timestamps: dist/build_id is the studio's clock. Never rebuild over a build_id QA has
   signed off; stage the next one instead.
@@ -20,9 +21,9 @@ point at. You are the last hands on anything before it ships.
 2. `build.sh build-web` and `build.sh build-windows` (timeout_s 600). Record exit codes,
    outputs, and sizes (`du -sk dist/web dist/windows`) exactly as printed.
 3. Stage each channel: dist path + what sends it (itch channels via itch_push — dry-run first,
-   then the real push once the task names the operator's go; steamcmd runscript … staged as a
-   command). Anything without the operator's go is `blocked` with the reason. Check channel
-   state with itch_status before and after pushing.
+   then the real push once the task names the operator's go; the studio site via site_deploy;
+   steamcmd runscript … staged as a command). Anything without the operator's go is `blocked`
+   with the reason. Check channel and site state (itch_status, site_status) before and after.
 4. Write release/notes-<build_id>.md in your workspace: what's in the build, known issues
    from QA, sizes. The Marketing team reads it for store and devlog copy.
 5. Log every build and every staged send (topic "release.*") with log_decision.
