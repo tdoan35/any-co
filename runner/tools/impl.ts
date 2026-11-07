@@ -18,6 +18,9 @@ import {
   MAX_REGENERATIONS, PROVIDERS, anchorWinner, countGeneration, generationCount, isExhausted, markExhausted, other, readCredits, readGallery,
   readProviders, recordAnchorWinner, recordCredit, statePaths,
 } from "../../tools/art/credits.ts";
+import { capture as mediaCapture, POLICY as MEDIA_POLICY, type CaptureMode } from "../../tools/media/capture.ts";
+import { edit as mediaEdit, probe as mediaProbe } from "../../tools/media/edit.ts";
+import { track as trackGroup } from "../../tools/proc/reaper.ts";
 import { append as ledgerAppend, read as ledgerRead, LEDGER_FILE, type LedgerEntry } from "../../tools/ledger/ledger.ts";
 import type { ImageBlock } from "../types.ts";
 import { AGENTS_DIR } from "../load.ts";
@@ -692,6 +695,7 @@ const gameExec: ToolImpl = {
       const err: Buffer[] = [];
       let outBytes = 0;
       const child = spawn(cmd, args, { cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+      const reaper = child.pid ? trackGroup(child.pid) : null; // runner exit/signal/kill -9 reaps the group too
       const take = (sink: Buffer[]) => (b: Buffer) => { if (outBytes < MAX_OUT) { sink.push(b); outBytes += b.length; } };
       child.stdout?.on("data", take(out));
       child.stderr?.on("data", take(err));
@@ -715,6 +719,7 @@ const gameExec: ToolImpl = {
       }, limitMs);
       const r = await promise;
       killGroup("SIGKILL"); // nothing from this call outlives it (background children of a finished command included)
+      reaper?.untrack();
       if (timedOut) r.err = `${r.err}\n(timed out after ${limitMs / 1000} s; the command and its children were killed)`;
       return {
         content: clip(`exit ${timedOut ? "timeout" : r.code}\n${r.out}${r.err ? `\nstderr:\n${r.err}` : ""}`),
@@ -1423,6 +1428,148 @@ const siteStatus: ToolImpl = {
   },
 };
 
+// ---------- media_capture (tools/media): stills, footage, and deterministic edits for marketing ----------
+// Built against docs/contracts only. Inputs are workspace-relative (the game clone is <workspace>/game);
+// outputs land under <workspace>/media/. The game is launched from the clone with cwd = the clone, and
+// the launch command must be a file inside the clone or the engine binary (GODOT_BIN, default "godot").
+
+const MEDIA_NAME = /^[a-z0-9][a-z0-9_-]{0,47}$/;
+
+/** A workspace path under media/ (outputs). */
+function mediaOut(workspace: string, rel: string): string {
+  const norm = path.posix.normalize(rel.replace(/\\/g, "/"));
+  if (!norm.startsWith("media/") || norm.includes("/../")) throw new Error(`outputs go under media/ in your workspace, got "${rel}"`);
+  return resolveInWorkspace(workspace, norm);
+}
+
+// Launch args are allowlisted (review R16-2): engine flags that pick a renderer/driver or a window
+// mode only. Anything that runs other code or another project (--script/-s, --main-pack, --editor,
+// --path elsewhere, -e, --debug-server…) is refused.
+const LAUNCH_FLAGS = new Set(["--headless", "--windowed"]);
+const LAUNCH_VALUE_FLAGS = new Set(["--rendering-method", "--rendering-driver", "--display-driver", "--audio-driver"]);
+const LAUNCH_VALUE = /^[A-Za-z0-9_.-]{1,40}$/;
+
+/**
+ * The launch argv: the engine binary by name (GODOT_BIN, default "godot") run on the clone, or a
+ * built desktop export under the clone's dist/ (build.md). Trust note: dist/ is inside an
+ * agent-writable clone, so an agent that can also write there could plant its own executable.
+ */
+export function mediaLaunch(clone: string, launch: string[]): string[] {
+  const [bin, ...rest] = launch;
+  const engine = process.env.GODOT_BIN ?? "godot";
+  const isEngine = bin === engine;
+  let exe = bin;
+  if (!isEngine) {
+    exe = resolveInWorkspace(clone, bin);
+    if (!exe.startsWith(path.join(clone, "dist") + path.sep)) throw new Error(`launch[0] must be the engine ("${engine}") or a desktop build under the clone's dist/ (build.sh output); "${bin}" is neither`);
+    if (!existsSync(exe)) throw new Error(`launch[0] ${bin} does not exist in the clone (run build.sh first)`);
+  }
+  const out: string[] = [];
+  for (let k = 0; k < rest.length; k++) {
+    const a = rest[k];
+    if (LAUNCH_FLAGS.has(a)) out.push(a);
+    else if (LAUNCH_VALUE_FLAGS.has(a) && LAUNCH_VALUE.test(rest[k + 1] ?? "")) out.push(a, rest[++k]);
+    else if (isEngine && a === "--path") {
+      const target = rest[++k] ?? "";
+      if (resolveInWorkspace(clone, target) !== clone) throw new Error(`--path must be the game clone itself (".") , got "${target}"`);
+      out.push(a, clone);
+    } else throw new Error(`launch argument "${a}" is not allowed (allowed: ${[...LAUNCH_FLAGS, ...LAUNCH_VALUE_FLAGS].join(", ")}${isEngine ? ", --path ." : ""})`);
+  }
+  return [exe, ...out];
+}
+
+const mediaTools: Record<string, ToolImpl> = {
+  media_capture: {
+    description:
+      "Capture from the running desktop build through the harness contracts: launches it from the game clone with " +
+      "--qa --seed --time-scale --autoplay --policy --resolution. mode 'ticks': pause, step to each tick, screenshot. " +
+      "mode 'events': screenshot when listed events fire (pause → dump_state → screenshot → resume). mode 'movie': engine " +
+      "movie mode (--write-movie) until --exit-after-ticks. Stills/footage go to media/<name>/. Timeouts kill the game.",
+    input: z
+      .object({
+        name: z.string().regex(MEDIA_NAME).describe("output folder media/<name>/"),
+        mode: z.enum(["ticks", "events", "movie"]),
+        launch: z.array(z.string().min(1)).min(1).max(12).describe('argv prefix: ["godot", "--path", "."] (engine on the clone) or ["dist/<target>/<game>"]; extra args only --headless, --windowed, --rendering-method/--rendering-driver/--display-driver/--audio-driver <name>'),
+        separator: z.literal("--").optional().describe('put "--" between engine args and game flags (Godot user args)'),
+        seed: z.number().int().nonnegative(),
+        time_scale: z.number().min(0.1).max(20).default(1),
+        policy: z.string().regex(MEDIA_POLICY).describe("random | greedy | script:PATH (PATH relative to the game clone)"),
+        width: z.number().int().min(64).max(3840).default(1280),
+        height: z.number().int().min(64).max(2160).default(720),
+        ticks: z.array(z.number().int().nonnegative()).min(1).max(60).optional().describe("mode ticks"),
+        triggers: z.array(z.object({ event: z.string().min(1).max(40), every: z.number().int().min(1).optional(), max: z.number().int().min(1).optional() }).strict()).min(1).max(10).optional().describe("mode events"),
+        max_shots: z.number().int().min(1).max(60).default(12),
+        exit_after_ticks: z.number().int().min(1).optional().describe("mode movie (required)"),
+        movie_file: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,47}\.avi$/).default("footage.avi"),
+        timeout_s: z.number().int().min(5).max(1800).default(300),
+      })
+      .strict(),
+    async run(i, ctx) {
+      try {
+        const clone = path.join(ctx.workspace, "game");
+        if (!existsSync(clone)) throw new Error("no clone yet; call game_clone first");
+        if (i.policy.startsWith("script:")) {
+          const script = resolveInWorkspace(clone, i.policy.slice("script:".length));
+          if (!existsSync(script)) throw new Error(`policy script ${i.policy.slice(7)} does not exist in the game clone`);
+        }
+        const outDir = mediaOut(ctx.workspace, `media/${i.name}`);
+        let mode: CaptureMode;
+        if (i.mode === "ticks") {
+          if (!i.ticks) throw new Error("mode ticks needs ticks");
+          mode = { kind: "ticks", ticks: i.ticks };
+        } else if (i.mode === "events") {
+          if (!i.triggers) throw new Error("mode events needs triggers");
+          mode = { kind: "events", triggers: i.triggers, max_shots: i.max_shots };
+        } else {
+          if (!i.exit_after_ticks) throw new Error("mode movie needs exit_after_ticks");
+          mode = { kind: "movie", file: path.join(outDir, i.movie_file), exit_after_ticks: i.exit_after_ticks };
+        }
+        const r = await mediaCapture({
+          gameDir: clone, launch: mediaLaunch(clone, i.launch), separator: i.separator, seed: i.seed, timeScale: i.time_scale,
+          policy: i.policy, resolution: { w: i.width, h: i.height }, outDir, mode, timeoutMs: i.timeout_s * 1000,
+        });
+        const rel = (f: string) => path.relative(ctx.workspace, f);
+        return {
+          content: clip(JSON.stringify({
+            shots: r.shots.map((s) => ({ ...s, file: rel(s.file) })),
+            movie: r.movie ? { file: rel(r.movie.file), bytes: r.movie.bytes } : undefined,
+            exit: r.exit, events_seen: r.events_seen, notes: r.notes,
+          })),
+        };
+      } catch (e) {
+        return { content: clip(errText(e), 4000), is_error: true };
+      }
+    },
+  },
+  media_edit: {
+    description:
+      "Execute an edit plan (a JSON file you wrote in your workspace) with ffmpeg: clips {source,start_s,end_s} or " +
+      "{still: PNG, duration_s} in order, nearest-neighbour scaling to output width×height (letterboxed), fixed fps, " +
+      "mp4 (H.264 yuv420p) or GIF (palettegen/paletteuse), optional max_bytes/max_duration_s caps. Output path under media/.",
+    input: z.object({ plan: z.string().min(1).describe("workspace-relative plan JSON: {schema_version:1, clips:[…], output:{path,format,width,height,fps,max_bytes?,max_duration_s?}}") }).strict(),
+    async run({ plan }, ctx) {
+      try {
+        const planJson = JSON.parse(await readFile(resolveInWorkspace(ctx.workspace, plan), "utf8"));
+        const r = await mediaEdit(planJson, { resolveInput: (rel) => resolveInWorkspace(ctx.workspace, rel), resolveOutput: (rel) => mediaOut(ctx.workspace, rel) });
+        return { content: JSON.stringify({ ...r, out: path.relative(ctx.workspace, r.out) }) };
+      } catch (e) {
+        return { content: clip(errText(e), 4000), is_error: true };
+      }
+    },
+  },
+  media_probe: {
+    description: "ffprobe summary of a media file in your workspace: format, duration, size, video codec/size/fps/pix_fmt/frames, audio.",
+    input: z.object({ path: z.string().min(1) }).strict(),
+    async run({ path: rel }, ctx) {
+      try {
+        return { content: JSON.stringify(await mediaProbe(resolveInWorkspace(ctx.workspace, rel))) };
+      } catch (e) {
+        return { content: clip(errText(e), 2000), is_error: true };
+      }
+    },
+  },
+};
+
 /** Each capability provides one or more model-facing tools. */
 export const IMPLS: Record<CapabilityName, Record<string, ToolImpl>> = {
   catalog_query: catalogTools,
@@ -1444,6 +1591,7 @@ export const IMPLS: Record<CapabilityName, Record<string, ToolImpl>> = {
   site_deploy: { site_deploy: siteDeploy },
   site_status: { site_status: siteStatus },
   board: boardTools,
+  media_capture: mediaTools,
 };
 
 /** Model-facing tool name → its capability and implementation. */
