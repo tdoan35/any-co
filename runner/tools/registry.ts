@@ -45,6 +45,12 @@ export const CAPABILITIES = {
     local: true,
     summary: "Studio decision ledger: log_decision, ledger_recent (tools/ledger)",
   },
+  board: {
+    summary: "The studio work board: create cards (assign work, blocked_by for order), read cards, comment (runner/board)",
+    naive: ["board_read", "board_write"],
+    local: true,
+    note: "Hosted names from docs/team/board.md: board_read lists/reads, board_write does create/update/comment/assign. On the naive backend, local agent names never go in assignee (assignment wakes a hosted session); the runner keeps them in the card body header (runner/board/naive.ts).",
+  },
   web_fetch: { summary: "Fetch a public URL as text", naive: ["web_fetch"], local: true },
   web_search: {
     summary: "Search the web",
