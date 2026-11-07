@@ -2,7 +2,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
-import { existsSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, realpathSync } from "node:fs";
 import { isIP } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -389,10 +389,41 @@ const webSearch: ToolImpl = {
 };
 
 // ---------- workspace_read / workspace_write ----------
+// Symlink-safe confinement. Returns the lexically normalised path (so `..` after a symlink is never
+// handed to the OS), after checking that what the OS would actually touch stays under the root's
+// realpath: the target's realpath when it exists, else the realpath of its deepest existing ancestor.
+// A dangling symlink anywhere on the path is refused, since a write would follow it to wherever it points.
+// Known limit: check-then-use, so a symlink swapped in between the check and the fs call is not caught.
 export function resolveInWorkspace(workspace: string, rel: string): string {
   const p = path.resolve(workspace, rel || ".");
   if (p !== workspace && !p.startsWith(workspace + path.sep)) throw new Error(`path escapes the workspace: ${rel}`);
-  return p;
+  const rootReal = realOrNull(workspace) ?? path.resolve(workspace);
+  for (let cur = p; ; cur = path.dirname(cur)) {
+    const real = realOrNull(cur);
+    if (real !== null) {
+      if (real !== rootReal && !real.startsWith(rootReal + path.sep)) throw new Error(`path escapes the workspace through a symlink: ${rel}`);
+      return p;
+    }
+    if (lstatOk(cur)) throw new Error(`path goes through a dangling symlink: ${rel}`);
+    if (cur === workspace || path.dirname(cur) === cur) return p; // root not created yet: nothing on disk to follow
+  }
+}
+
+function realOrNull(p: string): string | null {
+  try {
+    return realpathSync(p);
+  } catch {
+    return null;
+  }
+}
+
+function lstatOk(p: string): boolean {
+  try {
+    lstatSync(p);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 const workspaceRead: ToolImpl = {
