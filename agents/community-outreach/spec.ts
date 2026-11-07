@@ -1,16 +1,17 @@
 import { z } from "zod";
 import { defineAgent } from "../../runner/spec.ts";
 
-// Targets and drafts only: sending (posts, emails) is a gated capability that does not exist
-// yet. Every future send still routes through the approval gate and the ledger.
+// Targets and drafts first. Email sending exists as an ask-gated tool (email_send): the operator
+// approves every send, and each decision lands in the approval queue and the ledger. Posting to
+// venues has no send capability yet — those stay drafts for a human.
 export default defineAgent({
   name: "community-outreach",
-  description: "Marketing: finds where the game's players gather, checks each venue's self-promotion and AI rules, and writes send-ready devlog posts and outreach messages.",
+  description: "Marketing: finds where the game's players gather, checks each venue's self-promotion and AI rules, writes send-ready devlog posts and outreach messages, and sends approved email through the gated email_send.",
   dept: "marketing",
   runner: "local",
   model: "z-ai/glm-5.3",
   budget: { cap_usd: 4, max_task_usd: 0.75, period: "day" },
-  tools: { web_search: "allow", web_fetch: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow" },
+  tools: { web_search: "allow", web_fetch: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow", email_send: "ask" },
   output_schema: z
     .object({
       targets: z

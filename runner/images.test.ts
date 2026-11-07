@@ -12,7 +12,8 @@ import { FakeProvider, NaiveProvider, toOpenAIMessages } from "./providers.ts";
 import { runAgent } from "./run.ts";
 import { resumeRun } from "./resume.ts";
 import { wireMessages } from "./images.ts";
-import { decodePng, encodePng, upscaleNearest } from "./tools/png.ts";
+import { decodePng, encodePng } from "../tools/art/png.ts";
+import { upscaleNearest } from "../tools/art/ops.ts";
 import { IMPLS } from "./tools/impl.ts";
 import type { ToolUseBlock } from "./types.ts";
 
@@ -23,8 +24,8 @@ const PNG = readFileSync(path.join(HERE, "__fixtures__", "img", "tiny.png")); //
 const tmp = () => mkdtempSync(path.join(tmpdir(), "anyco-img-"));
 const use = (name: string, input: Record<string, unknown>, id: string): ToolUseBlock => ({ type: "tool_use", id, name, input });
 
-test("png codec: decodes ground truth exactly, round-trips, upscales, refuses junk", () => {
-  const img = decodePng(PNG);
+test("png: shared codec decodes the Python-written fixture exactly; nearest-neighbour upscale; refuses junk", () => {
+  const img = decodePng(new Uint8Array(PNG));
   assert.equal(img.width, 4);
   assert.equal(img.height, 3);
   assert.deepEqual(Array.from(img.data.subarray(4 * 4, 4 * 4 + 4)), [255, 0, 255, 128]); // row 1 col 0
@@ -38,10 +39,10 @@ test("png codec: decodes ground truth exactly, round-trips, upscales, refuses ju
   assert.equal(up.width, 8);
   assert.equal(up.height, 6);
   assert.deepEqual(Array.from(up.data.subarray((2 * 8 + 2) * 4, (2 * 8 + 2) * 4 + 4)), [0, 255, 255, 0]); // (2,2) up = (1,1) source
-  assert.throws(() => decodePng(Buffer.from("definitely not a png")), /not a PNG/);
+  assert.throws(() => decodePng(new Uint8Array(Buffer.from("definitely not a png"))), /not a PNG/);
   const corrupt = Buffer.from(PNG);
   corrupt[corrupt.length - 5] ^= 0xff; // break the IEND CRC
-  assert.throws(() => decodePng(corrupt), /CRC/);
+  assert.throws(() => decodePng(new Uint8Array(corrupt)), /CRC/);
 });
 
 test("art_view: image block + size, content-addressed copy, escape and cap refused", async () => {

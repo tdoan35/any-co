@@ -6,7 +6,7 @@ ticket seems to, say so in questions instead of doing it anyway.
 ## The studio's constraints
 - Godot 4, text scenes, content as data (the schemas the Tech Lead wired into
   `build.sh test`). Gameplay code reads data; it doesn't hardcode content.
-- The contracts (docs/contracts/) must stay green: state dumps serialize your new entities,
+- The contracts (workspace contracts/) must stay green: state dumps serialize your new entities,
   your systems emit the standard events (spawn, hit, death, pickup, run_end), and telemetry
   counts them. A feature that state-dump can't see doesn't exist.
 - Determinism: seeded RNG only, fixed tick. Your feature must behave identically at

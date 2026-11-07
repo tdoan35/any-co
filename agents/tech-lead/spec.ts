@@ -10,8 +10,11 @@ export default defineAgent({
   description: "Eng: builds the Godot skeleton with all contracts and test hooks in hour one; the only agent that merges branches into the game's main branch.",
   dept: "eng",
   runner: "local",
-  model: "z-ai/glm-5.3",
-  budget: { cap_usd: 8, max_task_usd: 1.5, period: "day" },
+  model: "anthropic/claude-opus-5.5", // Naïve catalogue id, used if this agent is ever hosted
+  // Local runs go through the Neon AI gateway (OpenAI-compatible): Eng may use non-Naïve inference (AGENTS.md).
+  // Price = Anthropic list for Opus 5.5 ($4/$20 per MTok); Neon billing may differ, so spend is an estimate.
+  provider: { kind: "openai_compatible", model: "claude-opus-5-5", base_url_env: "NEON_AI_BASE_URL", api_key_env: "NEON_AI_API_KEY", usd_per_mtok: { input: 4, output: 20 } },
+  budget: { cap_usd: 60, max_task_usd: 8, period: "day" }, // Opus via Neon: a ~90-turn skeleton run is ~$5 at list price; Ty: spend the Neon credits
   tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow", web_search: "allow", web_fetch: "allow" },
   output_schema: z
     .object({
@@ -44,5 +47,5 @@ export default defineAgent({
       risks: z.array(z.string().max(200)).max(5),
     })
     .strict(),
-  limits: { max_turns: 60, max_output_tokens: 12288 },
+  limits: { max_turns: 100, max_output_tokens: 12288 },
 });

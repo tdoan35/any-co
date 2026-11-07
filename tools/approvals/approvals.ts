@@ -16,8 +16,8 @@ export const APPROVALS_FILE = process.env.STUDIO_APPROVALS_FILE ?? path.join(ROO
 
 export type ApprovalEvent =
   | { event: "requested"; id: string; ts: string; agent: string; run_id: string; tool: string; input: unknown }
-  | { event: "approved" | "denied"; id: string; ts: string; who: string; note?: string }
-  | { event: "expired"; id: string; ts: string };
+  | { event: "approved" | "denied"; id: string; ts: string; who: string; note?: string; nonce: string }
+  | { event: "expired"; id: string; ts: string; nonce: string };
 
 export interface ApprovalRecord {
   id: string;
@@ -105,10 +105,12 @@ function logDecision(rec: ApprovalRecord, decision: "approved" | "denied" | "exp
 }
 
 /** The folded record iff the first terminal event for id in file order is exactly the one just appended.
- *  Two processes can both see "pending" and both append; only the file-order winner may ledger. */
-function winnerOf(id: string, event: "approved" | "denied" | "expired", ts: string, file: string): ApprovalRecord | null {
-  const first = readEvents(file).find((e) => e.id === id && e.event !== "requested");
-  if (first?.ts !== ts || first.event !== event) return null; // another process's event won
+ *  Two processes can both see "pending" and both append; only the file-order winner may ledger.
+ *  Identity is the event's random nonce, not its timestamp: two decisions in the same millisecond
+ *  are still different events, and only one of them is the file-order first. */
+function winnerOf(id: string, event: "approved" | "denied" | "expired", nonce: string, file: string): ApprovalRecord | null {
+  const first = readEvents(file).find((e): e is Extract<ApprovalEvent, { event: "approved" | "denied" | "expired" }> => e.id === id && e.event !== "requested");
+  if (first?.nonce !== nonce || first.event !== event) return null; // another process's event won — or a pre-nonce one, which always means lost
   return get(id, file) ?? null;
 }
 
@@ -118,8 +120,9 @@ export function decide(id: string, approve: boolean, who: string, note?: string,
   if (get(id, file)?.state !== "pending") return null; // fast path: unknown or already decided
   const event = approve ? "approved" as const : "denied" as const;
   const ts = new Date().toISOString();
-  appendEvent({ event, id, ts, who, ...(note ? { note } : {}) }, file);
-  const rec = winnerOf(id, event, ts, file);
+  const nonce = randomBytes(8).toString("hex");
+  appendEvent({ event, id, ts, who, nonce, ...(note ? { note } : {}) }, file);
+  const rec = winnerOf(id, event, nonce, file);
   if (!rec) return null; // lost the race: the fold already has another terminal event
   logDecision(rec, event, ts, who, note, ledgerFile);
   return rec;
@@ -131,8 +134,9 @@ export function decide(id: string, approve: boolean, who: string, note?: string,
 function expireWith(id: string, who: string, file: string, ledgerFile: string): ApprovalRecord | null {
   if (get(id, file)?.state !== "pending") return null;
   const ts = new Date().toISOString();
-  appendEvent({ event: "expired", id, ts }, file);
-  const rec = winnerOf(id, "expired", ts, file);
+  const nonce = randomBytes(8).toString("hex");
+  appendEvent({ event: "expired", id, ts, nonce }, file);
+  const rec = winnerOf(id, "expired", nonce, file);
   if (!rec) return null;
   logDecision(rec, "expired", ts, who, undefined, ledgerFile);
   return rec;

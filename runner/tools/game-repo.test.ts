@@ -85,3 +85,18 @@ test("game_repo: no repo, ambiguous repos, and exec before clone are clear error
   assert.equal(noClone.is_error, true);
   assert.match(noClone.content, /game_clone first/);
 });
+
+test("game_clone copies the harness contracts into the workspace (read-only reference) and ANYCO_AGENT reaches game_exec", async () => {
+  const { readFileSync, readdirSync } = await import("node:fs");
+  const { CONTRACTS_DIR } = await import("../../runner/tools/impl.ts");
+  const { root } = makeGamesRoot();
+  const ctx = ctxFor(root);
+  const info = JSON.parse((await IMPLS.game_repo.game_clone.run({}, ctx)).content);
+  assert.match(info.contracts, /contracts\//);
+  for (const f of readdirSync(CONTRACTS_DIR).filter((f) => /\.(md|json)$/.test(f))) {
+    assert.equal(readFileSync(path.join(ctx.workspace, "contracts", f), "utf8"), readFileSync(path.join(CONTRACTS_DIR, f), "utf8"), f);
+  }
+  assert.ok(!existsSync(path.join(ctx.workspace, "game", "contracts")), "the copy stays outside the clone");
+  const r = await IMPLS.game_repo.game_exec.run({ command: ["sh", "-c", "printf %s \"$ANYCO_AGENT\""] }, ctx);
+  assert.match(r.content, /gameplay-engineer/);
+});
