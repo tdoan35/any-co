@@ -785,6 +785,12 @@ const artGenerate: ToolImpl = {
       if (i.postprocess && (i.postprocess.snap || i.postprocess.lock || i.postprocess.outline))
         postprocess = await applyArtPostprocess(ctx.workspace, i.postprocess, result.images);
       return { content: JSON.stringify({ ...result, postprocess }), cost_micro_usd: result.cost_micro_usd };
+      } catch (e) {
+        return { content: errText(e), is_error: true };
+      }
+    },
+};
+
 // ---------- itch_push / itch_status: butler sends (ask-gated by spec) ----------
 // butler reads BUTLER_API_KEY from env itself, so the key is never in argv, results, or the ledger.
 
