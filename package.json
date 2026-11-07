@@ -12,6 +12,7 @@
     "test": "node --import tsx --test 'runner/**/*.test.ts' 'tools/**/*.test.ts' 'scripts/**/*.test.ts' 'window/server/**/*.test.ts' && python3 tools/catalog/smoke_test.py",
     "agent": "node --env-file-if-exists=.env --import tsx scripts/run-agent.ts",
     "runs": "node --env-file-if-exists=.env --import tsx scripts/runs.ts",
+    "media": "node --import tsx tools/media/media.ts",
     "eval:market-analyst": "node --env-file-if-exists=.env --import tsx scripts/eval-market-analyst.ts",
     "gapmap:embed": "node --env-file=.env --import tsx tools/gapmap/embed.ts",
     "gapmap:build": "node --import tsx tools/gapmap/build.ts",
