@@ -68,6 +68,7 @@ TODO: fill in as they exist.
 - run toy task end to end: `npm run agent -- toy-catalog-reporter --task "Report the catalog dataset facts."`
 - cut over one agent to Naïve:
 - gap map: `tools/gapmap/README.md` (embed → build → render)
+- art pipeline: `npm run art -- lock|snap|outline|strip|sheet|gate ...` (`tools/art/README.md`)
 - eval Market Analyst: `npm run eval:market-analyst -- runs/<run_id>` (see `agents/market-analyst/eval/`)
 - kill switch: `touch runs/KILL` (remove to resume); or `STUDIO_KILL=1`
 

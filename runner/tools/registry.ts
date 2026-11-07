@@ -16,6 +16,12 @@ export const CAPABILITIES = {
     local: true,
     note: "Hosted agents need data/catalog.sqlite inside their computer; not set up yet.",
   },
+  art_tools: {
+    summary: "Deterministic art pipeline (tools/art): palette lock, grid snap, outline, strip split, contact sheet, asset gate",
+    naive: ["bash", "read"],
+    local: true,
+    note: "Local tools over the run workspace and the game clone. Hosted setup not done.",
+  },
   gap_map: {
     summary: "Embedding map of the Steam catalog: open regions near proven demand; probe a description (tools/gapmap)",
     naive: ["bash", "read"],

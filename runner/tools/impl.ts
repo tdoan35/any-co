@@ -9,6 +9,9 @@ import { z } from "zod";
 import type { CapabilityName } from "./registry.ts";
 import type { NaiveClient } from "../providers.ts";
 import { studioStatusTools } from "./studio-status.ts";
+import { decodePng, encodePng, type RgbaImage } from "../../tools/art/png.ts";
+import { addOutline, contactSheet, lockPalette, snapToGrid, splitStrip } from "../../tools/art/ops.ts";
+import { runGate } from "../../tools/art/gate.ts";
 import { append as ledgerAppend, read as ledgerRead, LEDGER_FILE } from "../../tools/ledger/ledger.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -546,6 +549,141 @@ const gameRepoTools: Record<string, ToolImpl> = {
   game_exec: gameExec,
 };
 
+// ---------- art_tools (tools/art): deterministic post-processing + asset gate ----------
+// All file paths are workspace-relative (the game clone lives at <workspace>/game), so the
+// same path-safety rule as workspace_write applies. No default palette: the Art Director's
+// style bible names one; callers pass it in.
+
+const hexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/, "must be #rrggbb");
+
+async function artReadPng(workspace: string, rel: string): Promise<RgbaImage> {
+  return decodePng(new Uint8Array(await readFile(resolveInWorkspace(workspace, rel))));
+}
+
+async function artWritePng(workspace: string, rel: string, img: RgbaImage) {
+  await mkdir(path.dirname(resolveInWorkspace(workspace, rel)), { recursive: true });
+  await writeFile(resolveInWorkspace(workspace, rel), encodePng(img));
+}
+
+const artTools: Record<string, ToolImpl> = {
+  art_lock: {
+    description:
+      "Lock an image to a palette: binarize alpha at a threshold and snap every opaque pixel to the nearest " +
+      "palette color by OKLab distance (ties → earlier entry). Pass the style bible's palette; there is no default.",
+    input: z
+      .object({
+        path: z.string().min(1).describe("workspace-relative input PNG"),
+        out: z.string().min(1).describe("workspace-relative output PNG"),
+        palette: z.array(hexColor).min(1).max(64).describe('palette hexes, e.g. ["#1a1c2c", "#ffcd75"]'),
+        alpha_threshold: z.number().int().min(0).max(255).optional().describe("alpha ≥ threshold → opaque (default 128)"),
+      })
+      .strict(),
+    async run({ path: rel, out, palette, alpha_threshold }, ctx) {
+      try {
+        const img = await artReadPng(ctx.workspace, rel);
+        const { image, stats } = lockPalette(img, palette, { alphaThreshold: alpha_threshold });
+        await artWritePng(ctx.workspace, out, image);
+        return { content: JSON.stringify({ out, width: image.width, height: image.height, ...stats }) };
+      } catch (e) {
+        return { content: errText(e), is_error: true };
+      }
+    },
+  },
+  art_snap: {
+    description:
+      "Downscale an upscaled render to exactly w×h by majority vote per cell (ties → lexicographically smallest RGBA). " +
+ "Reports the detected scale and whether it was an integer.",
+    input: z
+      .object({
+        path: z.string().min(1),
+        out: z.string().min(1),
+        w: z.number().int().positive().describe("target width in cells"),
+        h: z.number().int().positive().describe("target height in cells"),
+      })
+      .strict(),
+    async run({ path: rel, out, w, h }, ctx) {
+      try {
+        const img = await artReadPng(ctx.workspace, rel);
+        const r = snapToGrid(img, { w, h });
+        await artWritePng(ctx.workspace, out, r.image);
+        const { scaleX, scaleY, uniform, integerScale } = r;
+        return { content: JSON.stringify({ out, scaleX, scaleY, uniform, integerScale }) };
+      } catch (e) {
+        return { content: errText(e), is_error: true };
+      }
+    },
+  },
+  art_outline: {
+    description: "Add a 1 px outer outline: transparent pixels 4-adjacent to opaque ones get the given color.",
+    input: z.object({ path: z.string().min(1), out: z.string().min(1), color: hexColor }).strict(),
+    async run({ path: rel, out, color }, ctx) {
+      try {
+        await artWritePng(ctx.workspace, out, addOutline(await artReadPng(ctx.workspace, rel), color));
+        return { content: JSON.stringify({ out }) };
+      } catch (e) {
+        return { content: errText(e), is_error: true };
+      }
+    },
+  },
+  art_strip: {
+    description: "Split a horizontal frame strip PNG into numbered frame-0.png, frame-1.png, … files.",
+    input: z
+      .object({
+        path: z.string().min(1),
+        out_dir: z.string().min(1).describe("workspace-relative directory for the frame files"),
+        frames: z.number().int().positive().max(64),
+      })
+      .strict(),
+    async run({ path: rel, out_dir, frames }, ctx) {
+      try {
+        const parts = splitStrip(await artReadPng(ctx.workspace, rel), frames);
+        for (let i = 0; i < parts.length; i++) await artWritePng(ctx.workspace, `${out_dir}/frame-${i}.png`, parts[i]);
+        return { content: JSON.stringify({ out_dir, frames: parts.length, frameWidth: parts[0].width, frameHeight: parts[0].height }) };
+      } catch (e) {
+        return { content: errText(e), is_error: true };
+      }
+    },
+  },
+  art_sheet: {
+    description:
+      "Contact sheet of PNGs side by side at an integer scale (no text). Writes the sheet and returns the cell rectangles → " +
+      "frame-index mapping; the anchor frame goes first.",
+    input: z
+      .object({
+        out: z.string().min(1).describe("workspace-relative output PNG"),
+        paths: z.array(z.string().min(1)).min(1).describe("workspace-relative input PNGs, in frame order"),
+        anchor: z.number().int().nonnegative().optional().describe("index of the anchor frame (default 0)"),
+        scale: z.number().int().positive().optional().describe("integer upscale (default 1)"),
+        gap: z.number().int().nonnegative().optional().describe("transparent pixels between cells (default 0)"),
+      })
+      .strict(),
+    async run({ out, paths, anchor, scale, gap }, ctx) {
+      try {
+        const imgs = await Promise.all(paths.map((rel: string) => artReadPng(ctx.workspace, rel)));
+        const { image, cells } = contactSheet(imgs, { anchor, scale, gap });
+        await artWritePng(ctx.workspace, out, image);
+        return { content: JSON.stringify({ out, cells }) };
+      } catch (e) {
+        return { content: errText(e), is_error: true };
+      }
+    },
+  },
+  art_gate: {
+    description:
+      "Run the asset gate on a game repo (default: your game clone at game/): manifest schema, palette lock, sizes, " +
+      "frame layout, anchors, file coverage, and drift numbers. Returns the JSON report; ok=false lists every failure.",
+    input: z.object({ repo: z.string().min(1).optional().describe("workspace-relative repo dir (default: game)") }).strict(),
+    async run({ repo }, ctx) {
+      try {
+        const report = runGate(resolveInWorkspace(ctx.workspace, repo ?? "game"));
+        return { content: JSON.stringify(report), is_error: !report.ok };
+      } catch (e) {
+        return { content: errText(e), is_error: true };
+      }
+    },
+  },
+};
+
 /** Each capability provides one or more model-facing tools. */
 export const IMPLS: Record<CapabilityName, Record<string, ToolImpl>> = {
   catalog_query: catalogTools,
@@ -558,6 +696,7 @@ export const IMPLS: Record<CapabilityName, Record<string, ToolImpl>> = {
   workspace_read: { workspace_read: workspaceRead },
   workspace_write: { workspace_write: workspaceWrite },
   game_repo: gameRepoTools,
+  art_tools: artTools,
 };
 
 /** Model-facing tool name → its capability and implementation. */
