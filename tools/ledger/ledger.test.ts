@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { IMPLS } from "../../runner/tools/impl.ts";
-import { append, read } from "./ledger.ts";
+import { append, read, type ApprovalEntry } from "./ledger.ts";
 
 test("append and read survive a torn last line", () => {
   const f = path.join(mkdtempSync(path.join(tmpdir(), "ledger-")), "l.jsonl");
@@ -33,4 +33,22 @@ test("ledger_recent returns counts and newest-first entries", async () => {
 
   const empty = await IMPLS.studio_ledger.ledger_recent.run({ limit: 5 }, { workspace: dir, naive: null, ledgerFile: path.join(dir, "none.jsonl") });
   assert.equal(JSON.parse(empty.content).total, 0);
+});
+
+test("ledger_recent counts human approval decisions as interventions; auto and expired are not", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "ledger-"));
+  const f = path.join(dir, "l.jsonl");
+  const approval = (request_id: string, decision: ApprovalEntry["decision"], who: string): ApprovalEntry =>
+    ({ kind: "approval", ts: "2026-11-07T04:00:00Z", request_id, agent: "build-release", run_id: "r3", tool: "itch_upload", decision, who, input_summary: "{}" });
+  append(approval("apr-1", "approved", "operator"), f);
+  append(approval("apr-2", "denied", "operator"), f);
+  append(approval("apr-3", "approved", "auto (--approve-all)"), f);
+  append(approval("apr-4", "expired", "timeout"), f);
+  append({ kind: "decision", ts: "2026-11-07T05:00:00Z", agent: "a", run_id: "r4", topic: "t3", decision: "d3", rationale: "why3" }, f);
+
+  const out = await IMPLS.studio_ledger.ledger_recent.run({ limit: 10 }, { workspace: dir, naive: null, ledgerFile: f });
+  const parsed = JSON.parse(out.content);
+  assert.equal(parsed.counts.approval, 4);
+  assert.equal(parsed.counts.intervention, 2); // the two human decisions, not auto or expired
+  assert.ok(parsed.recent.some((e: { kind: string; request_id?: string }) => e.kind === "approval" && e.request_id === "apr-1"));
 });

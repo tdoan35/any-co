@@ -21,6 +21,8 @@ export interface ServerOptions {
   /** Tests inject a fake provider; default builds the real one from the agent spec and NAIVE_API_KEY. */
   providerFor?: (spec: AgentSpec) => Provider;
   ledgerFile?: string; eventStart?: string; now?: () => Date;
+  /** Approvals queue read by weave items; defaults to approvals.jsonl inside runsDir (STUDIO_APPROVALS_FILE wins). */
+  approvalsFile?: string;
 }
 
 const EXTRA_ORIGINS = (process.env.WINDOW_ALLOWED_ORIGINS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -44,6 +46,7 @@ const readJson = (req: http.IncomingMessage, max = 100_000) =>
 
 export async function startServer(opts: ServerOptions = {}) {
   const runsDir = opts.runsDir ?? path.join(ROOT, "runs");
+  const approvalsFile = opts.approvalsFile ?? process.env.STUDIO_APPROVALS_FILE ?? path.join(runsDir, "approvals.jsonl");
   const { ok: specs, errors } = await loadAllAgents(opts.agentsDir);
   for (const e of errors) console.warn(`[window] skipping agent spec: ${e.message}`);
   const deptOf = (agent: string) => specs.find((s: AgentSpec) => s.name === agent)?.dept ?? "ops";
@@ -102,7 +105,7 @@ export async function startServer(opts: ServerOptions = {}) {
     const runs = () => allRuns();
     if (a === "registry" && !b) return ok(buildRegistry(specs, new Set(runs().filter((r) => r.run.status === "running").map((r) => r.agent)), engine.list()));
     if (a === "interventions" && !b) return ok(engine.interventions());
-    if (a === "weave" && !b) return ok(buildWeave(runs(), specs.map((s) => s.name)));
+    if (a === "weave" && !b) return ok(buildWeave(runs(), specs.map((s) => s.name), approvalsFile));
     if (a === "projects" && !b) return ok([PROJECT]);
     if (a === "tasks") {
       const tasks = runs().map((r) => r.task);

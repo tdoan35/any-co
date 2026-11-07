@@ -67,6 +67,7 @@ TODO: fill in as they exist.
 - run one agent locally: `npm run agent -- <name> --task "..." [--model id] [--max-usd N]` → `runs/<run_id>/`
 - run toy task end to end: `npm run agent -- toy-catalog-reporter --task "Report the catalog dataset facts."`
 - cut over one agent to Naïve:
+- approvals queue: `npm run approvals -- list | show <id> | approve <id> [--note "..."] | deny <id> --note "..."` (decide gated tool calls; every decision ledgered)
 - gap map: `tools/gapmap/README.md` (embed → build → render)
 - eval Market Analyst: `npm run eval:market-analyst -- runs/<run_id>` (see `agents/market-analyst/eval/`)
 - kill switch: `touch runs/KILL` (remove to resume); or `STUDIO_KILL=1`
