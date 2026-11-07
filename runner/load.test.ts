@@ -31,7 +31,7 @@ test("spec hash is stable and changes with the spec", async () => {
 
 test("invalid specs are rejected with readable reasons", async () => {
   const { ok, errors } = await loadAllAgents(FIX);
-  assert.deepEqual(ok.map((s) => s.name), ["good-agent"]);
+  assert.deepEqual(ok.map((s) => s.name), ["good-agent", "image-agent"]);
   const msg = Object.fromEntries(errors.map((e) => [e.agent, e.message]));
   assert.match(msg["bad-budget"], /max_task_usd must be <= cap_usd/);
   assert.match(msg["wrong-name"], /must match folder/);

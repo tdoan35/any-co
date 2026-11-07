@@ -2,7 +2,7 @@
 // endpoint (fast external inference, local-only), and a scripted fake for tests.
 import { createClient } from "@usenaive-sdk/managed-agents";
 import type { AgentSpec } from "./spec.ts";
-import type { Block, Message, ModelReply, ModelRequest, Provider } from "./types.ts";
+import type { Block, ImageBlock, Message, ModelReply, ModelRequest, Provider, ToolUseBlock } from "./types.ts";
 
 export type NaiveClient = ReturnType<typeof createClient>;
 
@@ -140,6 +140,11 @@ export class OpenAICompatibleProvider implements Provider {
   }
 }
 
+const imagePart = (b: ImageBlock): Record<string, unknown> => {
+  if (b.source.type !== "base64") throw new Error("toOpenAIMessages got an unexpanded image ref; call wireMessages() first");
+  return { type: "image_url", image_url: { url: `data:${b.source.media_type};base64,${b.source.data}` } };
+};
+
 export function toOpenAIMessages(system: string, messages: Message[]): any[] {
   const out: any[] = [{ role: "system", content: system }];
   for (const m of messages) {
@@ -148,15 +153,23 @@ export function toOpenAIMessages(system: string, messages: Message[]): any[] {
       continue;
     }
     if (m.role === "assistant") {
-      const text = m.content.filter((b) => b.type === "text").map((b: any) => b.text).join("\n");
+      const text = m.content.filter((b) => b.type === "text").map((b) => b.text).join("\n");
       const calls = m.content
-        .filter((b) => b.type === "tool_use")
-        .map((b: any) => ({ id: b.id, type: "function", function: { name: b.name, arguments: JSON.stringify(b.input) } }));
+        .filter((b): b is ToolUseBlock => b.type === "tool_use")
+        .map((b) => ({ id: b.id, type: "function", function: { name: b.name, arguments: JSON.stringify(b.input) } }));
       out.push({ role: "assistant", content: text || null, ...(calls.length ? { tool_calls: calls } : {}) });
     } else {
       for (const b of m.content) {
-        if (b.type === "tool_result") out.push({ role: "tool", tool_call_id: b.tool_use_id, content: b.content });
-        else if (b.type === "text") out.push({ role: "user", content: b.text });
+        if (b.type === "tool_result") {
+          // A tool result with an image carries content parts: text plus image_url. Plain-text
+          // results stay strings, so existing runs are byte-identical to before.
+          if (typeof b.content === "string") out.push({ role: "tool", tool_call_id: b.tool_use_id, content: b.content });
+          else {
+            const parts = b.content.map((c) => (c.type === "image" ? imagePart(c) : { type: "text", text: c.text }));
+            out.push({ role: "tool", tool_call_id: b.tool_use_id, content: parts });
+          }
+        } else if (b.type === "text") out.push({ role: "user", content: b.text });
+        else if (b.type === "image") out.push({ role: "user", content: [imagePart(b)] });
       }
     }
   }

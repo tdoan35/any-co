@@ -10,6 +10,9 @@ import type { CapabilityName } from "./registry.ts";
 import type { NaiveClient } from "../providers.ts";
 import { studioStatusTools } from "./studio-status.ts";
 import { append as ledgerAppend, read as ledgerRead, LEDGER_FILE } from "../../tools/ledger/ledger.ts";
+import type { ImageBlock } from "../types.ts";
+import { createHash } from "node:crypto";
+import { decodePng, encodePng, upscaleNearest } from "./png.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -25,6 +28,8 @@ export interface ToolContext {
 
 export interface ToolOutput {
   content: string;
+  /** Optional image the model must see next to the text (a ref block; no base64 here). */
+  image?: ImageBlock;
   is_error?: boolean;
   cost_micro_usd?: number;
 }
@@ -450,6 +455,55 @@ const workspaceWrite: ToolImpl = {
   },
 };
 
+// ---------- art_view (image_view capability) ----------
+const MAX_PNG_BYTES = 4 * 1024 * 1024;
+const MAX_IMAGE_SIDE = 1024;
+
+const artView: ToolImpl = {
+  description:
+    "View a PNG image inside your workspace (sprite sheet, contact sheet, screenshot): the image itself is shown to you, along with its dimensions and sha256. Use it to check art against an anchor. Optional integer upscale for tiny pixel art (nearest-neighbour, output capped at 1024 px per side).",
+  input: z
+    .object({
+      path: z.string().min(1).describe("PNG path inside the workspace, e.g. art/sheet.png"),
+      upscale: z.number().int().min(1).max(8).optional().describe("Integer nearest-neighbour upscale for pixel art (max side 1024 px)"),
+    })
+    .strict(),
+  async run({ path: rel, upscale }, ctx) {
+    try {
+      const p = resolveInWorkspace(ctx.workspace, rel);
+      const st = await stat(p);
+      if (st.size > MAX_PNG_BYTES) return { content: `image is too large: ${st.size} bytes (cap ${MAX_PNG_BYTES})`, is_error: true };
+      let bytes: Buffer = Buffer.from(await readFile(p));
+      let img = decodePng(bytes);
+      let scaleNote = "";
+      if (upscale) {
+        const k = Math.min(upscale, Math.floor(MAX_IMAGE_SIDE / Math.max(img.width, img.height)));
+        if (k > 1) {
+          const up = upscaleNearest(img, k);
+          scaleNote = ` → ${up.width}×${up.height} (x${k} nearest-neighbour)`;
+          img = up;
+          bytes = encodePng(img);
+        }
+      }
+      if (bytes.length > MAX_PNG_BYTES) return { content: `encoded image is too large: ${bytes.length} bytes (cap ${MAX_PNG_BYTES}); use a smaller upscale`, is_error: true };
+      // Content-addressed copy of the exact bytes sent: the transcript records the ref, a
+      // resume rebuilds the message from this copy even if the workspace file changes.
+      const sha = createHash("sha256").update(bytes).digest("hex");
+      const runDir = path.join(ctx.runsDir ?? path.join(ROOT, "runs"), ctx.run_id ?? "manual");
+      const imagesDir = path.join(runDir, "images");
+      await mkdir(imagesDir, { recursive: true });
+      const copy = path.join(imagesDir, `${sha}.png`);
+      if (!existsSync(copy)) await writeFile(copy, bytes);
+      return {
+        content: `${img.width}×${img.height}${scaleNote} PNG, ${bytes.length} bytes, sha256 ${sha.slice(0, 16)}`,
+        image: { type: "image", source: { type: "ref", path: copy, media_type: "image/png", sha256: sha, size: bytes.length } },
+      };
+    } catch (e) {
+      return { content: `art_view failed: ${e instanceof Error ? e.message : String(e)}`, is_error: true };
+    }
+  },
+};
+
 // ---------- game_repo: work on the studio's game repo (games/<name>) ----------
 // Each run gets its own clone at <workspace>/game on a per-agent branch; only the Tech Lead
 // merges branches into the game's main branch (single-merger rule, plan.md §6 Engineering).
@@ -591,6 +645,7 @@ export const IMPLS: Record<CapabilityName, Record<string, ToolImpl>> = {
   web_search: { web_search: webSearch },
   workspace_read: { workspace_read: workspaceRead },
   workspace_write: { workspace_write: workspaceWrite },
+  image_view: { art_view: artView },
   game_repo: gameRepoTools,
 };
 
