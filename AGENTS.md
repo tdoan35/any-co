@@ -70,6 +70,7 @@ TODO: fill in as they exist.
 - approvals queue: `npm run approvals -- list | show <id> | approve <id> [--note "..."] | deny <id> --note "..."` (decide gated tool calls; every decision ledgered)
 - gap map: `tools/gapmap/README.md` (embed → build → render)
 - eval Market Analyst: `npm run eval:market-analyst -- runs/<run_id>` (see `agents/market-analyst/eval/`)
+- eval Game Director design doc: `npm run eval:game-director-design -- runs/<run_id>` (design hand-off: `node --import tsx scripts/greenlight-handoff.ts --design runs/<chair-run>`)
 - kill switch: `touch runs/KILL` (remove to resume); or `STUDIO_KILL=1`
 
 ## Conventions

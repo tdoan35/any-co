@@ -5,17 +5,24 @@
 //     → runs/<pv-run>/handoff-pitches.md       (task for the Game Director)
 //   node --import tsx scripts/greenlight-handoff.ts --pitches runs/<game-director-run>
 //     → runs/<gd-run>/handoff-critic.md        (task for the Feasibility Critic)
-//   node --import tsx scripts/greenlight-handoff.ts --pick runs/greenlight-<stamp>
-//     → runs/greenlight-<stamp>/handoff-pick.md (task for the Greenlight Chair)
+//   node --import tsx scripts/greenlight-handoff.ts --design runs/<chair-run>
+//     → runs/<chair-run>/handoff-design.md  (task for the Game Director's design-doc mode)
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { criticTask, pickTask } from "../tools/greenlight/handoff.ts";
+import { criticTask, designTask, pickTask } from "../tools/greenlight/handoff.ts";
 
-const { values, positionals } = parseArgs({ allowPositionals: true, options: { top: { type: "string", default: "3" }, voice: { type: "string" }, pitches: { type: "string" }, pick: { type: "string" } } });
+const { values, positionals } = parseArgs({ allowPositionals: true, options: { top: { type: "string", default: "3" }, voice: { type: "string" }, pitches: { type: "string" }, pick: { type: "string" }, design: { type: "string" } } });
 if (values.pick) {
   const file = path.join(values.pick, "handoff-pick.md");
   writeFileSync(file, pickTask(values.pick));
+  console.log(file);
+  process.exit(0);
+}
+if (values.design) {
+  const id = values.design.replace(/^runs\//, "");
+  const file = path.join(values.design, "handoff-design.md");
+  writeFileSync(file, designTask(id));
   console.log(file);
   process.exit(0);
 }
