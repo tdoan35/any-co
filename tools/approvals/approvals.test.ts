@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appendFileSync, mkdtempSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -13,6 +13,9 @@ const files = () => {
   return { f: path.join(d, "approvals.jsonl"), ledger: path.join(d, "ledger.jsonl") };
 };
 const approvalsOf = (entries: LedgerEntry[]): ApprovalEntry[] => entries.filter((e): e is ApprovalEntry => e.kind === "approval");
+const readEventsOf = (file: string) => readFileSync(file, "utf8").split("\n").filter(Boolean).flatMap((l) => {
+  try { return [JSON.parse(l) as { event: string; ts: string; nonce?: string }]; } catch { return []; }
+});
 
 test("request → approve: record approved, pending empties, ledger entry written", () => {
   const { f, ledger } = files();
@@ -92,7 +95,10 @@ test("concurrent CLI decisions on one id ledger exactly one terminal decision", 
     execFile(process.execPath, ["--import", "tsx", cliPath, ...args], { env: { ...process.env, STUDIO_APPROVALS_FILE: f, STUDIO_LEDGER_FILE: ledger } }, (error) => resolve({ code: error?.code === undefined ? 0 : typeof error.code === "number" ? error.code : 1 }));
     return promise;
   };
-  const jobs = ids.flatMap((id) => [cli(["approve", id, "--note", "yes"]), cli(["deny", id, "--note", "no"])]);
+  // Half the ids get same-kind contenders (approve vs approve): the same-ms collision shape.
+  const jobs = ids.flatMap((id, i) => (i % 2 === 0
+    ? [cli(["approve", id, "--note", "yes"]), cli(["deny", id, "--note", "no"])]
+    : [cli(["approve", id, "--note", "yes"]), cli(["approve", id, "--note", "also yes"])]));
   await Promise.all(jobs);
   const entries = approvalsOf(readLedger(ledger));
   assert.equal(entries.length, ids.length); // one decision per id, never two
@@ -100,6 +106,32 @@ test("concurrent CLI decisions on one id ledger exactly one terminal decision", 
     assert.equal(entries.filter((e) => e.request_id === id).length, 1);
     assert.notEqual(get(id, f)?.state, "pending");
   }
+});
+
+test("terminal events carry unique nonces, so same-millisecond twins are told apart", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"] }); // freeze the clock: both decisions land in one ms
+  const { f, ledger } = files();
+  const a = request({ agent: "a", run_id: "r1", tool: "t", input: {} }, f);
+  const b = request({ agent: "a", run_id: "r2", tool: "t", input: {} }, f);
+  decide(a, true, "operator", undefined, f, ledger);
+  decide(b, true, "operator", undefined, f, ledger);
+  const terminal = readEventsOf(f).filter((e) => e.event !== "requested");
+  assert.equal(terminal.length, 2);
+  assert.equal(terminal[0].ts, terminal[1].ts); // same millisecond...
+  assert.ok(terminal[0].nonce && terminal[1].nonce && terminal[0].nonce !== terminal[1].nonce); // ...different identity
+});
+
+test("a same-ms same-kind collision keeps only the file-order winner's decision", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"] });
+  const { f, ledger } = files();
+  const id = request({ agent: "a", run_id: "r", tool: "t", input: {} }, f);
+  // Another process's approve lands first in file order; ours lands second in the same ms.
+  appendFileSync(f, JSON.stringify({ event: "approved", id, ts: new Date().toISOString(), who: "operator-2", nonce: "deadbeefdeadbeef" }) + "\n");
+  appendFileSync(f, JSON.stringify({ event: "approved", id, ts: new Date().toISOString(), who: "operator", nonce: "cafebabecafebabe" }) + "\n");
+  assert.equal(get(id, f)?.state, "approved");
+  assert.equal(get(id, f)?.who, "operator-2"); // the fold keeps the first event, not the last
+  assert.equal(approvalsOf(readLedger(ledger)).length, 0); // neither was ledgered by hand; a later decide fast-paths out
+  assert.equal(decide(id, true, "operator", undefined, f, ledger), null);
 });
 
 test("queueApprover polls until a human decides", async () => {
