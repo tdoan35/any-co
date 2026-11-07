@@ -48,6 +48,11 @@ Re-check https://usenaive.ai/docs/llms.txt when in doubt (`vetta.sh/docs` redire
 - Reasoning models spend hidden reasoning tokens inside `max_tokens` (a 1-word reply used 35
   output tokens on glm-5.3-flash), so don't set `max_tokens` tight.
 - Measured: glm-5.3-flash ~1.2–1.5 s round trip for a tiny call, 20 micro-USD.
+- Images (checked Nov 7, docs only, no live call): the Messages door documents only `text`,
+  `tool_use`, `tool_result` blocks and refuses unknown fields with `400 validation_failed`;
+  `image` blocks (top level or inside `tool_result.content`) are neither listed nor in the
+  "not supported" list. The runner sends them in the standard Anthropic shape; if the proxy
+  refuses them, run vision agents on the OpenAI-compatible provider (`image_url` data parts).
 
 ## Models
 - Live catalogue: `client.models.list({ search, window, limit, after })`, `naive models list`.

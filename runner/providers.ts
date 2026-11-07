@@ -2,7 +2,7 @@
 // endpoint (fast external inference, local-only), and a scripted fake for tests.
 import { createClient } from "@usenaive-sdk/managed-agents";
 import type { AgentSpec } from "./spec.ts";
-import type { Block, Message, ModelReply, ModelRequest, Provider } from "./types.ts";
+import type { Block, ImageBlock, Message, ModelReply, ModelRequest, Provider, ToolUseBlock } from "./types.ts";
 
 export type NaiveClient = ReturnType<typeof createClient>;
 
@@ -72,26 +72,43 @@ export class NaiveProvider implements Provider {
       content: (reply.content ?? []).filter((b: any) => b.type === "text" || b.type === "tool_use") as Block[],
       stop_reason: reply.stop_reason ?? null,
       usage: { input_tokens: reply.usage?.input_tokens ?? 0, output_tokens: reply.usage?.output_tokens ?? 0 },
-      cost_micro_usd: await this.billed(reply.id),
+      ...(await this.billedOrEstimate(reply.id, reply.usage?.input_tokens ?? 0, reply.usage?.output_tokens ?? 0)),
       request_id: reply.id,
       model: reply.resolved_model ?? reply.model ?? this.model,
     };
   }
 
-  // Replies carry no cost; the call trace does (docs/naive-notes.md). Without a cost the budget
-  // math is blind, so a missing trace fails the call instead of guessing.
-  private async billed(id: string): Promise<number> {
+  /** Highest billed rate seen from this provider, micro-USD per token, for conservative estimates. */
+  private maxRate = { input: 0, output: 0 };
+  /** Waits between call-trace lookups; the trace can lag the reply (seen Nov 7: one trace never appeared within 5 s). */
+  static TRACE_WAITS_MS = [1000, 2000, 4000, 8000, 15000, 30000];
+  /** Per-token ceiling used when nothing has been billed yet ($5 / $25 per MTok, above any model this studio uses). */
+  static CEILING = { input: 5, output: 25 };
+
+  // Replies carry no cost; the call trace does (docs/naive-notes.md). The budget math must never be blind:
+  // wait for the trace, and if it never comes, charge a conservative estimate (marked) instead of failing a long run.
+  private async billedOrEstimate(id: string, inTok: number, outTok: number): Promise<{ cost_micro_usd: number; cost_estimated?: true }> {
     let lastErr: unknown;
-    for (let i = 0; i < 6; i++) {
+    for (const wait of NaiveProvider.TRACE_WAITS_MS) {
       try {
         const t: any = await this.client.proxy.call(id);
-        if (typeof t.billed_micro_usd === "number") return t.billed_micro_usd;
+        if (typeof t.billed_micro_usd === "number") {
+          const tok = inTok + outTok;
+          if (tok > 0) {
+            const r = t.billed_micro_usd / tok; // blended rate is a safe upper bound for either side's estimate
+            this.maxRate = { input: Math.max(this.maxRate.input, r), output: Math.max(this.maxRate.output, r) };
+          }
+          return { cost_micro_usd: t.billed_micro_usd };
+        }
       } catch (e) {
         lastErr = e;
       }
-      await sleep(250 * (i + 1));
+      await sleep(wait);
     }
-    throw new Error(`no billed cost for ${id} after retries: ${String(lastErr ?? "trace missing billed_micro_usd")}`);
+    const rate = this.maxRate.input > 0 ? { input: this.maxRate.input * 1.5, output: this.maxRate.output * 1.5 } : NaiveProvider.CEILING;
+    const est = Math.ceil(inTok * rate.input + outTok * rate.output);
+    console.warn(`  ${this.label}: no billed cost for ${id} (${String(lastErr ?? "trace missing billed_micro_usd").slice(0, 120)}); charging a conservative estimate of ${est} micro-USD`);
+    return { cost_micro_usd: est, cost_estimated: true };
   }
 }
 
@@ -151,6 +168,11 @@ export class OpenAICompatibleProvider implements Provider {
   }
 }
 
+const imagePart = (b: ImageBlock): Record<string, unknown> => {
+  if (b.source.type !== "base64") throw new Error("toOpenAIMessages got an unexpanded image ref; call wireMessages() first");
+  return { type: "image_url", image_url: { url: `data:${b.source.media_type};base64,${b.source.data}` } };
+};
+
 export function toOpenAIMessages(system: string, messages: Message[]): any[] {
   const out: any[] = [{ role: "system", content: system }];
   for (const m of messages) {
@@ -159,15 +181,23 @@ export function toOpenAIMessages(system: string, messages: Message[]): any[] {
       continue;
     }
     if (m.role === "assistant") {
-      const text = m.content.filter((b) => b.type === "text").map((b: any) => b.text).join("\n");
+      const text = m.content.filter((b) => b.type === "text").map((b) => b.text).join("\n");
       const calls = m.content
-        .filter((b) => b.type === "tool_use")
-        .map((b: any) => ({ id: b.id, type: "function", function: { name: b.name, arguments: JSON.stringify(b.input) } }));
+        .filter((b): b is ToolUseBlock => b.type === "tool_use")
+        .map((b) => ({ id: b.id, type: "function", function: { name: b.name, arguments: JSON.stringify(b.input) } }));
       out.push({ role: "assistant", content: text || null, ...(calls.length ? { tool_calls: calls } : {}) });
     } else {
       for (const b of m.content) {
-        if (b.type === "tool_result") out.push({ role: "tool", tool_call_id: b.tool_use_id, content: b.content });
-        else if (b.type === "text") out.push({ role: "user", content: b.text });
+        if (b.type === "tool_result") {
+          // A tool result with an image carries content parts: text plus image_url. Plain-text
+          // results stay strings, so existing runs are byte-identical to before.
+          if (typeof b.content === "string") out.push({ role: "tool", tool_call_id: b.tool_use_id, content: b.content });
+          else {
+            const parts = b.content.map((c) => (c.type === "image" ? imagePart(c) : { type: "text", text: c.text }));
+            out.push({ role: "tool", tool_call_id: b.tool_use_id, content: parts });
+          }
+        } else if (b.type === "text") out.push({ role: "user", content: b.text });
+        else if (b.type === "image") out.push({ role: "user", content: [imagePart(b)] });
       }
     }
   }

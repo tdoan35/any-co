@@ -31,6 +31,55 @@ export function resolves(obj: any, target: string): boolean {
   return true;
 }
 
+// Player Voice findings in the Director's brief are numbered (W1.. wants, L1.. loves, D1..
+// deal-breakers, counted across segments) so the Director can cite one by id instead of retyping it.
+export type FindingKind = "want" | "love" | "deal_breaker";
+export interface BriefFinding { id: string | null; kind: FindingKind; statement: string; line: string }
+const PREFIX: Record<FindingKind, string> = { want: "W", love: "L", deal_breaker: "D" };
+const KIND_HEADER: Record<string, FindingKind> = { "Wants:": "want", "Loves:": "love", "Deal-breakers:": "deal_breaker" };
+export const FINDING_ID = /^[WLD]\d+$/;
+
+const findingLine = (f: any, id: string) =>
+  `- [${id}] ${f.statement} (${Math.round(f.sized_by.share * 100)}% of ${f.sized_by.sample_size} ${f.sized_by.kind} reviews of appid ${f.sized_by.appid} mention "${f.sized_by.term}") — ${f.why_it_matters}`;
+
+/** The "# Player findings" section of the Director's brief, from a Player Voice output. */
+export function findingsSection(pv: { segments: any[]; cross_segment?: string[] }): string[] {
+  const n: Record<FindingKind, number> = { want: 0, love: 0, deal_breaker: 0 };
+  const fmt = (kind: FindingKind) => (f: any) => findingLine(f, `${PREFIX[kind]}${++n[kind]}`);
+  const lines: string[] = [];
+  for (const seg of pv.segments) {
+    lines.push(`## ${seg.gap_label}`, `Read: ${seg.games_read.map((g: any) => g.name).join(", ")}`, "Wants:", ...seg.wants.map(fmt("want")), "Loves:", ...seg.loves.map(fmt("love")));
+    if (seg.deal_breakers.length) lines.push("Deal-breakers:", ...seg.deal_breakers.map(fmt("deal_breaker")));
+    lines.push(`Attention: ${seg.attention.summary}`, "");
+  }
+  if (pv.cross_segment?.length) lines.push("## Across segments", ...pv.cross_segment.map((c) => `- ${c}`), "");
+  return lines;
+}
+
+/** Findings listed in a brief. Briefs written before numbering have `id: null`. */
+export function parseFindings(brief: string): BriefFinding[] {
+  const out: BriefFinding[] = [];
+  const byPrefix = Object.fromEntries(Object.entries(PREFIX).map(([k, p]) => [p, k as FindingKind]));
+  let header: FindingKind = "want";
+  for (const line of brief.split("\n")) {
+    if (line in KIND_HEADER) { header = KIND_HEADER[line]; continue; }
+    if (line.startsWith("## ")) header = "want";
+    const m = line.match(/^- (?:\[([WLD]\d+)\] )?(.+?) \(\d+% of \d+ (?:negative|positive) reviews/);
+    if (m) out.push({ id: m[1] ?? null, kind: m[1] ? byPrefix[m[1][0]] : header, statement: m[2].trim(), line });
+  }
+  return out;
+}
+
+/**
+ * A pitch's `wants_addressed[].want` → the finding it names: an id ("W3") must exist in the brief,
+ * and a statement must be the whole statement, exactly. Anything else is an error string.
+ */
+export function resolveWant(want: string, findings: BriefFinding[]): BriefFinding | string {
+  const w = want.trim();
+  if (FINDING_ID.test(w)) return findings.find((f) => f.id === w) ?? `want id ${w} is not a finding in the task`;
+  return findings.find((f) => f.statement === w) ?? `want not copied from findings: "${w.slice(0, 70)}"`;
+}
+
 export function criticTask(pitches: any[], notes?: string): string {
   return [
     "Greenlight: review these three pitches for buildability. Attack each one; estimate the must list; score it.",
@@ -140,16 +189,17 @@ export function designTask(chairDir: string, runsRoot: string = RUNS): string {
   const pick = chair.out.pick;
   const pitch = director.out.pitches.find((p: { working_title: string }) => p.working_title === pick.working_title);
   if (!pitch) throw new Error(`pick "${pick.working_title}" is not among the final-round pitches in ${last.director_run}`);
-  // The Player Voice findings the pitch addressed: full sized lines from the brief. Wants are
-  // copied statements, so the brief line starts with the want; punctuation may drift, and some
-  // wants are shortened paraphrases of the brief line, so fall back to a normalized prefix match.
+  // The Player Voice findings the pitch addressed: full sized lines from the brief. A want is a
+  // finding id or an exact statement; pitches from before numbering may hold shortened
+  // paraphrases, so fall back to a normalized prefix match on the statement.
   const briefPath = path.resolve(runsRoot, "..", String(loop.brief));
-  const briefLines = readFileSync(briefPath, "utf8").split("\n");
+  const briefFindings = parseFindings(readFileSync(briefPath, "utf8"));
   const norm = (s: string) => s.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
-  const briefWantLines = briefLines.filter((l) => /^- .+ \(\d+% of /.test(l));
   const findings = (pitch.wants_addressed as Array<{ want: string }>).map((w) => {
-    const exact = briefWantLines.find((l) => l.startsWith(`- ${w.want} (`)) ?? briefWantLines.find((l) => norm(l).startsWith(norm(w.want)));
-    return exact ?? `- ${w.want} (sizing not found in the brief)`;
+    const hit = resolveWant(w.want, briefFindings);
+    if (typeof hit !== "string") return hit.line;
+    const loose = briefFindings.find((f) => norm(f.statement).startsWith(norm(w.want)));
+    return loose?.line ?? `- ${w.want} (sizing not found in the brief)`;
   });
   return [
     "Design doc: the Greenlight Chair picked the game. Write `docs/design.md` in your game-repo clone",

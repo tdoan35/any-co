@@ -2,8 +2,23 @@
 // Other providers translate to and from it.
 export type TextBlock = { type: "text"; text: string };
 export type ToolUseBlock = { type: "tool_use"; id: string; name: string; input: Record<string, unknown> };
-export type ToolResultBlock = { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean };
-export type Block = TextBlock | ToolUseBlock | ToolResultBlock;
+/** Base64 source as it goes on the wire. */
+export type ImageBase64Source = { type: "base64"; media_type: "image/png"; data: string };
+/**
+ * Inside the runner an image is a `ref` to a content-addressed copy under runs/<id>/images/
+ * (sha256-named), so transcript.jsonl never carries base64 and a resume rebuilds the message
+ * from the copy even if the workspace file changed. wireMessages() expands refs to base64
+ * right before the provider call.
+ */
+export type ImageRefSource = { type: "ref"; path: string; media_type: "image/png"; sha256: string; size: number };
+export type ImageBlock = { type: "image"; source: ImageRefSource | ImageBase64Source };
+export type ToolResultBlock = {
+  type: "tool_result";
+  tool_use_id: string;
+  content: string | Array<TextBlock | ImageBlock>;
+  is_error?: boolean;
+};
+export type Block = TextBlock | ToolUseBlock | ToolResultBlock | ImageBlock;
 
 export type Message = { role: "user" | "assistant"; content: string | Block[] };
 
@@ -25,6 +40,8 @@ export interface ModelReply {
   stop_reason: string | null;
   usage: { input_tokens: number; output_tokens: number };
   cost_micro_usd: number;
+  /** True when the provider couldn't get a billed cost and charged a conservative estimate instead. */
+  cost_estimated?: true;
   request_id: string;
   model: string;
 }

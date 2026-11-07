@@ -10,14 +10,16 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { append as ledgerAppend, LEDGER_FILE } from "../ledger/ledger.ts";
 import type { Approver } from "../../runner/run.ts";
+import { orphanStatus } from "../../runner/liveness.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const APPROVALS_FILE = process.env.STUDIO_APPROVALS_FILE ?? path.join(ROOT, "runs", "approvals.jsonl");
+const RUNS_DIR = path.join(ROOT, "runs");
 
 export type ApprovalEvent =
   | { event: "requested"; id: string; ts: string; agent: string; run_id: string; tool: string; input: unknown }
   | { event: "approved" | "denied"; id: string; ts: string; who: string; note?: string; nonce: string }
-  | { event: "expired"; id: string; ts: string; nonce: string };
+  | { event: "expired"; id: string; ts: string; nonce: string; who?: string };
 
 export interface ApprovalRecord {
   id: string;
@@ -70,6 +72,7 @@ export function fold(file = APPROVALS_FILE): ApprovalRecord[] {
       rec.state = e.event;
       rec.decided_ts = e.ts;
       if (e.event !== "expired") { rec.who = e.who; if (e.note) rec.note = e.note; }
+      else if (e.who) rec.who = e.who; // expiry cause, e.g. "run ended"
     }
   }
   return [...byId.values()];
@@ -135,7 +138,7 @@ function expireWith(id: string, who: string, file: string, ledgerFile: string): 
   if (get(id, file)?.state !== "pending") return null;
   const ts = new Date().toISOString();
   const nonce = randomBytes(8).toString("hex");
-  appendEvent({ event: "expired", id, ts, nonce }, file);
+  appendEvent({ event: "expired", id, ts, nonce, who }, file);
   const rec = winnerOf(id, "expired", nonce, file);
   if (!rec) return null;
   logDecision(rec, "expired", ts, who, undefined, ledgerFile);
@@ -159,6 +162,55 @@ export function expireForRun(run_id: string, file = APPROVALS_FILE, ledgerFile =
     if (rec) out.push(rec);
   }
   return out;
+}
+
+/** Why a request's run can never consume a decision, or null while it may still: the run finished
+ *  (any status but "running") or is orphaned per runner/liveness.ts. A missing or unreadable
+ *  run.json is "unknown" and stays decidable — never expire on a guess. */
+export function runEndedReason(run_id: string, runsDir = RUNS_DIR): string | null {
+  let run: Record<string, unknown>;
+  try {
+    run = JSON.parse(readFileSync(path.join(runsDir, run_id, "run.json"), "utf8"));
+  } catch {
+    return null;
+  }
+  if (run.status !== "running") return `run ${run_id} has ended (status ${String(run.status)})`;
+  const v = orphanStatus(run);
+  return v.orphaned ? `run ${run_id} is orphaned (${v.reason})` : null;
+}
+
+/** Pending requests whose run is still alive (or unknown). Pure read, for display (window weave). */
+export function pendingLive(file = APPROVALS_FILE, runsDir = RUNS_DIR): ApprovalRecord[] {
+  return pending(file).filter((r) => runEndedReason(r.run_id, runsDir) === null);
+}
+
+/** Expire every pending request whose run is finished or orphaned, as who "run ended" (ledgered
+ *  as expired, never as an intervention). Returns the records this call expired. */
+export function expireDeadRuns(file = APPROVALS_FILE, runsDir = RUNS_DIR, ledgerFile = LEDGER_FILE): ApprovalRecord[] {
+  const out: ApprovalRecord[] = [];
+  for (const r of pending(file)) {
+    if (runEndedReason(r.run_id, runsDir) === null) continue;
+    const rec = expireWith(r.id, "run ended", file, ledgerFile);
+    if (rec) out.push(rec);
+  }
+  return out;
+}
+
+/** A human decision from the CLI: refuses (and expires) a request whose run has ended, so no
+ *  intervention is ledgered for a call that can never run. */
+export function decideHuman(
+  id: string, approve: boolean, note?: string, file = APPROVALS_FILE, runsDir = RUNS_DIR, ledgerFile = LEDGER_FILE,
+): { rec: ApprovalRecord } | { error: string } {
+  const cur = get(id, file);
+  if (!cur) return { error: `no approval ${id}` };
+  if (cur.state !== "pending") return { error: `approval ${id} is already ${cur.state}${cur.who ? ` (by ${cur.who})` : ""}` };
+  const dead = runEndedReason(cur.run_id, runsDir);
+  if (dead) {
+    expireWith(id, "run ended", file, ledgerFile);
+    return { error: `refused: ${dead}, so this call can never run; request ${id} expired (who "run ended")` };
+  }
+  const rec = decide(id, approve, "operator", note, file, ledgerFile);
+  return rec ? { rec } : { error: `approval ${id} was decided by another process first` };
 }
 
 /** An Approver for unattended runs: record the request, poll for a decision, expire on timeout. */
@@ -190,6 +242,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const { positionals, values } = parseArgs({ allowPositionals: true, options: { note: { type: "string" } } });
   const [cmd, id] = positionals;
   if (cmd === "list") {
+    for (const r of expireDeadRuns()) console.log(`expired ${r.id} (${r.tool}, ${r.agent}): run ${r.run_id} ended`);
     const rows = pending();
     if (!rows.length) console.log("no pending approvals");
     for (const r of rows) console.log(`${r.id}  ${age(r.ts).padStart(4)} ago  ${r.tool}  ${r.agent}  ${r.run_id}`);
@@ -206,9 +259,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   } else if ((cmd === "approve" || cmd === "deny") && id) {
     const note = values.note;
     if (cmd === "deny" && !note) { console.error('deny needs a note: --note "why"'); process.exit(2); }
-    const rec = decide(id, cmd === "approve", "operator", note);
-    if (!rec) { console.error(`no pending approval ${id}`); process.exit(1); }
-    console.log(`${rec.state} ${rec.id}${note ? ` — ${note}` : ""}`);
+    const res = decideHuman(id, cmd === "approve", note);
+    if ("error" in res) { console.error(res.error); process.exit(1); }
+    console.log(`${res.rec.state} ${res.rec.id}${note ? ` — ${note}` : ""}`);
   } else {
     console.error('usage: approvals list | show <id> | approve <id> [--note "..."] | deny <id> --note "..."');
     process.exit(2);
