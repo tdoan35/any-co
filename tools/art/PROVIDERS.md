@@ -78,5 +78,8 @@ PixelLab OpenAPI `https://api.pixellab.ai/v2/openapi.json` + `llms.txt`, and Ret
 
 Every generation returns `cost_micro_usd` and `cost_source: "reported" | "estimated"`.
 Reported beats estimated; a paid call never reports 0 (an estimate is used instead).
+A failed submit is charged at the estimate unless the provider answered 4xx or the connection
+never carried the request (refused, DNS, unreachable): a reset, abort, timeout, 5xx, or a 2xx with
+no job id may have left a billed job behind, so it is charged (it can overcount an auto-refunded 5xx).
 This spend is **budget-capped like inference** (per-agent period caps in the spec, global
 daily cap in the runner), not per-call approved — recorded in `docs/decisions.md`.

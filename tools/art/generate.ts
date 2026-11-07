@@ -205,6 +205,37 @@ async function httpJson(
   return { status: res.status, body };
 }
 
+/**
+ * Errors where the request body never reached the provider (no connection was made), so no job
+ * can exist. Anything else — a reset or abort mid-flight, a timeout, an unreadable answer — may
+ * have left an accepted job behind.
+ */
+const NOT_SENT_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);
+export function neverSent(e: unknown): boolean {
+  const cause = (e as { cause?: { code?: unknown; errors?: Array<{ code?: unknown }> } })?.cause;
+  if (!cause) return false;
+  if (typeof cause.code === "string") return NOT_SENT_CODES.has(cause.code);
+  // happy-eyeballs: an AggregateError of per-address connect failures
+  return Array.isArray(cause.errors) && cause.errors.length > 0 && cause.errors.every((x) => typeof x?.code === "string" && NOT_SENT_CODES.has(x.code));
+}
+
+/**
+ * The paid submit POST. Uncharged only for a 4xx answer (the provider refused the job) or a
+ * connection that never carried the request; every other failure is a ChargedFailure at the
+ * table estimate, since the provider may have accepted (and will bill) the job.
+ */
+async function submitJson(provider: ProviderName, input: GenerateInput, fetchImpl: typeof fetch, url: string, init: RequestInit, deadline: number): Promise<{ status: number; body: any }> {
+  let submitted: { status: number; body: any };
+  try {
+    submitted = await httpJson(fetchImpl, url, init, deadline);
+  } catch (e) {
+    if (neverSent(e)) throw new Error(`${provider} submit failed before the request was sent: ${(e as Error).message}${(e as any)?.cause?.code ? ` (${(e as any).cause.code})` : ""}`);
+    throw charged(provider, input, `${provider} submit failed after the request was sent: ${(e as Error).message}`);
+  }
+  if (submitted.status >= 500) throw charged(provider, input, `${provider} submit failed (${submitted.status}): ${JSON.stringify(submitted.body).slice(0, 300)}`);
+  return submitted;
+}
+
 async function retrodiffusion(
   input: GenerateInput,
   opts: GenerateOptions,
@@ -234,7 +265,7 @@ async function retrodiffusion(
   }
   if (input.reference) body.reference_images = [(await readReference(opts.workspace, input.reference)).base64];
 
-  const submitted = await httpJson(fetchImpl, `${base}/v2/inferences`, {
+  const submitted = await submitJson("retrodiffusion", input, fetchImpl, `${base}/v2/inferences`, {
     method: "POST",
     headers: { "content-type": "application/json", "X-RD-Token": key, "Idempotency-Key": randomUUID() },
     body: JSON.stringify(body),
@@ -242,7 +273,7 @@ async function retrodiffusion(
   if (submitted.status >= 400)
     throw new Error(`retrodiffusion rejected the request (${submitted.status}): ${submitted.body?.error?.message ?? submitted.body?.detail ?? JSON.stringify(submitted.body).slice(0, 300)}`);
   const taskId = submitted.body?.task_id;
-  if (!taskId) throw new Error(`retrodiffusion returned no task_id: ${JSON.stringify(submitted.body).slice(0, 300)}`);
+  if (!taskId) throw charged("retrodiffusion", input, `retrodiffusion returned no task_id: ${JSON.stringify(submitted.body).slice(0, 300)}`);
   const submittedUsd = usageUsd(submitted.body?.usage) ?? (typeof submitted.body?.balance_cost === "number" ? submitted.body.balance_cost : undefined);
 
   let result: any = null;
@@ -328,7 +359,7 @@ async function pixellab(
     body.reference_images = [{ image: { type: "base64", base64: ref.base64, format: "png" }, size: { width: ref.width, height: ref.height } }];
   }
 
-  const submitted = await httpJson(fetchImpl, `${base}/v2/generate-image-v2`, {
+  const submitted = await submitJson("pixellab", input, fetchImpl, `${base}/v2/generate-image-v2`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
     body: JSON.stringify(body),
@@ -336,7 +367,7 @@ async function pixellab(
   if (submitted.status >= 400)
     throw new Error(`pixellab rejected the request (${submitted.status}): ${submitted.body?.detail ?? JSON.stringify(submitted.body).slice(0, 300)}`);
   const jobId = submitted.body?.background_job_id;
-  if (!jobId) throw new Error(`pixellab returned no background_job_id: ${JSON.stringify(submitted.body).slice(0, 300)}`);
+  if (!jobId) throw charged("pixellab", input, `pixellab returned no background_job_id: ${JSON.stringify(submitted.body).slice(0, 300)}`);
   const submittedUsd = usageUsd(submitted.body?.usage);
 
   let job: any = null;
