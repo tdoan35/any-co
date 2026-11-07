@@ -1,11 +1,14 @@
-// Weave snapshot from run state. There is no approval ledger or Studio Head inbox yet, so `items`
-// is empty; presence and the pulse come from the runs. Wire real items in when the ledger exists.
+// Weave snapshot from run state. `items` lists the pending approval requests (runs/approvals.jsonl,
+// written by the approval gate every `ask` tool call) as read-only display: deciding happens in the
+// terminal (`npm run approvals`), because chat with the Studio Head is the window's only write path.
 import type { EventEntry, Presence, WeaveSnapshot } from "@fabric/contracts";
 import type { MappedRun } from "./runs.ts";
+import { PROJECT } from "./registry.ts";
+import { APPROVALS_FILE, pending } from "../../tools/approvals/approvals.ts";
 
 const PULSE_LIMIT = 60;
 
-export function buildWeave(runs: MappedRun[], agentIds: string[]): WeaveSnapshot {
+export function buildWeave(runs: MappedRun[], agentIds: string[], approvalsFile = APPROVALS_FILE): WeaveSnapshot {
   const presence = new Map<string, Presence>();
   for (const id of agentIds) presence.set(id, { agentId: id, state: "idle", activity: "Idle", since: new Date(0).toISOString() });
 
@@ -27,5 +30,24 @@ export function buildWeave(runs: MappedRun[], agentIds: string[]): WeaveSnapshot
       });
     }
   }
-  return { items: [], pulse: pulse.slice(-PULSE_LIMIT).reverse(), presence: [...presence.values()], calendar: [] };
+  const items = pending(approvalsFile).map((a) => ({
+    id: a.id,
+    kind: "approval" as const,
+    agentId: a.agent,
+    project: PROJECT.name,
+    run: { label: a.run_id, href: `/runs/${a.run_id}` },
+    title: `${a.agent} wants to run ${a.tool}`,
+    brief: `${a.agent}'s ${a.tool}`,
+    at: a.ts,
+    why: "This tool is gated behind a human approval (AGENTS.md rule 4). Approve or deny from the terminal: npm run approvals",
+    tool: a.tool,
+    policy: "approval" as const,
+    policyNote: "Asks before every call",
+    preview: [
+      { label: "Run", value: a.run_id },
+      { label: "Input", value: JSON.stringify(a.input).slice(0, 200) },
+    ],
+    actions: [], // read-only: the window has no approval endpoint
+  }));
+  return { items, pulse: pulse.slice(-PULSE_LIMIT).reverse(), presence: [...presence.values()], calendar: [] };
 }

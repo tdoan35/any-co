@@ -28,7 +28,20 @@ export interface InterventionEntry {
   reason: string;
 }
 
-export type LedgerEntry = DecisionEntry | InterventionEntry;
+export interface ApprovalEntry {
+  kind: "approval";
+  ts: string;
+  request_id: string; // approvals.ts id, ties the entry to runs/approvals.jsonl
+  agent: string;
+  run_id: string;
+  tool: string;
+  decision: "approved" | "denied" | "expired";
+  who: string; // "operator", "auto (--approve-all)", "timeout", ...
+  note?: string;
+  input_summary: string; // clipped JSON of the tool input
+}
+
+export type LedgerEntry = DecisionEntry | InterventionEntry | ApprovalEntry;
 
 export function append(e: LedgerEntry, file = LEDGER_FILE) {
   mkdirSync(path.dirname(file), { recursive: true });
@@ -49,7 +62,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     append({ kind: "intervention", ts: new Date().toISOString(), who: "operator", action: a, reason: b });
     console.log("logged");
   } else if (cmd === "list") {
-    for (const e of read()) console.log(e.kind === "decision" ? `${e.ts} decision ${e.topic} by ${e.agent}: ${e.decision}` : `${e.ts} INTERVENTION ${e.action}: ${e.reason}`);
+    for (const e of read())
+      console.log(
+        e.kind === "decision" ? `${e.ts} decision ${e.topic} by ${e.agent}: ${e.decision}`
+          : e.kind === "approval" ? `${e.ts} approval ${e.request_id} ${e.tool} for ${e.agent}: ${e.decision} by ${e.who}`
+            : `${e.ts} INTERVENTION ${e.action}: ${e.reason}`,
+      );
   } else {
     console.error('usage: ledger.ts intervention "<action>" "<reason>" | list');
     process.exit(2);

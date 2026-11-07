@@ -34,3 +34,17 @@ To continue a crashed run on a shorter leash: `npm run runs -- resume <run_id> -
 To stop everything now: the kill switch below.
 
 ## Log a human intervention
+Manual log: `npm run ledger -- intervention "<action>" "<reason>"`.
+
+Approvals are interventions too. A gated (`ask`) tool call records a pending request in
+`runs/approvals.jsonl` (also shown in the studio window inbox). Decide from the terminal:
+
+    npm run approvals -- list                          # pending requests
+    npm run approvals -- show <id>                     # full input before deciding
+    npm run approvals -- approve <id> --note "why"     # note optional
+    npm run approvals -- deny <id> --note "why"        # note required
+
+Unattended runs (`--approvals queue`, the default without a TTY) block on this queue and expire
+after `--approval-timeout-min` minutes (default 30). Every decision — approve, deny, expire,
+`--approve-all` — is written to the ledger as an `approval` entry; human approve/deny counts as an
+intervention in `ledger_recent`.
