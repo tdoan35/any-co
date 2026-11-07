@@ -66,6 +66,8 @@ TODO: fill in as they exist.
 - agent specs: `npm run agents -- list | show <name> | validate [--remote]`
 - run one agent locally: `npm run agent -- <name> --task "..." [--model id] [--max-usd N]` → `runs/<run_id>/`
 - run toy task end to end: `npm run agent -- toy-catalog-reporter --task "Report the catalog dataset facts."`
+- QA gate (contract driver): `npm run qa -- smoke --cmd '<json argv>' --dir <game dir> --seed N --ticks N`;
+  also `check --dir <qa dir>` and `determinism ...` (see `tools/qa/README.md`)
 - cut over one agent to Naïve:
 - gap map: `tools/gapmap/README.md` (embed → build → render)
 - eval Market Analyst: `npm run eval:market-analyst -- runs/<run_id>` (see `agents/market-analyst/eval/`)
