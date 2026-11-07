@@ -1,7 +1,7 @@
 // Local implementations of the capabilities in registry.ts.
 import { execFile } from "node:child_process";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { isIP } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -554,14 +554,28 @@ const gameRepoTools: Record<string, ToolImpl> = {
 
 const ITCH_TARGET = /^[a-z0-9][a-z0-9-]{1,39}\/[a-z0-9][a-z0-9-]{1,39}:[a-z0-9][a-z0-9-]{0,19}$/;
 
-/** Run butler; a missing binary is a named error, not an empty spawn failure. */
+/** Refuse symlinks anywhere inside the tree butler is about to upload. */
+async function assertNoSymlinks(dir: string) {
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    if (entry.isSymbolicLink()) throw new Error(`symlink "${entry.name}" inside the push dir is not allowed`);
+    const p = path.join(dir, entry.name);
+    if (entry.isDirectory()) await assertNoSymlinks(p);
+  }
+}
+
+/** Run butler; a missing binary is a named error, not an empty spawn failure. Butler gets a
+ *  minimal env (it only needs PATH/HOME + its key) and its output is redacted: the key value
+ *  never reaches the tool result, whatever butler prints. */
 async function butler(args: string[], timeoutMs: number): Promise<{ out: string; err: string; code: number }> {
   const bin = process.env.BUTLER_BIN ?? "butler";
+  const key = process.env.BUTLER_API_KEY ?? "";
+  const redact = (s: string) => (key ? s.split(key).join("***") : s);
+  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: process.env.HOME, ...(key ? { BUTLER_API_KEY: key } : {}) };
   const { promise, resolve } = Promise.withResolvers<{ out: string; err: string; code: number }>();
-  execFile(bin, args, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+  execFile(bin, args, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, env }, (error, stdout, stderr) => {
     // string code = spawn failure (ENOENT, ENOTDIR, EACCES...); a number is a real exit code
-    if (error && typeof error.code !== "number") resolve({ out: "", err: `butler failed to start (${bin}): ${error.message}; set BUTLER_BIN or install butler`, code: -1 });
-    else resolve({ out: String(stdout), err: String(stderr), code: typeof error?.code === "number" ? error.code : 0 });
+    if (error && typeof error.code !== "number") resolve({ out: "", err: redact(`butler failed to start (${bin}): ${error.message}; set BUTLER_BIN or install butler`), code: -1 });
+    else resolve({ out: redact(String(stdout)), err: redact(String(stderr)), code: typeof error?.code === "number" ? error.code : 0 });
   });
   return promise;
 }
@@ -585,11 +599,17 @@ const itchPush: ToolImpl = {
       if (!process.env.BUTLER_API_KEY) throw new Error(noKey);
       const distRoot = path.join(ctx.workspace, "game", "dist");
       if (!existsSync(path.join(distRoot, "build_id"))) throw new Error("no dist/build_id in your clone; run build.sh first");
-      const dirAbs = resolveInWorkspace(distRoot, dir);
-      if (!(await stat(dirAbs)).isDirectory()) throw new Error(`"${dir}" is not a directory inside dist/`);
       const built = (await readFile(path.join(distRoot, "build_id"), "utf8")).trim();
       if (built !== build_id) throw new Error(`build_id mismatch: dist/build_id says "${built}", you passed "${build_id}"`);
-      const r = await butler(["push", dirAbs, target, "--userversion", build_id, ...(dry_run ? ["--dry-run"] : [])], 600_000);
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(built)) throw new Error(`dist/build_id "${built}" breaks the build_id contract (<yyyymmdd-hhmm>-<short-sha>); refusing to pass it to butler`);
+      // Lexical checks are not enough (symlinks): pin both sides to real paths, require the
+      // channel dir to sit strictly INSIDE dist/, and refuse any symlink in the pushed tree —
+      // the agent controls dist/, and butler would happily upload wherever a link points.
+      const distReal = realpathSync(distRoot);
+      const dirReal = realpathSync(resolveInWorkspace(distRoot, dir));
+      if (dirReal === distReal || !dirReal.startsWith(distReal + path.sep)) throw new Error(`"${dir}" must be a channel directory strictly inside dist/, not dist/ itself or a link out of it`);
+      await assertNoSymlinks(dirReal);
+      const r = await butler(["push", dirReal, target, `--userversion=${build_id}`, ...(dry_run ? ["--dry-run"] : [])], 600_000);
       return { content: clip(`exit ${r.code}${dry_run ? " (dry-run)" : " (REAL PUSH)"}\n${r.out}${r.err ? `\nstderr:\n${r.err}` : ""}`), is_error: r.code !== 0 };
     } catch (e) {
       return { content: errText(e), is_error: true };
