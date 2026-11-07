@@ -11,6 +11,7 @@ import { IMPLS, TOOL_INDEX, clip, type ToolContext } from "./tools/impl.ts";
 import { SpendLedger, killSwitchOn, limitsFor } from "./spend.ts";
 import type { Block, Message, Provider, ToolDef, ToolResultBlock, ToolUseBlock } from "./types.ts";
 import type { NaiveClient } from "./providers.ts";
+import type { Board } from "./board/index.ts";
 
 export const RUNS_DIR = path.join(ROOT, "runs");
 const SUBMIT = "submit_result";
@@ -76,6 +77,8 @@ export interface RunOptions {
   history?: Message[];
   /** Called for every transcript event as it is written (type + data). Errors in it never stop the run. */
   onEvent?: (type: string, data: Record<string, unknown>) => void;
+  /** Studio board for board_* tools, when this run should reach it (the dispatcher passes one). */
+  board?: Board;
 }
 
 export interface RunResult {
@@ -100,7 +103,7 @@ export async function runAgent(spec: AgentSpec, opts: RunOptions): Promise<RunRe
   const limits = limitsFor(spec, ledger, opts.runCapUsd);
   const schema = outputJsonSchema(spec);
   const tools = toolDefs(spec, schema);
-  const ctx: ToolContext = { workspace, naive: opts.naive, agent: spec.name, run_id: runId, runsDir };
+  const ctx: ToolContext = { workspace, naive: opts.naive, agent: spec.name, run_id: runId, runsDir, board: opts.board };
 
   const transcript = path.join(dir, "transcript.jsonl");
   const event = (type: string, data: Record<string, unknown>) => {

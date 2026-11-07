@@ -70,6 +70,37 @@ Re-check https://usenaive.ai/docs/llms.txt when in doubt (`vetta.sh/docs` redire
 - Hierarchy is by convention: leads own areas via card routing. A nested tree can run
   inside one node (e.g. local engineering loop behind one roster slot).
 
+## Board (verified Nov 7: SDK dist/index.d.ts:3631-3673, 5532-5684; docs/team/board.md, api/board.md)
+- One board per agent, addressed by `brd_` id **or the owner's `agt_` id**; minted on first use
+  (`client.board.create` is an ensure: 201 minted / 200 found). `client.board.cards.{list,create,get,
+  update,assign,comments,comment,ofAgent}`; lists paginate with `{limit, after}` + `next_cursor`.
+- **`assignee` is an agent's name, not an id.** Any string on the wire; the hosted `assign` op
+  refuses unknown names (`unknown_member`). `assignee: null` unclaims; writing `assignee` on PATCH
+  **resets the wake**.
+- **Assignment is the wake.** A `todo` card with an assignee, no open blocker, an idle assignee and
+  no prior wake is *due*: the platform starts a hosted session of that agent **in the same request**
+  (the response carries `woken_session_id`); cards made due by a member's `board_write` start as soon
+  as the write lands. So a card created via the SDK with an assignee and no blockers starts a session
+  immediately, on the assignee's own budget. Our `naive` board backend therefore never puts local
+  agent names in `assignee` — they ride in a `local-assignee:` header in the card body.
+- Card lifecycle: `todo → doing → done` (claim = only move that takes a card; one `doing` per
+  assignee per board, `already_working`); `blocked` waits on `blocked_by` card ids and is **healed
+  back to `todo` on the next read** once every blocker is `done`. **`done` is terminal and needs a
+  note** on the move or already on the card (`missing_note`). A session that ends without closing its
+  card gets it parked to `blocked` with a system comment; unreported done/blocked cards reach the
+  board's owner as one digest session.
+- **`key` idempotency** (≤128 chars): same key on the same board answers the card it made the first
+  time (201 new / 200 existing) — a re-applied template seed can't duplicate. `board_write` create
+  ids are derived from board+session+title, so a retried turn no-ops.
+- Hosted tools: `board_read({status?, owner?, card_id?, limit?})` (list omits bodies on purpose) and
+  `board_write({op: create|update|comment|assign, ...})` — one flat arg object, each op reads its own
+  fields; every write is a compare-and-set with named refusals (`already_claimed`, `already_working`,
+  `blocked`, `already_resolved`, `missing_note`, `unknown_member`, `missing_assignee`, `unknown_card`,
+  `unsupported_update`, `no_board`). Comment authors are derived (session `ses_` or user principal),
+  never supplied. No delete route: a finished card is the record.
+- API reads take `agents:read`, writes `agents:write`. PATCH is an operator override that outranks
+  the claim guards (the one way to retitle/re-block after create). Board spend meters against each
+
 ## Approvals
 - Tools for spend, publish, and file actions ask for approval by default. Those `ask`
   approvals exist only in Naïve's harness; the local runner needs its own gate.

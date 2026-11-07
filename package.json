@@ -27,6 +27,7 @@
     "window:live": "node window/scripts/live.mjs",
     "window:live:electron": "node window/scripts/live.mjs electron",
     "ledger": "node --import tsx tools/ledger/ledger.ts",
+    "studio": "node --env-file-if-exists=.env --import tsx scripts/studio-loop.ts",
     "eval:greenlight-chair": "node --env-file-if-exists=.env --import tsx scripts/eval-greenlight-chair.ts"
   },
   "dependencies": {

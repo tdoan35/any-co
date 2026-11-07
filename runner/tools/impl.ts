@@ -10,6 +10,8 @@ import type { CapabilityName } from "./registry.ts";
 import type { NaiveClient } from "../providers.ts";
 import { studioStatusTools } from "./studio-status.ts";
 import { append as ledgerAppend, read as ledgerRead, LEDGER_FILE } from "../../tools/ledger/ledger.ts";
+import { AGENTS_DIR } from "../load.ts";
+import type { Board } from "../board/index.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -21,6 +23,8 @@ export interface ToolContext {
   runsDir?: string; // where runs/ lives (studio_status); defaults to <repo>/runs
   ledgerFile?: string; // studio ledger path (studio_ledger); defaults to <repo>/runs/ledger.jsonl
   gameRepoRoot?: string; // where games/ lives (game_repo); defaults to <repo>/games
+  agentsDir?: string; // where agents/ lives (board_create assignee check); defaults to <repo>/agents
+  board?: Board; // the studio board for board_* tools; unset → those tools answer an error
 }
 
 export interface ToolOutput {
@@ -546,6 +550,94 @@ const gameRepoTools: Record<string, ToolImpl> = {
   game_exec: gameExec,
 };
 
+// ---------- board (runner/board): the studio work board ----------
+// Mirrors the hosted board tools board_read / board_write (docs/team/board.md); the local
+// capability is four named tools over the same Board interface both backends implement.
+
+/** Local agent spec names = folder names under agents/ (the loader enforces spec.name === folder). */
+function agentNames(ctx: ToolContext): Set<string> {
+  return new Set(
+    readdirSync(ctx.agentsDir ?? AGENTS_DIR, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name),
+  );
+}
+
+const boardTools: Record<string, ToolImpl> = {
+  board_create: {
+    description:
+      "Create a work card on the studio board — this is how work is assigned. The dispatcher starts the " +
+      "assignee's local run once the card has no open blocker and the assignee is idle. Use blocked_by with " +
+      "card ids to order work. Creating with the same key twice returns the existing card (no duplicate).",
+    input: z
+      .object({
+        title: z.string().min(3).max(120).describe("What needs doing, as an instruction"),
+        body: z.string().max(4000).optional().describe("The brief: what done looks like, constraints, context the assignee needs"),
+        assignee: z.string().min(2).max(41).describe("Agent spec name that should do the work (a folder under agents/)"),
+        blocked_by: z.array(z.string().max(64)).max(10).optional().describe("Card ids this card waits on"),
+        key: z.string().max(128).optional().describe("Idempotency key: re-creating with the same key returns the existing card"),
+      })
+      .strict(),
+    async run(i, ctx) {
+      if (!ctx.board) return { content: "no board configured for this run (STUDIO_BOARD / dispatcher)", is_error: true };
+      const names = agentNames(ctx);
+      if (!names.has(i.assignee)) {
+        return { content: `unknown assignee "${i.assignee}"; known agents: ${[...names].sort().join(", ")}`, is_error: true };
+      }
+      if (i.blocked_by?.length) {
+        const cards = await ctx.board.list();
+        const ids = new Set(cards.map((c) => c.id));
+        const missing = i.blocked_by.filter((id: string) => !ids.has(id));
+        if (missing.length) return { content: `unknown card id(s) in blocked_by: ${missing.join(", ")}`, is_error: true };
+      }
+      try {
+        const { card, created } = await ctx.board.create({ title: i.title, body: i.body, assignee: i.assignee, blocked_by: i.blocked_by, key: i.key });
+        return { content: JSON.stringify({ ...card, created }) };
+      } catch (e) {
+        return { content: `board_create refused: ${e instanceof Error ? e.message : String(e)}`, is_error: true };
+      }
+    },
+  },
+  board_list: {
+    description:
+      "List the studio board's cards (id, title, status, assignee, blockers — not bodies, by design; use " +
+      "board_get for one card in full). Filter by status.",
+    input: z.object({ status: z.enum(["todo", "doing", "blocked", "done"]).optional() }).strict(),
+    async run(i, ctx) {
+      if (!ctx.board) return { content: "no board configured for this run", is_error: true };
+      const cards = (await ctx.board.list()).filter((c) => !i.status || c.status === i.status);
+      const brief = cards.map(({ id, title, status, assignee, blocked_by, updated_at }) => ({ id, title, status, assignee, blocked_by, updated_at }));
+      return { content: JSON.stringify({ count: brief.length, cards: brief }) };
+    },
+  },
+  board_get: {
+    description: "Read one card in full: the brief, the holder's note, and its comments.",
+    input: z.object({ card_id: z.string().min(3).max(64) }).strict(),
+    async run(i, ctx) {
+      if (!ctx.board) return { content: "no board configured for this run", is_error: true };
+      try {
+        const [card, comments] = await Promise.all([ctx.board.get(i.card_id), ctx.board.comments(i.card_id)]);
+        return { content: JSON.stringify({ ...card, comments }) };
+      } catch (e) {
+        return { content: `board_get refused: ${e instanceof Error ? e.message : String(e)}`, is_error: true };
+      }
+    },
+  },
+  board_comment: {
+    description: "Add a comment to a card: progress, questions, or context for the next reader.",
+    input: z.object({ card_id: z.string().min(3).max(64), body: z.string().min(1).max(4000) }).strict(),
+    async run(i, ctx) {
+      if (!ctx.board) return { content: "no board configured for this run", is_error: true };
+      try {
+        const c = await ctx.board.comment(i.card_id, i.body, ctx.agent ?? "unknown");
+        return { content: JSON.stringify(c) };
+      } catch (e) {
+        return { content: `board_comment refused: ${e instanceof Error ? e.message : String(e)}`, is_error: true };
+      }
+    },
+  },
+};
+
 /** Each capability provides one or more model-facing tools. */
 export const IMPLS: Record<CapabilityName, Record<string, ToolImpl>> = {
   catalog_query: catalogTools,
@@ -558,6 +650,7 @@ export const IMPLS: Record<CapabilityName, Record<string, ToolImpl>> = {
   workspace_read: { workspace_read: workspaceRead },
   workspace_write: { workspace_write: workspaceWrite },
   game_repo: gameRepoTools,
+  board: boardTools,
 };
 
 /** Model-facing tool name → its capability and implementation. */

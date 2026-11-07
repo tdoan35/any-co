@@ -2,6 +2,24 @@
 
 One entry per harness decision: date, decision, why. Newest first.
 
+- **2026-11-07:** Studio orchestration (T4): one `Board` interface (`runner/board/`) with two
+  backends chosen by `STUDIO_BOARD=local|naive`. Local: append-only `runs/board.jsonl`
+  (`STUDIO_BOARD_FILE`), state = fold over events, torn last line tolerated; naive:
+  `client.board.cards.*` on the Studio Head's board (`STUDIO_BOARD_REF`). Naïve semantics mirrored
+  on both (verified against docs/team/board.md): fixed statuses, `done` terminal + needs a note,
+  blocked cards heal to todo on read, `key` idempotency (first create wins), one `doing` per
+  assignee. Key platform fact: **assigning a card starts a hosted session of the assignee in the
+  same request**, so the naive backend never writes local agent names into `assignee` — they ride
+  in a `local-assignee:` body header, and `update` never sends `assignee` (it resets the wake).
+  Dispatcher (`runner/dispatch.ts`, CLI `npm run studio`): polls the board, starts a local run per
+  due card (assignee is a local spec, blockers all done, agent holds no `doing` card) under
+  `--max-parallel` (default 2), task = card title + body + blockers' done notes; closes done
+  (status, run id, spend, clipped summary) or blocked (error); a killed run requeues to todo —
+  the switch stops spend, not the work. Startup requeues orphaned `doing` cards (T5 resume hook
+  and the durable-approval-queue Approver are marked plug-in points; default approver is denyAll).
+  New `board` capability (board_create validates assignee against agents/ and blocked_by against
+  the board; board_list/board_get/board_comment) maps to hosted `board_read`/`board_write`.
+  Studio Head may now assign work (cards) and must log_decision per steering assignment.
 - **2026-11-07:** Engine locked: Godot 4.7 (brew cask). Spike results on macOS arm64: plain `--headless` returns null viewport textures (no rendering, ever); windowed runs capture NONBLANK PNGs via SubViewport; `--write-movie` produces real frame data; `--headless --rendering-method gl_compatibility` does not help. So QA/trailer capture runs the desktop build windowed or in movie mode (xvfb on Linux), and the screenshot contract only requires "no visible window dependency" of the game, not headless. Contracts written accordingly (docs/contracts/): one `qa/` file protocol (control.json polled per frame, ack.json, events.jsonl) instead of stdin/sockets — debuggable, engine-agnostic, no threads; JSON Schemas for state-dump and asset-manifest; build.sh fixed targets; telemetry counts standard events.
 - **2026-11-07:** `game_repo` capability (game_clone/game_read/game_write/game_exec): each run clones games/<game> into runs/<id>/workspace/game on branch `agent/<name>`; only the Tech Lead merges into main (single-merger rule). game_exec is argv-array only (no shell), non-zero exit is an error result. Unblocked six specs: tech-lead, gameplay-engineer (one per roster slot, ×2), build-release (uploads staged but gated: no send capability yet), qa-lead, playtester, audio (procedural, committed generators only — license-clean by construction). Runner fix from the historian smoke failure: a reply truncated by max_tokens arrives empty and the model re-sent the same giant output until nudges ran out ($0.22 wasted); the nudge now names the truncation and demands small turns, plus a regression test. All 18 specs validate; 50 tests green; historian smoke passed end-to-end ($0.18, timeline + narrative written from studio tools).
 - **2026-11-07:** Five more agent specs need no new capabilities, so they ship now: level-content-designer (design), marketing-lead + community-outreach (marketing), finance-compliance + studio-historian (ops), all local on glm-5.3, budgets $3–5/day. Conventions: long-form deliverables (content JSON, store copy, drafts, checklists, timeline) are files in the run workspace and the output_schema returns only the manifest plus numbers copied from tool output, so hand-offs and evals stay checkable; community-outreach is drafts-only because a gated send capability doesn't exist yet. studio_ledger gained `ledger_recent` (counts + newest-first entries, reads tools/ledger) so the Historian and Studio Head can read history, not just write it.
