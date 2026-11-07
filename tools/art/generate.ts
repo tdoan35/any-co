@@ -80,6 +80,37 @@ const PIXELLAB_ESTIMATE_USD = 0.02; // generate-image-v2 (the API's own usage ex
 
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47];
 
+/**
+ * A failure after the provider accepted a paid job. Carries the cost the call will
+ * (or did) bill: reported when the provider said so, else the table estimate marked
+ * "estimated (failed after submit)" — a paid attempt is never a silent $0.
+ */
+export class ChargedFailure extends Error {
+  cost_micro_usd: number;
+  cost_source: string;
+  constructor(message: string, costMicroUsd: number, source: string) {
+    super(`${message} [cost_micro_usd=${costMicroUsd} cost_source=${source}]`);
+    this.name = "ChargedFailure";
+    this.cost_micro_usd = costMicroUsd;
+    this.cost_source = source;
+  }
+}
+
+/** Reported cost if the provider stated one, else the table estimate for the in-flight call. */
+function failureCost(provider: ProviderName, input: GenerateInput, reportedUsd?: number): { micro: number; source: string } {
+  if (reportedUsd !== undefined) return { micro: usdToMicro(reportedUsd), source: "reported" };
+  const style = input.style ?? "rd_pro__default";
+  return provider === "retrodiffusion"
+    ? { micro: usdToMicro(retrodiffusionEstimateUsd(style)), source: "estimated (failed after submit)" }
+    : { micro: usdToMicro(PIXELLAB_ESTIMATE_USD), source: "estimated (failed after submit)" };
+}
+
+/** Build the ChargedFailure for a post-submit throw (keeps the original message). */
+function charged(provider: ProviderName, input: GenerateInput, message: string, reportedUsd?: number): ChargedFailure {
+  const { micro, source } = failureCost(provider, input, reportedUsd);
+  return new ChargedFailure(message, micro, source);
+}
+
 function requireKey(env: Record<string, string | undefined>, name: string): string {
   const key = env[name]?.trim();
   if (!key) throw new Error(`${name} is not set: paid generation is unavailable (add the key to the environment)`);
@@ -116,6 +147,7 @@ async function writeImages(workspace: string, out: string, images: Uint8Array[][
 }
 
 export async function generate(input: GenerateInput, opts: GenerateOptions): Promise<GenerateResult> {
+  if (!/\.png$/i.test(input.out)) throw new Error(`out must end in .png, got "${input.out}"`);
   resolveInside(opts.workspace, input.out); // refuse path escapes before spending money
   if (opts.pollIntervalMs === undefined || opts.timeoutMs === undefined) {
     opts = { pollIntervalMs: 2000, timeoutMs: 180_000, ...opts };
@@ -133,12 +165,36 @@ export async function generate(input: GenerateInput, opts: GenerateOptions): Pro
   return pixellab(input, opts, env, fetchImpl, deadline, sleep);
 }
 
+/** USD from a PixelLab-style usage object ({type:"usd", usd}); undefined when absent or non-USD. */
+function usageUsd(usage: unknown): number | undefined {
+  if (typeof usage !== "object" || usage === null) return undefined;
+  const u = usage as { type?: unknown; usd?: unknown };
+  return (u.type === undefined || u.type === "usd") && typeof u.usd === "number" ? u.usd : undefined;
+}
+
+/** Abort signal for whatever is left of the overall deadline (at least 1 ms). */
+const untilDeadline = (deadline: number) => AbortSignal.timeout(Math.max(1, deadline - Date.now()));
+
+export const MAX_DOWNLOAD_BYTES = 32 * 1024 * 1024;
+
+/** Download a hosted result with the deadline and a size cap. */
+async function download(fetchImpl: typeof fetch, url: string, deadline: number): Promise<Uint8Array> {
+  const res = await fetchImpl(url, { signal: untilDeadline(deadline) });
+  if (!res.ok) throw new Error(`downloading generated image failed (${res.status}): ${url}`);
+  const declared = Number(res.headers.get("content-length") ?? "0");
+  if (declared > MAX_DOWNLOAD_BYTES) throw new Error(`generated image is ${declared} bytes, over the ${MAX_DOWNLOAD_BYTES}-byte cap`);
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  if (bytes.length > MAX_DOWNLOAD_BYTES) throw new Error(`generated image is ${bytes.length} bytes, over the ${MAX_DOWNLOAD_BYTES}-byte cap`);
+  return bytes;
+}
+
 async function httpJson(
   fetchImpl: typeof fetch,
   url: string,
   init: RequestInit,
+  deadline: number,
 ): Promise<{ status: number; body: any }> {
-  const res = await fetchImpl(url, init);
+  const res = await fetchImpl(url, { ...init, signal: untilDeadline(deadline) });
   const text = await res.text();
   let body: any = null;
   try {
@@ -182,20 +238,23 @@ async function retrodiffusion(
     method: "POST",
     headers: { "content-type": "application/json", "X-RD-Token": key, "Idempotency-Key": randomUUID() },
     body: JSON.stringify(body),
-  });
+  }, deadline);
   if (submitted.status >= 400)
     throw new Error(`retrodiffusion rejected the request (${submitted.status}): ${submitted.body?.error?.message ?? submitted.body?.detail ?? JSON.stringify(submitted.body).slice(0, 300)}`);
   const taskId = submitted.body?.task_id;
   if (!taskId) throw new Error(`retrodiffusion returned no task_id: ${JSON.stringify(submitted.body).slice(0, 300)}`);
+  const submittedUsd = usageUsd(submitted.body?.usage) ?? (typeof submitted.body?.balance_cost === "number" ? submitted.body.balance_cost : undefined);
 
   let result: any = null;
   for (;;) {
-    if (Date.now() > deadline) throw new Error(`retrodiffusion generation timed out after ${opts.timeoutMs} ms (task ${taskId})`);
-    const poll = await httpJson(fetchImpl, `${base}/v2/inferences/tasks/${taskId}`, { headers: { "X-RD-Token": key } });
+    if (Date.now() > deadline) throw charged("retrodiffusion", input, `retrodiffusion generation timed out after ${opts.timeoutMs} ms (task ${taskId})`, submittedUsd);
+    const poll = await httpJson(fetchImpl, `${base}/v2/inferences/tasks/${taskId}`, { headers: { "X-RD-Token": key } }, deadline).catch((e: unknown) => {
+      throw charged("retrodiffusion", input, `retrodiffusion task poll failed: ${(e as Error).message}`, submittedUsd);
+    });
     if (poll.status >= 400)
-      throw new Error(`retrodiffusion task poll failed (${poll.status}): ${poll.body?.error?.message ?? JSON.stringify(poll.body).slice(0, 300)}`);
+      throw charged("retrodiffusion", input, `retrodiffusion task poll failed (${poll.status}): ${poll.body?.error?.message ?? JSON.stringify(poll.body).slice(0, 300)}`, submittedUsd);
     if (poll.body?.status === "failed")
-      throw new Error(`retrodiffusion task failed: ${poll.body?.error?.detail ?? poll.body?.error?.message ?? JSON.stringify(poll.body.error).slice(0, 300)}`);
+      throw charged("retrodiffusion", input, `retrodiffusion task failed: ${poll.body?.error?.detail ?? poll.body?.error?.message ?? JSON.stringify(poll.body.error).slice(0, 300)}`, submittedUsd);
     if (poll.body?.status === "succeeded") {
       result = poll.body.result;
       break;
@@ -203,17 +262,17 @@ async function retrodiffusion(
     await sleep(opts.pollIntervalMs ?? 2000);
   }
 
-  const images: Uint8Array[][] = [];
-  for (const b64 of (result?.base64_images ?? []) as string[]) images.push([new Uint8Array(Buffer.from(b64, "base64"))]);
-  if (images.length === 0)
-    for (const url of (result?.output_urls ?? []) as string[]) {
-      const res = await fetchImpl(url);
-      if (!res.ok) throw new Error(`downloading generated image failed (${res.status}): ${url}`);
-      images.push([new Uint8Array(await res.arrayBuffer())]);
-    }
-
-  const written = await writeImages(opts.workspace, input.out, images);
-  const reportedUsd = typeof result?.balance_cost === "number" ? result.balance_cost : undefined;
+  const reportedUsd = typeof result?.balance_cost === "number" ? result.balance_cost : submittedUsd;
+  let written: string[];
+  try {
+    const images: Uint8Array[][] = [];
+    for (const b64 of (result?.base64_images ?? []) as string[]) images.push([new Uint8Array(Buffer.from(b64, "base64"))]);
+    if (images.length === 0)
+      for (const url of (result?.output_urls ?? []) as string[]) images.push([await download(fetchImpl, url, deadline)]);
+    written = await writeImages(opts.workspace, input.out, images);
+  } catch (e) {
+    throw charged("retrodiffusion", input, (e as Error).message, reportedUsd);
+  }
   const costUsd = reportedUsd ?? retrodiffusionEstimateUsd(style);
   return {
     provider: "retrodiffusion",
@@ -273,20 +332,23 @@ async function pixellab(
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
     body: JSON.stringify(body),
-  });
+  }, deadline);
   if (submitted.status >= 400)
     throw new Error(`pixellab rejected the request (${submitted.status}): ${submitted.body?.detail ?? JSON.stringify(submitted.body).slice(0, 300)}`);
   const jobId = submitted.body?.background_job_id;
   if (!jobId) throw new Error(`pixellab returned no background_job_id: ${JSON.stringify(submitted.body).slice(0, 300)}`);
+  const submittedUsd = usageUsd(submitted.body?.usage);
 
   let job: any = null;
   for (;;) {
-    if (Date.now() > deadline) throw new Error(`pixellab generation timed out after ${opts.timeoutMs} ms (job ${jobId})`);
-    const poll = await httpJson(fetchImpl, `${base}/v2/background-jobs/${jobId}`, { headers: { authorization: `Bearer ${key}` } });
+    if (Date.now() > deadline) throw charged("pixellab", input, `pixellab generation timed out after ${opts.timeoutMs} ms (job ${jobId})`, submittedUsd);
+    const poll = await httpJson(fetchImpl, `${base}/v2/background-jobs/${jobId}`, { headers: { authorization: `Bearer ${key}` } }, deadline).catch((e: unknown) => {
+      throw charged("pixellab", input, `pixellab job poll failed: ${(e as Error).message}`, submittedUsd);
+    });
     if (poll.status >= 400)
-      throw new Error(`pixellab job poll failed (${poll.status}): ${poll.body?.detail ?? JSON.stringify(poll.body).slice(0, 300)}`);
+      throw charged("pixellab", input, `pixellab job poll failed (${poll.status}): ${poll.body?.detail ?? JSON.stringify(poll.body).slice(0, 300)}`, submittedUsd);
     if (poll.body?.status === "failed")
-      throw new Error(`pixellab job failed: ${JSON.stringify(poll.body?.last_response ?? poll.body).slice(0, 300)}`);
+      throw charged("pixellab", input, `pixellab job failed: ${JSON.stringify(poll.body?.last_response ?? poll.body).slice(0, 300)}`, usageUsd(poll.body?.usage) ?? submittedUsd);
     if (poll.body?.status === "completed") {
       job = poll.body;
       break;
@@ -294,13 +356,17 @@ async function pixellab(
     await sleep(opts.pollIntervalMs ?? 2000);
   }
 
-  const b64s: string[] = [];
-  collectBase64Images(job?.last_response, b64s);
-  if (b64s.length === 0) throw new Error("pixellab job completed but carried no image payload");
-  const written = await writeImages(opts.workspace, input.out, b64s.map((b64) => [new Uint8Array(Buffer.from(b64, "base64"))]));
-
   const usage = (job?.usage ?? submitted.body?.usage) as { type?: string; usd?: number } | null | undefined;
-  const reportedUsd = usage?.type === "usd" && typeof usage.usd === "number" ? usage.usd : undefined;
+  const reportedUsd = usageUsd(usage);
+  let written: string[];
+  try {
+    const b64s: string[] = [];
+    collectBase64Images(job?.last_response, b64s);
+    if (b64s.length === 0) throw new Error("pixellab job completed but carried no image payload");
+    written = await writeImages(opts.workspace, input.out, b64s.map((b64) => [new Uint8Array(Buffer.from(b64, "base64"))]));
+  } catch (e) {
+    throw charged("pixellab", input, (e as Error).message, reportedUsd);
+  }
   const costUsd = reportedUsd ?? PIXELLAB_ESTIMATE_USD;
   return {
     provider: "pixellab",

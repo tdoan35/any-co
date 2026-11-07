@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { decodePng, encodePng, makeImage } from "./png.ts";
-import { generate, resolveInside } from "./generate.ts";
+import { ChargedFailure, generate, resolveInside } from "./generate.ts";
 
 const PNG_BYTES = encodePng(makeImage(2, 2));
 const PNG_B64 = Buffer.from(PNG_BYTES).toString("base64");
@@ -346,7 +346,7 @@ test("art_generate capability: writes into the workspace, chains snap+lock+outli
   mkdirSync(path.join(ws, "game", "assets"), { recursive: true });
   writeFileSync(
     path.join(ws, "game", "assets", "manifest.json"),
-    JSON.stringify({ schema_version: 1, style_bible: "docs/style-bible.md", grid: { w: 16, h: 16 }, palette: ["#010203", "#040506"], assets: [{ id: "a", type: "sprite", path: "assets/a.png", size: { w: 16, h: 16 }, palette: ["#010203"], anchor: null }] }),
+    JSON.stringify({ schema_version: 1, style_bible: "docs/style-bible.md", grid: { w: 16, h: 16 }, palette: ["#010203", "#040506"], assets: [{ id: "gen", type: "sprite", path: "assets/sprites/gen.png", size: { w: 16, h: 16 }, palette: ["#010203"], anchor: null }] }),
   );
   const source = blockySource();
   const prev = { ...process.env };
@@ -404,6 +404,7 @@ test("art_generate capability: errors are tool errors, not throws (missing manif
   const prevBase = process.env.RETRO_DIFFUSION_BASE_URL;
   process.env.RETRO_DIFFUSION_API_KEY = "rdpkguard-test";
   delete process.env.RETRO_DIFFUSION_BASE_URL;
+  try {
 
   // generation succeeds against a fake server; postprocess then fails on the missing manifest
   await withServer(
@@ -431,8 +432,163 @@ test("art_generate capability: errors are tool errors, not throws (missing manif
   assert.equal(escape.is_error, true);
   assert.match(escape.content, /escape/i);
 
-  if (prevKey === undefined) delete process.env.RETRO_DIFFUSION_API_KEY;
-  else process.env.RETRO_DIFFUSION_API_KEY = prevKey;
-  if (prevBase === undefined) delete process.env.RETRO_DIFFUSION_BASE_URL;
-  else process.env.RETRO_DIFFUSION_BASE_URL = prevBase;
+  } finally {
+    if (prevKey === undefined) delete process.env.RETRO_DIFFUSION_API_KEY;
+    else process.env.RETRO_DIFFUSION_API_KEY = prevKey;
+    if (prevBase === undefined) delete process.env.RETRO_DIFFUSION_BASE_URL;
+    else process.env.RETRO_DIFFUSION_BASE_URL = prevBase;
+  }
+});
+
+// ---- T3-fix regressions ----
+
+test("T3-fix 1: failures after a paid submit carry the cost (timeout, failed job) — never a silent $0", async () => {
+  const ws = tempWorkspace();
+  await withServer(
+    (req, _count, res) => {
+      if (req.method === "POST") json(res, 202, { status: "accepted", task_id: "fix-timeout" });
+      else if (req.url === "/v2/inferences/tasks/fix-timeout") json(res, 200, { status: "running" });
+      else json(res, 404, {});
+    },
+    async ({ baseUrl }) => {
+      // timeout after a 202 with balance_cost unknown → estimate on the error
+      const err = (await generate({ provider: "retrodiffusion", prompt: "x", width: 64, height: 64, out: "a.png" }, { workspace: ws, baseUrl: { retrodiffusion: baseUrl }, env: ENV, pollIntervalMs: 1, timeoutMs: 60 }).catch((e: unknown) => e)) as ChargedFailure;
+      assert.ok(err instanceof ChargedFailure, `expected ChargedFailure, got ${err}`);
+      assert.equal(err.cost_micro_usd > 0, true, "timeout error carries a positive cost");
+      assert.equal(err.cost_source, "estimated (failed after submit)");
+      assert.equal(err.cost_micro_usd, 180_000); // rd_pro__default estimate
+    },
+  );
+  await withServer(
+    (req, _count, res) => {
+      if (req.method === "POST") json(res, 202, { status: "accepted", task_id: "fix-failed" });
+      else if (req.url === "/v2/inferences/tasks/fix-failed") json(res, 200, { status: "failed", error: { status_code: 500, detail: "boom" } });
+      else json(res, 404, {});
+    },
+    async ({ baseUrl }) => {
+      const err = (await generate({ provider: "retrodiffusion", prompt: "x", width: 64, height: 64, out: "a.png" }, { workspace: ws, baseUrl: { retrodiffusion: baseUrl }, env: ENV, ...FAST }).catch((e: unknown) => e)) as ChargedFailure;
+      assert.ok(err instanceof ChargedFailure);
+      assert.equal(err.cost_micro_usd, 180_000);
+    },
+  );
+  // failed job whose submit response carried usage → reported cost wins
+  await withServer(
+    (req, _count, res) => {
+      if (req.method === "POST") json(res, 202, { status: "accepted", task_id: "fix-failed2", usage: { type: "usd", usd: 0.02 } });
+      else if (req.url === "/v2/inferences/tasks/fix-failed2") json(res, 200, { status: "failed", error: { status_code: 500, detail: "boom" } });
+      else json(res, 404, {});
+    },
+    async ({ baseUrl }) => {
+      const err = (await generate({ provider: "retrodiffusion", prompt: "x", width: 64, height: 64, out: "a.png" }, { workspace: ws, baseUrl: { retrodiffusion: baseUrl }, env: ENV, ...FAST }).catch((e: unknown) => e)) as ChargedFailure;
+      assert.ok(err instanceof ChargedFailure);
+      assert.equal(err.cost_micro_usd, 20_000);
+      assert.equal(err.cost_source, "reported");
+    },
+  );
+});
+
+test("T3-fix 1b: capability returns cost_micro_usd when postprocess fails after a successful generation", async () => {
+  const ws = tempWorkspace(); // no game/manifest → postprocess must fail
+  const prevKey = process.env.RETRO_DIFFUSION_API_KEY;
+  const prevBase = process.env.RETRO_DIFFUSION_BASE_URL;
+  process.env.RETRO_DIFFUSION_API_KEY = "rdpk-fix";
+  try {
+    await withServer(
+      (req, _count, res) => {
+        if (req.method === "POST") json(res, 202, { status: "accepted", task_id: "cap-fix" });
+        else if (req.url === "/v2/inferences/tasks/cap-fix") json(res, 200, { status: "succeeded", result: { base64_images: [PNG_B64], balance_cost: 0.18 } });
+        else json(res, 404, {});
+      },
+      async ({ baseUrl }) => {
+        process.env.RETRO_DIFFUSION_BASE_URL = baseUrl;
+        const out = await IMPLS.art_generate.art_generate.run(
+          { provider: "retrodiffusion", prompt: "x", width: 16, height: 16, out: "gen.png", postprocess: { lock: true } },
+          capabilityCtx(ws),
+        );
+        assert.equal(out.is_error, true);
+        assert.equal(out.cost_micro_usd, 180_000);
+        assert.match(out.content, /manifest/i);
+      },
+    );
+  } finally {
+    for (const [name, value] of [["RETRO_DIFFUSION_API_KEY", prevKey], ["RETRO_DIFFUSION_BASE_URL", prevBase]] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test("T3-fix 2: postprocess snap targets the full asset (frames × grid), not one cell", async () => {
+  const ws = tempWorkspace();
+  mkdirSync(path.join(ws, "game", "assets"), { recursive: true });
+  // manifest: grid 16x16; the entry is a 4-frame strip of 16x16 → 64x16
+  writeFileSync(
+    path.join(ws, "game", "assets", "manifest.json"),
+    JSON.stringify({ schema_version: 1, style_bible: "s", grid: { w: 16, h: 16 }, palette: ["#010203", "#040506"], assets: [{ id: "walk", type: "sprite", path: "assets/sprites/walk.png", size: { w: 16, h: 16 }, frames: 4, palette: ["#010203"], anchor: null }] }),
+  );
+  // provider returns an UPSCALED 256x64 strip (4× scale of 64x16); blocks of 4x4 px uniform
+  const img = makeImage(256, 64);
+  for (let y = 0; y < 64; y += 4)
+    for (let x = 0; x < 256; x += 4)
+      for (const [dx, dy] of [[0, 0], [1, 0], [0, 1], [1, 1], [2, 0], [2, 1], [3, 0], [3, 1], [0, 2], [1, 2], [0, 3], [1, 3], [2, 2], [3, 2], [2, 3], [3, 3]] as const)
+        img.data.set([1, 2, 3, 255], ((y + dy) * 256 + x + dx) * 4);
+  const source = encodePng(img);
+  const prevKey = process.env.RETRO_DIFFUSION_API_KEY;
+  const prevBase = process.env.RETRO_DIFFUSION_BASE_URL;
+  process.env.RETRO_DIFFUSION_API_KEY = "rdpk-fix2";
+  try {
+    await withServer(
+      (req, _count, res) => {
+        if (req.method === "POST") json(res, 202, { status: "accepted", task_id: "snap-fix" });
+        else if (req.url === "/v2/inferences/tasks/snap-fix") json(res, 200, { status: "succeeded", result: { base64_images: [Buffer.from(source).toString("base64")], balance_cost: 0.18 } });
+        else json(res, 404, {});
+      },
+      async ({ baseUrl }) => {
+        process.env.RETRO_DIFFUSION_BASE_URL = baseUrl;
+        const out = await IMPLS.art_generate.art_generate.run(
+          { provider: "retrodiffusion", prompt: "walk cycle", width: 256, height: 64, out: "game/assets/sprites/walk.png", frames: 4, postprocess: { snap: true } },
+          capabilityCtx(ws),
+        );
+        assert.equal(out.is_error, undefined, out.content);
+        const parsed = JSON.parse(out.content) as { postprocess: { snap: { scaleX: number; scaleY: number } } };
+        assert.equal(parsed.postprocess.snap.scaleX, 4); // 256 → 64 (4 frames × 16), not 256 → 16
+        const snapped = decodePng(new Uint8Array(readFileSync(path.join(ws, "game/assets/sprites/walk.png"))));
+        assert.equal(snapped.width, 64);
+        assert.equal(snapped.height, 16);
+      },
+    );
+  } finally {
+    for (const [name, value] of [["RETRO_DIFFUSION_API_KEY", prevKey], ["RETRO_DIFFUSION_BASE_URL", prevBase]] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test("T3-fix 4: a hung connection is cut by the deadline (AbortSignal), with the cost attached after submit", async () => {
+  const ws = tempWorkspace();
+  await withServer(
+    (req, _count, res) => {
+      if (req.method === "POST") json(res, 202, { status: "accepted", task_id: "hang" });
+      // the poll never answers: no res.end()
+      else void res;
+    },
+    async ({ baseUrl }) => {
+      const t0 = Date.now();
+      const err = (await generate({ provider: "retrodiffusion", prompt: "x", width: 64, height: 64, out: "a.png" }, { workspace: ws, baseUrl: { retrodiffusion: baseUrl }, env: ENV, pollIntervalMs: 1, timeoutMs: 150 }).catch((e: unknown) => e)) as ChargedFailure;
+      assert.ok(Date.now() - t0 < 2000, "deadline must cut a hung poll");
+      assert.ok(err instanceof ChargedFailure, String(err));
+      assert.equal(err.cost_micro_usd, 180_000);
+    },
+  );
+});
+
+test("T3-fix 5: out must end in .png (multi-image naming can't collide)", async () => {
+  const ws = tempWorkspace();
+  await assert.rejects(
+    generate({ provider: "retrodiffusion", prompt: "x", width: 64, height: 64, out: "gen/take" }, { workspace: ws, baseUrl: { retrodiffusion: "http://127.0.0.1:1" }, env: ENV, ...FAST }),
+    /\.png/,
+  );
+  const r = IMPLS.art_generate.art_generate.input.safeParse({ provider: "retrodiffusion", prompt: "x", width: 16, height: 16, out: "gen/take" });
+  assert.equal(r.success, false);
 });

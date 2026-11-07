@@ -12,7 +12,7 @@ import { studioStatusTools } from "./studio-status.ts";
 import { decodePng, encodePng, type RgbaImage } from "../../tools/art/png.ts";
 import { addOutline, contactSheet, lockPalette, snapToGrid, splitStrip } from "../../tools/art/ops.ts";
 import { runGate } from "../../tools/art/gate.ts";
-import { generate } from "../../tools/art/generate.ts";
+import { ChargedFailure, generate } from "../../tools/art/generate.ts";
 import { append as ledgerAppend, read as ledgerRead, LEDGER_FILE } from "../../tools/ledger/ledger.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -715,7 +715,7 @@ async function applyArtPostprocess(
   images: string[],
 ): Promise<Record<string, unknown>> {
   const manifestFile = resolveInWorkspace(workspace, path.join("game", "assets", "manifest.json"));
-  let manifest: { grid?: { w: number; h: number }; palette?: string[] };
+  let manifest: { grid?: { w: number; h: number }; palette?: string[]; assets?: Array<{ path?: string; size?: { w: number; h: number }; frames?: number }> };
   try {
     manifest = JSON.parse(await readFile(manifestFile, "utf8"));
   } catch (e) {
@@ -731,7 +731,17 @@ async function applyArtPostprocess(
   for (const rel of images) {
     let img = decodePng(new Uint8Array(await readFile(resolveInWorkspace(workspace, rel))));
     if (opts.snap) {
-      const r = snapToGrid(img, { w: manifest.grid.w, h: manifest.grid.h });
+      // Snap to the whole asset (size is ONE frame × frames), never to a single grid cell.
+      const repoRel = rel.replace(/^game\//, "");
+      const entry = manifest.assets?.find((a) => a.path === repoRel);
+      if (!entry?.size)
+        throw new Error(`snap needs the manifest entry for "${repoRel}" with its size (one frame) declared first`);
+      if (entry.size.w % manifest.grid.w !== 0 || entry.size.h % manifest.grid.h !== 0)
+        throw new Error(`manifest size ${entry.size.w}x${entry.size.h} for "${repoRel}" is not a multiple of grid ${manifest.grid.w}x${manifest.grid.h}`);
+      const target = { w: entry.size.w * (entry.frames ?? 1), h: entry.size.h };
+      if (img.width < target.w || img.height < target.h)
+        throw new Error(`generated ${img.width}x${img.height} is smaller than the asset ${target.w}x${target.h}; generate at least the target size`);
+      const r = snapToGrid(img, target);
       lastSnap = { scaleX: r.scaleX, scaleY: r.scaleY, uniform: r.uniform, integerScale: r.integerScale };
       img = r.image;
     }
@@ -762,7 +772,7 @@ const artGenerate: ToolImpl = {
       prompt: z.string().min(1).max(2000),
       width: z.number().int().min(12).max(792),
       height: z.number().int().min(12).max(792),
-      out: z.string().min(1).describe("workspace-relative output PNG"),
+      out: z.string().min(1).regex(/\.png$/i, "out must end in .png").describe("workspace-relative output PNG"),
       reference: z.string().min(1).optional().describe("workspace-relative reference/anchor PNG"),
       seed: z.number().int().nonnegative().optional(),
       frames: z.number().int().optional().describe("animation frames_duration (Retro Diffusion only: 4|6|8|10|12|16)"),
@@ -770,7 +780,7 @@ const artGenerate: ToolImpl = {
       style: z.string().max(120).optional().describe("Retro Diffusion prompt_style id"),
       postprocess: z
         .object({
-          snap: z.boolean().optional().describe("downscale to the manifest grid by majority vote"),
+          snap: z.boolean().optional().describe("downscale to the manifest entry's full size (size × frames) by majority vote"),
           lock: z.boolean().optional().describe("force the manifest palette (OKLab nearest)"),
           outline: hexColor.optional().describe("outline color from the style bible; omit to skip outlining"),
         })
@@ -779,16 +789,24 @@ const artGenerate: ToolImpl = {
     })
     .strict(),
   async run(i, ctx) {
+    let result: Awaited<ReturnType<typeof generate>>;
     try {
-      const result = await generate(i, { workspace: ctx.workspace });
+      result = await generate(i, { workspace: ctx.workspace });
+    } catch (e) {
+      // a failure after the provider accepted the job still bills: charge it
+      if (e instanceof ChargedFailure) return { content: errText(e), is_error: true, cost_micro_usd: e.cost_micro_usd };
+      return { content: errText(e), is_error: true };
+    }
+    try {
       let postprocess: Record<string, unknown> | null = null;
       if (i.postprocess && (i.postprocess.snap || i.postprocess.lock || i.postprocess.outline))
         postprocess = await applyArtPostprocess(ctx.workspace, i.postprocess, result.images);
       return { content: JSON.stringify({ ...result, postprocess }), cost_micro_usd: result.cost_micro_usd };
-      } catch (e) {
-        return { content: errText(e), is_error: true };
-      }
-    },
+    } catch (e) {
+      // generation succeeded and was paid; postprocess failing must not erase the charge
+      return { content: `generated ${result.images.join(", ")} but postprocess failed: ${errText(e)}`, is_error: true, cost_micro_usd: result.cost_micro_usd };
+    }
+  },
 };
 
 // ---------- itch_push / itch_status: butler sends (ask-gated by spec) ----------
