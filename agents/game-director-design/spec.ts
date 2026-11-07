@@ -10,8 +10,10 @@ export default defineAgent({
   description: "Design: turns the Greenlight Chair's pick into the committed design doc (docs/design.md) — scope tiers, systems, data files, balance targets, art needs.",
   dept: "design",
   runner: "local",
-  model: "z-ai/glm-5.3",
-  budget: { cap_usd: 5, max_task_usd: 1, period: "day" },
+  model: "anthropic/claude-opus-5.5", // Naïve catalogue id, used if this agent is ever hosted
+  // Local runs on Claude Opus 5.5 via the Neon AI gateway (Ty: speed, Neon credits); price = Anthropic list (estimate).
+  provider: { kind: "openai_compatible", model: "claude-opus-5-5", base_url_env: "NEON_AI_BASE_URL", api_key_env: "NEON_AI_API_KEY", usd_per_mtok: { input: 4, output: 20 } },
+  budget: { cap_usd: 20, max_task_usd: 5, period: "day" },
   tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow", catalog_query: "allow" },
   output_schema: z
     .object({
