@@ -40,6 +40,8 @@ export interface ModelReply {
   stop_reason: string | null;
   usage: { input_tokens: number; output_tokens: number };
   cost_micro_usd: number;
+  /** True when the provider couldn't get a billed cost and charged a conservative estimate instead. */
+  cost_estimated?: true;
   request_id: string;
   model: string;
 }

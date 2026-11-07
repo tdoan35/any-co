@@ -72,26 +72,43 @@ export class NaiveProvider implements Provider {
       content: (reply.content ?? []).filter((b: any) => b.type === "text" || b.type === "tool_use") as Block[],
       stop_reason: reply.stop_reason ?? null,
       usage: { input_tokens: reply.usage?.input_tokens ?? 0, output_tokens: reply.usage?.output_tokens ?? 0 },
-      cost_micro_usd: await this.billed(reply.id),
+      ...(await this.billedOrEstimate(reply.id, reply.usage?.input_tokens ?? 0, reply.usage?.output_tokens ?? 0)),
       request_id: reply.id,
       model: reply.resolved_model ?? reply.model ?? this.model,
     };
   }
 
-  // Replies carry no cost; the call trace does (docs/naive-notes.md). Without a cost the budget
-  // math is blind, so a missing trace fails the call instead of guessing.
-  private async billed(id: string): Promise<number> {
+  /** Highest billed rate seen from this provider, micro-USD per token, for conservative estimates. */
+  private maxRate = { input: 0, output: 0 };
+  /** Waits between call-trace lookups; the trace can lag the reply (seen Nov 7: one trace never appeared within 5 s). */
+  static TRACE_WAITS_MS = [1000, 2000, 4000, 8000, 15000, 30000];
+  /** Per-token ceiling used when nothing has been billed yet ($5 / $25 per MTok, above any model this studio uses). */
+  static CEILING = { input: 5, output: 25 };
+
+  // Replies carry no cost; the call trace does (docs/naive-notes.md). The budget math must never be blind:
+  // wait for the trace, and if it never comes, charge a conservative estimate (marked) instead of failing a long run.
+  private async billedOrEstimate(id: string, inTok: number, outTok: number): Promise<{ cost_micro_usd: number; cost_estimated?: true }> {
     let lastErr: unknown;
-    for (let i = 0; i < 6; i++) {
+    for (const wait of NaiveProvider.TRACE_WAITS_MS) {
       try {
         const t: any = await this.client.proxy.call(id);
-        if (typeof t.billed_micro_usd === "number") return t.billed_micro_usd;
+        if (typeof t.billed_micro_usd === "number") {
+          const tok = inTok + outTok;
+          if (tok > 0) {
+            const r = t.billed_micro_usd / tok; // blended rate is a safe upper bound for either side's estimate
+            this.maxRate = { input: Math.max(this.maxRate.input, r), output: Math.max(this.maxRate.output, r) };
+          }
+          return { cost_micro_usd: t.billed_micro_usd };
+        }
       } catch (e) {
         lastErr = e;
       }
-      await sleep(250 * (i + 1));
+      await sleep(wait);
     }
-    throw new Error(`no billed cost for ${id} after retries: ${String(lastErr ?? "trace missing billed_micro_usd")}`);
+    const rate = this.maxRate.input > 0 ? { input: this.maxRate.input * 1.5, output: this.maxRate.output * 1.5 } : NaiveProvider.CEILING;
+    const est = Math.ceil(inTok * rate.input + outTok * rate.output);
+    console.warn(`  ${this.label}: no billed cost for ${id} (${String(lastErr ?? "trace missing billed_micro_usd").slice(0, 120)}); charging a conservative estimate of ${est} micro-USD`);
+    return { cost_micro_usd: est, cost_estimated: true };
   }
 }
 
