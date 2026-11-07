@@ -10,6 +10,7 @@
 //                         re-open; identical heading both times)
 //   direct navigation   → DirectLoadDetail (play: ?item= lands on the same detail,
 //                         same rail date, as repeated navigation)
+//   mid (900px)         → MidThreeColumn (rail stays a column)
 //   narrow + sheet      → NarrowRailSheet (play: sheet open/close, pick inside the
 //                         sheet, stacked detail open)
 //   keyboard flow       → covered in Inbox · "Composed screen · keyboard flow" (ANY-15)
@@ -37,7 +38,9 @@ const tooltipDecorator: Decorator = (Story) => (
 
 const VIEWPORTS = {
   wide: { name: "Wide · three column", styles: { width: "1600px", height: "1000px" } },
-  narrow: { name: "Narrow · stacked", styles: { width: "900px", height: "1200px" } },
+  // Columns follow the panel's width, not the viewport: 900px still fits three, 640px stacks.
+  mid: { name: "Mid · three column, compact inbox", styles: { width: "900px", height: "900px" } },
+  narrow: { name: "Narrow · stacked", styles: { width: "640px", height: "1200px" } },
 } as const;
 
 const meta = {
@@ -157,6 +160,21 @@ export const DirectLoadDetail: Story = {
 };
 
 // ---- narrow: stacked layout and the rail sheet ----
+
+/** 900px (a small display or a narrow Electron window): the day rail stays a third column, no sheet. */
+export const MidThreeColumn: Story = {
+  name: "Mid · rail stays a column",
+  parameters: {
+    ...wide,
+    viewport: { defaultViewport: "mid", viewports: VIEWPORTS },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const aside = canvasElement.querySelector('aside[aria-label="Today"]')!;
+    await waitFor(() => expect(getComputedStyle(aside).display).toBe("flex"));
+    expect(canvas.queryByRole("button", { name: "Your day" })).toBeNull();
+  },
+};
 
 /** Below the three-column breakpoints: the rail lives in a sheet, the detail stacks. */
 export const NarrowRailSheet: Story = {

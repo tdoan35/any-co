@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 import { AnimatePresence, motion } from "motion/react";
 import { ArrowLeft, CalendarDays } from "lucide-react";
@@ -16,6 +16,27 @@ import { ItemDetail } from "./item-detail";
 import { ColumnHeader } from "./parts";
 import { Pulse, type PulseFilter } from "./pulse";
 import { quietScroll, useEdgeFade } from "./use-edge-fade";
+
+/** Panel widths (px) where the layout gains a column. Measured on the panel, not the viewport, so the
+ *  app sidebar and a small display (or a narrow Electron window) don't push the day rail into a sheet. */
+const TWO_COLS = 680;
+const THREE_COLS = 860;
+/** Above this the inbox gets Fabric's full 300px; below it 264px, so Pulse keeps a readable width. */
+const ROOMY = 1100;
+
+function usePanelWidth<T extends HTMLElement>() {
+  const ref = useRef<T>(null);
+  const [width, setWidth] = useState(0);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    setWidth(el.getBoundingClientRect().width);
+    const ro = new ResizeObserver(([e]) => setWidth(e.contentRect.width));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  return [ref, width] as const;
+}
 
 const FILTERS = [{ value: "highlights", label: "Highlights" }, { value: "everything", label: "Everything" }] as const;
 
@@ -38,6 +59,12 @@ export function WeaveScreen() {
   const [railOpen, setRailOpen] = useState(false);
   const [centerRef, centerFade] = useEdgeFade<HTMLDivElement>();
   const [railRef, railFade] = useEdgeFade<HTMLDivElement>();
+  const [panelRef, panelWidth] = usePanelWidth<HTMLDivElement>();
+  // Before the first measurement (width 0) assume the common desktop case: three columns.
+  const cols = panelWidth === 0 || panelWidth >= THREE_COLS ? 3 : panelWidth >= TWO_COLS ? 2 : 1;
+  useEffect(() => { if (cols === 3) setRailOpen(false); }, [cols]);
+  const colsRef = useRef(cols);
+  colsRef.current = cols;
 
   // The open item lives in the URL, so the title bar's back / forward walks through what you opened.
   const open = useCallback((id: string) => {
@@ -54,7 +81,7 @@ export function WeaveScreen() {
     if (!el) return;
     el.scrollTo({ top: 0 });
     // Stacked layout (narrow window): bring the detail into view below the inbox.
-    if (window.matchMedia("(max-width: 1023px)").matches) el.closest("section")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (colsRef.current === 1) el.closest("section")?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [selectedId, centerRef]);
 
   const pickDay = (d: string) => {
@@ -114,18 +141,27 @@ export function WeaveScreen() {
         center={<span className="hidden animate-in fade-in text-sm font-medium duration-700 fill-mode-backwards md:inline">{greeting()}</span>}
         right={<>
           {/* The rail's "Today" header carries the date; it only shows here while the rail is hidden. */}
-          <span className="hidden text-xs text-muted-foreground sm:inline xl:hidden">{fullDayLabel(TODAY)}</span>
-          <Button size="sm" variant="outline" className={cn(headerButton, "xl:hidden")} onClick={() => setRailOpen(true)}><CalendarDays />Your day</Button>
+          {cols < 3 && <>
+            <span className="hidden text-xs text-muted-foreground sm:inline">{fullDayLabel(TODAY)}</span>
+            <Button size="sm" variant="outline" className={headerButton} onClick={() => setRailOpen(true)}><CalendarDays />Your day</Button>
+          </>}
         </>}
       >
         <span className={headerTitle}>Weave</span>
       </PageHeader>
       <div className="min-h-0 flex-1 animate-in fade-in slide-in-from-bottom-3 p-4 pt-3 duration-500 ease-out fill-mode-backwards">
-        <div className={cn(
-          "grid h-full grid-cols-1 overflow-y-auto rounded-2xl border border-foreground/10 bg-background/20 shadow-sm backdrop-blur-xl lg:grid-cols-[300px_minmax(0,1fr)] lg:overflow-hidden xl:grid-cols-[300px_minmax(0,1fr)_288px]",
+        <div ref={panelRef} className={cn(
+          "grid h-full rounded-2xl border border-foreground/10 bg-background/20 shadow-sm backdrop-blur-xl",
+          cols === 1 && "grid-cols-1 overflow-y-auto",
+          cols === 2 && "grid-cols-[264px_minmax(0,1fr)] overflow-hidden",
+          cols === 3 && (panelWidth === 0 || panelWidth >= ROOMY ? "grid-cols-[300px_minmax(0,1fr)_288px]" : "grid-cols-[264px_minmax(0,1fr)_288px]"),
+          cols === 3 && "overflow-hidden",
           quietScroll,
         )}>
-          <section aria-label="Inbox" className="flex max-h-[60vh] min-h-0 flex-col border-b border-foreground/10 bg-background/40 lg:max-h-none lg:border-b-0 lg:border-r">
+          <section aria-label="Inbox" className={cn(
+            "flex min-h-0 flex-col border-foreground/10 bg-background/40",
+            cols === 1 ? "max-h-[60vh] border-b" : "border-r",
+          )}>
             <Inbox
               state={state} selectedId={selectedId} focusId={selectedId ?? focusId} onOpen={open}
               snoozeFor={snoozeFor} setSnoozeFor={setSnoozeFor}
@@ -145,7 +181,7 @@ export function WeaveScreen() {
                     <span className="ml-auto"><Segmented value={filter} options={FILTERS} onChange={setFilter} /></span>
                   </>}
             </ColumnHeader>
-            <div ref={centerRef} style={centerFade} className={cn("min-h-0 flex-1 px-5 pb-5 pt-4 lg:overflow-y-auto", quietScroll)}>
+            <div ref={centerRef} style={centerFade} className={cn("min-h-0 flex-1 px-5 pb-5 pt-4", cols > 1 && "overflow-y-auto", quietScroll)}>
               <AnimatePresence mode="wait" initial={false}>
                 <motion.div
                   key={selected?.id ?? "pulse"}
@@ -158,7 +194,7 @@ export function WeaveScreen() {
               </AnimatePresence>
             </div>
           </section>
-          <aside aria-label="Today" className="hidden min-h-0 flex-col border-l border-foreground/10 bg-background/40 xl:flex">
+          <aside aria-label="Today" className={cn("min-h-0 flex-col border-l border-foreground/10 bg-background/40", cols === 3 ? "flex" : "hidden")}>
             <ColumnHeader>{todayTitle}</ColumnHeader>
             <div ref={railRef} style={railFade} className={cn("min-h-0 flex-1 overflow-y-auto", quietScroll)}>{rail}</div>
           </aside>
