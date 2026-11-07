@@ -169,7 +169,7 @@ Fallback: a recorded run in case live wifi or builds fail.
 - [ ] Inference provider and art API keys, each with spend caps
 - [ ] Steam catalog dataset downloaded (if allowed)
 - [ ] Agent specs written; runner tested end to end on a toy task
-- [ ] Studio window skeleton (if allowed)
+- [x] Studio window built (Electron + adapter on real `runs/`; org chart, Weave, Work, chat with the Studio Head). See `window/README.md`
 - [ ] Laptop, charger, phone alerts set up
 
 ## Sources
