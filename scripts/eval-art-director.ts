@@ -55,13 +55,39 @@ export function evalDirector(dir: string): EvalSummary {
     check(!!bible.palette, "style bible does not declare `- palette:`");
     check(!!bible.outline, "style bible does not declare `- outline:`");
     check(!!bible.light, "style bible does not declare `- light:`");
-    check(!!bible.palette && out.manifest.locked && JSON.stringify(bible.palette) === JSON.stringify(out.manifest.palette.map((c) => c.toLowerCase())), "manifest palette ≠ style bible palette (or manifest not locked)");
+    // Compare against the clone's REAL manifest, not what the agent reported. Palettes compare
+    // exactly (same colors, same order, case-insensitive): the bible's order is the lock order.
+    const manifestPath = path.join(clone, "assets", "manifest.json");
+    let real: { grid?: { w: number; h: number }; palette?: string[] } | null = null;
+    try {
+      real = JSON.parse(readFileSync(manifestPath, "utf8"));
+    } catch {
+      real = null;
+    }
+    check(real !== null, "clone has no readable assets/manifest.json");
+    if (real) {
+      const realPalette = (real.palette ?? []).map((c) => c.toLowerCase());
+      const realGrid = real.grid ? `${real.grid.w}x${real.grid.h}` : "none";
+      check(!!bible.palette && JSON.stringify(bible.palette) === JSON.stringify(realPalette), `real manifest palette [${realPalette.join(", ")}] ≠ style bible palette [${(bible.palette ?? []).join(", ")}]`);
+      check(!!bible.grid && bible.grid.replace(/\s/g, "").toLowerCase() === realGrid, `real manifest grid ${realGrid} ≠ style bible grid ${bible.grid}`);
+      const reported = out.manifest;
+      check(
+        reported.locked === (realPalette.length >= 2 && !!real.grid) &&
+          JSON.stringify(reported.palette.map((c) => c.toLowerCase())) === JSON.stringify(realPalette) &&
+          reported.grid.w === real.grid?.w && reported.grid.h === real.grid?.h,
+        "reported manifest (locked/grid/palette) ≠ the clone's real manifest",
+      );
+    }
   }
 
   let gate: GateReport | null = null;
   if (existsSync(clone)) {
     gate = runGate(clone);
     check(gate.manifest.valid, `manifest fails schema: ${gate.manifest.errors.slice(0, 2).join("; ")}`);
+    // the gate's whole-repo verdict, not just per-asset numbers
+    check(gate.files.missing.length === 0, `gate: manifest paths missing on disk: ${gate.files.missing.join(", ")}`);
+    check(gate.files.unlisted.length === 0, `gate: unlisted files under assets/: ${gate.files.unlisted.join(", ")}`);
+    check(gate.files.symlinks.length === 0, `gate: symlinks under assets/: ${gate.files.symlinks.join(", ")}`);
     const freshIds = new Set(gate.assets.map((a) => a.id));
     const reportedIds = new Set(out.assets.map((a) => a.id));
     check(out.assets.length >= freshIds.size && [...freshIds].every((id) => reportedIds.has(id)), "reported assets do not cover every manifest asset");

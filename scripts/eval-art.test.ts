@@ -11,7 +11,8 @@ import { evalArtists } from "./eval-artists.ts";
 const PALETTE = ["#010203", "#040506"];
 
 function buildRun(agent: string): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "arteval-"));
+  // each run gets its own runs/ parent so a spend.jsonl written by one test never leaks into another
+  const dir = path.join(mkdtempSync(path.join(tmpdir(), "arteval-runs-")), "run");
   const clone = path.join(dir, "workspace", "game");
   mkdirSync(path.join(clone, "assets", "sprites"), { recursive: true });
   mkdirSync(path.join(clone, "docs"), { recursive: true });
@@ -127,7 +128,7 @@ test("art-director eval fails a missing bible declaration and a palette mismatch
   );
   const r2 = evalDirector(mismatch);
   assert.equal(r2.pass, false);
-  assert.ok(r2.issues.some((i) => i.includes("bible palette")), r2.issues.join("; "));
+  assert.ok(r2.issues.some((i) => /reported manifest/.test(i)), r2.issues.join("; "));
 });
 
 test("artists eval passes a truthful run and fails a copied-verdict lie", () => {
@@ -164,4 +165,92 @@ test("artists eval passes a truthful run and fails a copied-verdict lie", () => 
   assert.equal(fail.pass, false);
   assert.ok(fail.issues.some((i) => i.includes("ghost")), fail.issues.join("; "));
   assert.ok(fail.issues.some((i) => i.includes("spent_usd")), fail.issues.join("; "));
+});
+
+// ---- T3-fix 3 regressions: the evals must check the clone, not the agent's claims ----
+
+function directorOutput(dir: string, overrides: Record<string, unknown> = {}) {
+  const fresh = gateNumbers(dir);
+  return {
+    style_bible: "docs/style-bible.md",
+    manifest: { locked: true, grid: { w: 16, h: 16 }, palette: PALETTE },
+    anchors: [],
+    assets: [{ id: "player", path: "assets/sprites/player.png", verdict: "approve", reason: "r", ...fresh }],
+    regenerations: { calls: 0, spent_usd: 0 },
+    notes: "",
+    ...overrides,
+  };
+}
+
+test("director eval reads the clone's real manifest: palette/grid mismatch with the bible fails even if the report claims a match", () => {
+  const dir = buildRun("art-director");
+  const manifestPath = path.join(dir, "workspace", "game", "assets", "manifest.json");
+  const real = JSON.parse(readFileSync(manifestPath, "utf8"));
+  real.palette = ["#010203", "#0a0b0c"]; // differs from the bible
+  real.grid = { w: 8, h: 8 }; // differs from the bible's 16x16
+  writeFileSync(manifestPath, JSON.stringify(real));
+  writeFileSync(path.join(dir, "output.json"), JSON.stringify(directorOutput(dir))); // still reports the bible's palette/grid
+  const r = evalDirector(dir);
+  assert.equal(r.pass, false);
+  assert.ok(r.issues.some((i) => /real manifest palette/i.test(i)), r.issues.join("; "));
+  assert.ok(r.issues.some((i) => /real manifest grid/i.test(i)), r.issues.join("; "));
+  assert.ok(r.issues.some((i) => /reported manifest/i.test(i)), r.issues.join("; "));
+});
+
+test("director eval includes the gate's overall verdict (unlisted files fail the run)", () => {
+  const dir = buildRun("art-director");
+  writeFileSync(path.join(dir, "workspace", "game", "assets", "sprites", "stray.png"), encodePng(makeImage(16, 16)));
+  writeFileSync(path.join(dir, "output.json"), JSON.stringify(directorOutput(dir)));
+  const r = evalDirector(dir);
+  assert.equal(r.pass, false);
+  assert.ok(r.issues.some((i) => /unlisted/i.test(i)), r.issues.join("; "));
+});
+
+test("artists eval compares spent_usd with the run's recorded spend", () => {
+  const dir = buildRun("sprite-artist");
+  writeFileSync(path.join(dir, "run.json"), JSON.stringify({ run_id: path.basename(dir), agent: "sprite-artist", status: "done", spent_micro_usd: 4_200_000 }));
+  const gate = runGate(path.join(dir, "workspace", "game"));
+  writeFileSync(
+    path.join(dir, "output.json"),
+    JSON.stringify({
+      generated: [{ id: "player", path: "game/assets/sprites/player.png", provider: "retrodiffusion", frames: 1, in_manifest: true }],
+      gate: { ok: gate.ok, failed: gate.assets.filter((a) => !a.pass).map((a) => a.id) },
+      postprocess: { snap: true, lock: true, outline: true },
+      spent_usd: 0.01, // run says $4.20
+      notes: "",
+    }),
+  );
+  const r = evalArtists(dir);
+  assert.equal(r.pass, false);
+  assert.ok(r.issues.some((i) => /spent_usd/.test(i) && /4\.2/.test(i)), r.issues.join("; "));
+});
+
+test("artists eval uses runs/spend.jsonl art_generate charges as the floor for spent_usd", () => {
+  const dir = buildRun("env-ui-artist");
+  const runId = path.basename(dir);
+  writeFileSync(path.join(dir, "run.json"), JSON.stringify({ run_id: runId, agent: "env-ui-artist", status: "done", spent_micro_usd: 500_000 }));
+  writeFileSync(
+    path.join(path.dirname(dir), "spend.jsonl"),
+    [
+      { ts: "t", run_id: runId, agent: "env-ui-artist", kind: "model", what: "z-ai/glm-5.3", micro_usd: 140_000 },
+      { ts: "t", run_id: runId, agent: "env-ui-artist", kind: "tool", what: "art_generate", micro_usd: 180_000 },
+      { ts: "t", run_id: runId, agent: "env-ui-artist", kind: "tool", what: "art_generate", micro_usd: 180_000 },
+      { ts: "t", run_id: "other-run", agent: "x", kind: "tool", what: "art_generate", micro_usd: 9_000_000 },
+    ].map((e) => JSON.stringify(e)).join("\n") + "\n",
+  );
+  const gate = runGate(path.join(dir, "workspace", "game"));
+  const output = (spent: number) =>
+    JSON.stringify({
+      generated: [{ id: "player", path: "game/assets/sprites/player.png", provider: "retrodiffusion", frames: 1, in_manifest: true }],
+      gate: { ok: gate.ok, failed: gate.assets.filter((a) => !a.pass).map((a) => a.id) },
+      postprocess: { snap: true, lock: true, outline: false },
+      spent_usd: spent,
+      notes: "",
+    });
+  writeFileSync(path.join(dir, "output.json"), output(0.36));
+  assert.equal(evalArtists(dir).pass, true, JSON.stringify(evalArtists(dir).issues));
+  writeFileSync(path.join(dir, "output.json"), output(0.18)); // under-reports one of two paid calls
+  const r = evalArtists(dir);
+  assert.equal(r.pass, false);
+  assert.ok(r.issues.some((i) => /art_generate tool spend 0\.36/.test(i)), r.issues.join("; "));
 });
