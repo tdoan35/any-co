@@ -11,6 +11,7 @@
 //   direct navigation   → DirectLoadDetail (play: ?item= lands on the same detail,
 //                         same rail date, as repeated navigation)
 //   resize columns      → ResizePanes (separators: keys move, Enter resets)
+//   collapse columns    → CollapsePanes (strip keeps a count; expand restores)
 //   mid (900px)         → MidThreeColumn (rail stays a column)
 //   narrow + sheet      → NarrowRailSheet (play: sheet open/close, pick inside the
 //                         sheet, stacked detail open)
@@ -186,6 +187,28 @@ export const ResizePanes: Story = {
     inbox.focus();
     await user.keyboard("{Enter}");
     await waitFor(() => expect(inbox).toHaveAttribute("aria-valuenow", "300"));
+  },
+};
+
+/** Collapse buttons fold a side column to a strip that keeps its count; expanding restores it. */
+export const CollapsePanes: Story = {
+  name: "Wide · collapse columns",
+  parameters: wide,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const user = userEvent.setup();
+    const section = canvasElement.querySelector<HTMLElement>('section[aria-label="Inbox"]')!;
+    await user.click(await canvas.findByRole("button", { name: "Collapse inbox" }));
+    await waitFor(() => expect(Math.round(section.getBoundingClientRect().width)).toBe(44));
+    expect(canvas.queryByRole("heading", { name: "Inbox" })).toBeNull();
+    expect(canvas.queryByRole("separator", { name: "Resize inbox" })).toBeNull();
+    await user.click(canvas.getByRole("button", { name: "Collapse day rail" }));
+    await waitFor(() => expect(canvas.getByRole("button", { name: "Expand day rail" })).toHaveAttribute("aria-expanded", "false"));
+    // Expand both so later stories start from the default layout (state is remembered per viewer).
+    await user.click(canvas.getByRole("button", { name: "Expand inbox" }));
+    await user.click(canvas.getByRole("button", { name: "Expand day rail" }));
+    await waitFor(() => expect(canvas.getByRole("heading", { name: "Inbox" })).toBeInTheDocument());
+    expect(canvas.getByRole("separator", { name: "Resize day rail" })).toBeInTheDocument();
   },
 };
 

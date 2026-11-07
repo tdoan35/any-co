@@ -1,7 +1,8 @@
-// Drag handles between Weave's columns. Widths are per viewer (localStorage, best effort) and are
-// clamped so Pulse always keeps a readable middle column. Keyboard: focus a handle, ← / → move it
-// 16px (Shift: 64px); double-click or Enter resets to the default.
+// Drag handles and collapse toggles for Weave's side columns. Widths and collapsed state are per
+// viewer (localStorage, best effort); widths are clamped so Pulse always keeps a readable middle
+// column. Keyboard: focus a handle, ← / → move it 16px (Shift: 64px); double-click or Enter resets.
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export const PANE_LIMITS = {
@@ -11,14 +12,22 @@ export const PANE_LIMITS = {
   center: 320,
 } as const;
 
+/** A collapsed side column keeps a strip this wide: the expand button and a count. */
+export const COLLAPSED_PX = 44;
+
 type Pane = "inbox" | "rail";
-type Widths = Partial<Record<Pane, number>>;
+type Widths = Partial<Record<Pane, number>> & { collapsed?: Partial<Record<Pane, boolean>> };
 const KEY = "anyco.weave.paneWidths";
 
 function load(): Widths {
   try {
     const v = JSON.parse(localStorage.getItem(KEY) ?? "{}") as Widths;
-    return { inbox: typeof v.inbox === "number" ? v.inbox : undefined, rail: typeof v.rail === "number" ? v.rail : undefined };
+    const c = v.collapsed ?? {};
+    return {
+      inbox: typeof v.inbox === "number" ? v.inbox : undefined,
+      rail: typeof v.rail === "number" ? v.rail : undefined,
+      collapsed: { inbox: c.inbox === true, rail: c.rail === true },
+    };
   } catch { return {}; }
 }
 function save(w: Widths) {
@@ -34,13 +43,21 @@ const clamp = (n: number, lo: number, hi: number) => Math.min(Math.max(n, lo), M
 export function usePaneWidths(panel: number, defaults: Record<Pane, number>, hasRail: boolean) {
   const [stored, setStored] = useState<Widths>(load);
   const want = { inbox: stored.inbox ?? defaults.inbox, rail: stored.rail ?? defaults.rail };
-  const rail = hasRail ? clamp(want.rail, PANE_LIMITS.rail.min, Math.min(PANE_LIMITS.rail.max, panel - PANE_LIMITS.center - PANE_LIMITS.inbox.min)) : 0;
-  const inbox = clamp(want.inbox, PANE_LIMITS.inbox.min, Math.min(PANE_LIMITS.inbox.max, panel - PANE_LIMITS.center - rail));
+  const collapsed = { inbox: !!stored.collapsed?.inbox, rail: hasRail && !!stored.collapsed?.rail };
+  const inboxFloor = collapsed.inbox ? COLLAPSED_PX : PANE_LIMITS.inbox.min;
+  const rail = !hasRail ? 0 : collapsed.rail ? COLLAPSED_PX
+    : clamp(want.rail, PANE_LIMITS.rail.min, Math.min(PANE_LIMITS.rail.max, panel - PANE_LIMITS.center - inboxFloor));
+  const inbox = collapsed.inbox ? COLLAPSED_PX
+    : clamp(want.inbox, PANE_LIMITS.inbox.min, Math.min(PANE_LIMITS.inbox.max, panel - PANE_LIMITS.center - rail));
 
-  const set = useCallback((pane: Pane, px: number | undefined) => {
-    setStored((s) => { const next = { ...s, [pane]: px === undefined ? undefined : Math.round(px) }; save(next); return next; });
+  const update = useCallback((patch: (s: Widths) => Widths) => {
+    setStored((s) => { const next = patch(s); save(next); return next; });
   }, []);
-  return { inbox, rail, set };
+  const set = useCallback((pane: Pane, px: number | undefined) =>
+    update((s) => ({ ...s, [pane]: px === undefined ? undefined : Math.round(px) })), [update]);
+  const toggle = useCallback((pane: Pane) =>
+    update((s) => ({ ...s, collapsed: { ...s.collapsed, [pane]: !s.collapsed?.[pane] } })), [update]);
+  return { inbox, rail, collapsed, set, toggle };
 }
 
 /**
@@ -125,5 +142,47 @@ export function PaneHandle({ label, x, width, edge, min, max, onResize, onReset,
         active ? "w-0.5 bg-run" : "bg-transparent group-hover/handle:bg-foreground/25 group-focus-visible/handle:w-0.5 group-focus-visible/handle:bg-ring",
       )} />
     </div>
+  );
+}
+
+/** What a collapsed side column leaves behind: the expand button, a count, and the column's name
+ *  set vertically. The whole strip expands on click; only the button is in the tab order. */
+export function CollapsedStrip({ side, label, name, count, countTone, countLabel, onExpand }: {
+  side: "left" | "right";
+  /** Shown vertically in the strip. */
+  label: string;
+  /** For the button: "Expand <name>", matching the header's "Collapse <name>". */
+  name: string;
+  count: number; countTone: string; countLabel: string; onExpand: () => void;
+}) {
+  return (
+    <div className="flex h-full min-h-0 flex-col items-center">
+      <div className="flex h-11 w-full shrink-0 items-center justify-center border-b border-foreground/10">
+        <PaneToggle side={side} collapsed label={name} onToggle={onExpand} />
+      </div>
+      <button type="button" tabIndex={-1} aria-hidden onClick={onExpand}
+        className="flex w-full flex-1 flex-col items-center gap-2.5 pt-3 transition-colors hover:bg-foreground/[0.03]">
+        {count > 0 && <span className={cn("min-w-5 rounded-full px-1.5 py-px text-center text-[11px] font-medium tabular-nums", countTone)} title={countLabel}>{count}</span>}
+        <span className="text-xs font-medium text-muted-foreground [writing-mode:vertical-rl]">{label}</span>
+      </button>
+      {count > 0 && <span className="sr-only">{countLabel}</span>}
+    </div>
+  );
+}
+
+/** Collapse / expand button for a side column. `side` is where the column sits. */
+export function PaneToggle({ side, collapsed, label, onToggle, className }: {
+  side: "left" | "right"; collapsed: boolean; label: string; onToggle: () => void; className?: string;
+}) {
+  const Icon = side === "left" ? (collapsed ? PanelLeftOpen : PanelLeftClose) : (collapsed ? PanelRightOpen : PanelRightClose);
+  const text = `${collapsed ? "Expand" : "Collapse"} ${label}`;
+  return (
+    <button type="button" onClick={onToggle} aria-label={text} aria-expanded={!collapsed} title={text}
+      className={cn(
+        "flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-foreground/5 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        className,
+      )}>
+      <Icon className="size-4" />
+    </button>
   );
 }

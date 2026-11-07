@@ -13,6 +13,7 @@ import { approvalTitle } from "@/lib/approval-gate";
 import { cn } from "@/lib/utils";
 import { age, fmtTime, waited } from "./format";
 import { ColumnHeader, ColumnLabel, Face, NameRole, agentOf } from "./parts";
+import { PaneToggle } from "./pane-resize";
 import { quietScroll, useEdgeFade } from "./use-edge-fade";
 
 const TIME_SNOOZE = [
@@ -195,12 +196,17 @@ interface RowContext {
   setSnoozeFor: (id: string | null) => void;
 }
 
-export function Inbox({ state, showDone, onToggleDone, ...ctx }: RowContext & { state: WeaveState; showDone: boolean; onToggleDone: () => void }) {
+export function Inbox({ state, showDone, onToggleDone, onCollapse, ...ctx }: RowContext & {
+  state: WeaveState; showDone: boolean; onToggleDone: () => void;
+  /** Shows the collapse button (side-by-side layouts only). */
+  onCollapse?: () => void;
+}) {
   const g = inboxGroups(state);
   const [listRef, listFade] = useEdgeFade<HTMLDivElement>();
   return (
     <div className="relative flex min-h-0 flex-col">
-      <ColumnHeader>
+      <ColumnHeader className={onCollapse ? "pl-2" : undefined}>
+        {onCollapse && <PaneToggle side="left" collapsed={false} label="inbox" onToggle={onCollapse} className="-mr-1" />}
         <h2 className="text-sm font-semibold">Inbox</h2>
         <span className="text-xs tabular-nums text-muted-foreground">{g.needs.length + g.forYou.length} open</span>
         <button type="button" onClick={onToggleDone} aria-pressed={showDone}

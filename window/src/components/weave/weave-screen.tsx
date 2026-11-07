@@ -6,7 +6,7 @@ import { PageHeader } from "@/components/shell/app-shell";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Segmented, headerButton, headerTitle } from "@/components/studio/studio-ui";
-import { isAsk, itemById, navigableIds, useWeave, weave } from "@/lib/weave-store";
+import { inboxGroups, isAsk, itemById, navigableIds, useWeave, weave } from "@/lib/weave-store";
 import { httpMode } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { DayRail } from "./day-rail";
@@ -14,7 +14,7 @@ import { fullDayLabel, greeting, shortDayLabel, TODAY } from "./format";
 import { Inbox } from "./inbox";
 import { ItemDetail } from "./item-detail";
 import { ColumnHeader } from "./parts";
-import { PANE_LIMITS, PaneHandle, usePaneWidths } from "./pane-resize";
+import { CollapsedStrip, PANE_LIMITS, PaneHandle, PaneToggle, usePaneWidths } from "./pane-resize";
 import { Pulse, type PulseFilter } from "./pulse";
 import { quietScroll, useEdgeFade } from "./use-edge-fade";
 
@@ -142,6 +142,10 @@ export function WeaveScreen() {
   const selected = itemById(selectedId);
   const rail = <DayRail state={state} day={day} onPickDay={pickDay} onSelectItem={open} />;
   const todayTitle = <><h2 className="text-sm font-semibold">Today</h2><span className="text-xs text-muted-foreground">{shortDayLabel(TODAY)}</span></>;
+  const inboxCollapsed = cols > 1 && panes.collapsed.inbox;
+  const railCollapsed = cols === 3 && panes.collapsed.rail;
+  const needsYou = inboxGroups(state).needs.length;
+  const working = state.presence.filter((p) => p.state === "working").length;
 
   return (
     <div className="flex h-full flex-col">
@@ -164,14 +168,14 @@ export function WeaveScreen() {
           panelWidth === 0 && "grid-cols-[300px_minmax(0,1fr)_288px]",
           quietScroll,
         )}>
-          {template && (
+          {template && !inboxCollapsed && (
             <PaneHandle
               label="Resize inbox" edge="left" x={panes.inbox} width={panes.inbox}
               min={PANE_LIMITS.inbox.min} max={Math.min(PANE_LIMITS.inbox.max, panelWidth - PANE_LIMITS.center - panes.rail)}
               onResize={(px) => panes.set("inbox", px)} onReset={() => panes.set("inbox", undefined)} onDragChange={setResizing}
             />
           )}
-          {template && cols === 3 && (
+          {template && cols === 3 && !railCollapsed && (
             <PaneHandle
               label="Resize day rail" edge="right" x={panelWidth - panes.rail} width={panes.rail}
               min={PANE_LIMITS.rail.min} max={Math.min(PANE_LIMITS.rail.max, panelWidth - PANE_LIMITS.center - panes.inbox)}
@@ -182,11 +186,15 @@ export function WeaveScreen() {
             "flex min-h-0 flex-col border-foreground/10 bg-background/40",
             cols === 1 ? "max-h-[60vh] border-b" : "border-r",
           )}>
-            <Inbox
-              state={state} selectedId={selectedId} focusId={selectedId ?? focusId} onOpen={open}
-              snoozeFor={snoozeFor} setSnoozeFor={setSnoozeFor}
-              showDone={showDone} onToggleDone={() => setShowDone((v) => !v)}
-            />
+            {inboxCollapsed
+              ? <CollapsedStrip side="left" label="Inbox" name="inbox" count={needsYou} countTone="bg-warn-soft text-warn"
+                  countLabel={`${needsYou} waiting on you`} onExpand={() => panes.toggle("inbox")} />
+              : <Inbox
+                  state={state} selectedId={selectedId} focusId={selectedId ?? focusId} onOpen={open}
+                  snoozeFor={snoozeFor} setSnoozeFor={setSnoozeFor}
+                  showDone={showDone} onToggleDone={() => setShowDone((v) => !v)}
+                  onCollapse={cols > 1 ? () => panes.toggle("inbox") : undefined}
+                />}
           </section>
           <section aria-label={selected ? selected.title : "Pulse"} className="flex min-h-0 scroll-mt-4 flex-col">
             <ColumnHeader className="px-5">
@@ -215,8 +223,15 @@ export function WeaveScreen() {
             </div>
           </section>
           <aside aria-label="Today" className={cn("min-h-0 flex-col border-l border-foreground/10 bg-background/40", cols === 3 ? "flex" : "hidden")}>
-            <ColumnHeader>{todayTitle}</ColumnHeader>
-            <div ref={railRef} style={railFade} className={cn("min-h-0 flex-1 overflow-y-auto", quietScroll)}>{rail}</div>
+            {railCollapsed
+              ? <CollapsedStrip side="right" label="Today" name="day rail" count={working} countTone="bg-run-soft text-run"
+                  countLabel={`${working} working`} onExpand={() => panes.toggle("rail")} />
+              : <ColumnHeader className="pr-2">
+                  {todayTitle}
+                  <PaneToggle side="right" collapsed={false} label="day rail" onToggle={() => panes.toggle("rail")} className="ml-auto" />
+                </ColumnHeader>}
+            {/* Stays mounted while collapsed: the edge-fade observers attach once, on mount. */}
+            <div ref={railRef} style={railFade} className={cn("min-h-0 flex-1 overflow-y-auto", railCollapsed && "hidden", quietScroll)}>{rail}</div>
           </aside>
         </div>
       </div>
