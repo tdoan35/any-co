@@ -6,7 +6,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadAgent } from "./load.ts";
 import { FakeProvider } from "./providers.ts";
-import { Dispatcher } from "./dispatch.ts";
+import { Dispatcher, acquireStudioLock } from "./dispatch.ts";
+import { hostname } from "node:os";
+import type { Board } from "./board/index.ts";
 import { LocalBoard } from "./board/local.ts";
 import type { ModelReply, Provider, ToolUseBlock } from "./types.ts";
 import { TOOL_INDEX } from "./tools/impl.ts";
@@ -200,4 +202,121 @@ test("board tools: unknown assignee and unknown blockers are refused; a valid cr
   assert.equal(made.created, true);
   assert.equal(made.assignee, "beta-agent");
   assert.equal(made.status, "blocked"); // waits on Real
+});
+
+test("R1: a card blocked after a failed run stays blocked — later passes do not re-run it", async () => {
+  const runsDir = tmpDir();
+  const board = new LocalBoard(path.join(runsDir, "board.jsonl"));
+  const specs = new Map([
+    ["alpha-agent", await loadAgent("alpha-agent", FIX)],
+    ["beta-agent", await loadAgent("beta-agent", FIX)],
+  ]);
+  let betaRuns = 0;
+  const provider = (specName: string) => {
+    // alpha succeeds; beta's scripted provider has no replies, so its run errors out
+    if (specName === "beta-agent") betaRuns++;
+    return specName === "alpha-agent" ? scripted() : new FakeProvider([]);
+  };
+  const d = new Dispatcher({ board, specs, provider: (s) => provider(s.name), runsDir });
+  const a = await board.create({ title: "Upstream", assignee: "alpha-agent" });
+  const b = await board.create({ title: "Downstream fails", assignee: "beta-agent", blocked_by: [a.card.id] });
+  await d.pass();
+  await d.wait(); // A done
+  await d.pass();
+  await d.wait(); // B ran and failed -> blocked
+  assert.equal((await board.get(b.card.id)).status, "blocked");
+  const again = await d.pass(); // the failure must stick: no heal-reopen, no second run
+  assert.equal(again.started, 0);
+  assert.ok(again.skipped.length === 0);
+  assert.equal(betaRuns, 1); // beta ran exactly once
+  assert.equal((await board.get(b.card.id)).status, "blocked");
+});
+
+test("R2: the studio lock refuses a second holder while the first is alive", async () => {
+  const runsDir = tmpDir();
+  const first = acquireStudioLock(runsDir);
+  assert.throws(() => acquireStudioLock(runsDir), /another studio loop/);
+  first.release();
+  const second = acquireStudioLock(runsDir); // released -> takeable again
+  second.release();
+  // a stale lock (dead pid) is taken over
+  writeFileSync(path.join(runsDir, "studio.lock"), JSON.stringify({ pid: 99999999, host: hostname(), at: "2026-11-07T00:00:00Z" }));
+  const third = acquireStudioLock(runsDir);
+  third.release();
+});
+
+test("R2: requeue skips a doing card whose claiming process is still alive, and one a finished run could not close", async () => {
+  const runsDir = tmpDir();
+  const board = new LocalBoard(path.join(runsDir, "board.jsonl"));
+  const specs = new Map([["alpha-agent", await loadAgent("alpha-agent", FIX)]]);
+  const live = await board.create({ title: "Held live", assignee: "alpha-agent" });
+  await board.update(live.card.id, { status: "doing", claim: { pid: process.pid, host: hostname(), run_id: "r-live" } });
+  const dead = await board.create({ title: "Dead holder", assignee: "beta-agent" });
+  await board.update(dead.card.id, { status: "doing", claim: { pid: 99999999, host: hostname(), run_id: "r-dead" } });
+  const unclosed = await board.create({ title: "Close failed" });
+  await board.update(unclosed.card.id, { status: "doing", claim: { pid: 99999999, host: hostname(), run_id: "r-x" } });
+  await board.comment(unclosed.card.id, "dispatcher: close failed after run r-x (status done): board down — run finished; not requeuing", "dispatcher");
+  const d = new Dispatcher({ board, specs, provider: () => scripted(), runsDir });
+  const requeued = await d.requeueOrphans();
+  assert.equal(requeued, 1); // only the dead-holder card
+  assert.equal((await board.get(live.card.id)).status, "doing");
+  assert.equal((await board.get(unclosed.card.id)).status, "doing");
+  assert.equal((await board.get(dead.card.id)).status, "todo");
+});
+
+test("R3: a failed close is retried, then marked so requeue never re-runs the finished run", async () => {
+  const runsDir = tmpDir();
+  const real = new LocalBoard(path.join(runsDir, "board.jsonl"));
+  let closes = 0;
+  const flaky: Board = {
+    create: (c) => real.create(c),
+    get: (id) => real.get(id),
+    list: () => real.list(),
+    update: (id, patch) => {
+      if (patch.status === "done") { closes++; throw new Error("board is down"); }
+      return real.update(id, patch);
+    },
+    comment: (id, body, author) => real.comment(id, body, author),
+    comments: (id) => real.comments(id),
+  };
+  const specs = new Map([["alpha-agent", await loadAgent("alpha-agent", FIX)]]);
+  const logs: string[] = [];
+  const d = new Dispatcher({ board: flaky, specs, provider: () => scripted(), runsDir, log: (l) => logs.push(l) });
+  const { card } = await flaky.create({ title: "Runs fine, closes badly", assignee: "alpha-agent" });
+  await d.pass();
+  await d.wait();
+  assert.ok(closes >= 3); // retried, not swallowed
+  assert.ok(logs.some((l) => /could not close/.test(l)));
+  const comments = await real.comments(card.id);
+  assert.ok(comments.some((c) => c.body.startsWith("dispatcher: close failed after run")));
+  // and the marker holds: a restart does not requeue the card into a second run
+  const d2 = new Dispatcher({ board: real, specs, provider: () => scripted(), runsDir });
+  assert.equal(await d2.requeueOrphans(), 0);
+  assert.equal((await real.get(card.id)).status, "doing");
+});
+
+test("R5: the dispatcher claims with a comment, not a note", async () => {
+  const runsDir = tmpDir();
+  const board = new LocalBoard(path.join(runsDir, "board.jsonl"));
+  const specs = new Map([["alpha-agent", await loadAgent("alpha-agent", FIX)]]);
+  const gate = Promise.withResolvers<void>();
+  const parked: Provider = {
+    label: "parked",
+    async complete(): Promise<ModelReply> {
+      await gate.promise;
+      return { content: [{ type: "tool_use", id: "p1", name: "submit_result", input: { answer: "ok" } }], stop_reason: "tool_use", usage: { input_tokens: 1, output_tokens: 1 }, cost_micro_usd: 0, request_id: "p1", model: "parked" };
+    },
+  };
+  const d = new Dispatcher({ board, specs, provider: () => parked, runsDir });
+  const { card } = await board.create({ title: "Claimed cleanly", assignee: "alpha-agent" });
+  await d.pass();
+  assert.equal(d.busy, 1); // run in flight: claimed, nothing written back yet
+  const seen = await board.get(card.id);
+  assert.equal(seen.status, "doing");
+  assert.equal(seen.note, null); // the claim is not a note — done will still need a real one
+  assert.ok((await board.comments(card.id)).some((c) => /^dispatcher: claimed for local run /.test(c.body)));
+  gate.resolve();
+  await d.wait();
+  assert.equal((await board.get(card.id)).status, "done");
+  assert.match((await board.get(card.id)).note!, /^done: run /);
 });

@@ -19,6 +19,10 @@ export interface BoardCard {
   blocked_by: string[]; // card ids it waits on (done ones stripped in the healed view)
   created_at: string;
   updated_at: string;
+  /** Who holds the doing card — LOCAL BACKEND ONLY (Naïve tracks the wake server-side as
+   *  woken_session_id): the first claim in file order, so a restart can tell a live holder
+   *  from a dead one instead of requeueing work that is still running. */
+  claim?: { nonce: string; pid: number; host: string; run_id?: string; at: string } | null;
 }
 
 export interface BoardComment {
@@ -41,12 +45,15 @@ export interface BoardCreate {
 }
 
 /** A move is {status} plus what the holder wrote back. No assignee here: on Naïve, writing
- *  `assignee` resets the card's wake (see naive.ts), and the dispatcher never reassigns. */
+/** A move is {status} plus what the holder wrote back. `claim` rides a move to doing so the
+ *  local backend can record who claimed (the naive backend ignores it — assignment is the
+ *  wake there, and this dispatcher never assigns on the wire). */
 export interface BoardUpdate {
   status?: BoardStatus;
   note?: string;
   body?: string;
   title?: string;
+  claim?: { pid: number; host: string; run_id?: string };
 }
 
 export interface Board {
@@ -59,11 +66,10 @@ export interface Board {
   comment(cardId: string, body: string, author: string): Promise<BoardComment>;
   comments(cardId: string): Promise<BoardComment[]>;
 }
-
 /** Refusals, named like the hosted board tools' refusals so a caller reads the word and acts. */
 export class BoardError extends Error {
   constructor(
-    readonly code: "unknown_card" | "unknown_blocker" | "missing_note" | "already_resolved" | "already_working",
+    readonly code: "unknown_card" | "unknown_blocker" | "missing_note" | "already_resolved" | "already_working" | "already_claimed",
     message: string,
   ) {
     super(message);

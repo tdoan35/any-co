@@ -2,7 +2,10 @@
 // twin of Naïve's board clock. Same rules the hosted clock applies, so the board reads the same
 // on both backends: one doing card per assignee, blocked cards wait, done needs a note.
 // scripts/studio-loop.ts is the CLI (`npm run studio`); the logic lives here so tests drive it.
-import { RUNS_DIR, runAgent, denyAll, type Approver, type RunResult } from "./run.ts";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
+import path from "node:path";
+import { RUNS_DIR, stamp, runAgent, denyAll, type Approver, type RunResult } from "./run.ts";
 import { killSwitchOn } from "./spend.ts";
 import type { AgentSpec } from "./spec.ts";
 import type { Provider } from "./types.ts";
@@ -35,6 +38,45 @@ export interface PassResult {
   killed: boolean;
 }
 
+/** True when `pid` is a live process on this host (EPERM = alive but not ours). */
+export function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+export interface StudioLock {
+  file: string;
+  release: () => void;
+}
+
+/** Single-dispatcher lock (R2): runs/studio.lock records pid+host; a second loop refuses to
+ *  start while the holder is alive, so two dispatchers can never run the same card. A lock
+ *  whose holder is dead is taken over; an unreadable one is stale. */
+export function acquireStudioLock(runsDir: string): StudioLock {
+  mkdirSync(runsDir, { recursive: true });
+  const file = path.join(runsDir, "studio.lock");
+  if (existsSync(file)) {
+    let refusal: string | null = null;
+    try {
+      const held = JSON.parse(readFileSync(file, "utf8")) as { pid?: unknown; host?: unknown; at?: unknown };
+      const pid = typeof held.pid === "number" ? held.pid : NaN;
+      const host = typeof held.host === "string" ? held.host : "";
+      if (host && host !== hostname()) refusal = `pid ${pid} on ${host}`;
+      else if (Number.isFinite(pid) && pidAlive(pid)) refusal = `pid ${pid} on this host`;
+    } catch {
+      /* unreadable lock: stale */ 
+    }
+    if (refusal) {
+      throw new Error(`another studio loop holds ${file} (${refusal}); refusing to start. If it is dead, remove the file.`);
+    }
+  }
+  writeFileSync(file, JSON.stringify({ pid: process.pid, host: hostname(), at: new Date().toISOString() }));
+  return { file, release: () => { try { rmSync(file); } catch { /* already gone */ } } };
+}
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 /** The task handed to an agent: the card, plus what its finished blockers produced. */
 export function cardTask(card: BoardCard, blockers: BoardCard[]): string {
@@ -67,13 +109,24 @@ export class Dispatcher {
     await Promise.allSettled([...this.inflight.values()]);
   }
 
-  /** Restart safety: a `doing` card with no live run (found at startup, before any dispatch)
-   *  goes back to todo — unless the T5 resume hook (onResumeOrphan) claims it. */
+  /** Restart safety: a `doing` card goes back to todo only when nobody holds it — a live
+   *  claiming process (claim.pid on this host) still runs it, and a card a finished run could
+   *  not close carries a `dispatcher: close failed` comment that says do-not-requeue (R2/R3).
+   *  The T5 resume hook (onResumeOrphan) can still claim any orphan first. */
   async requeueOrphans(): Promise<number> {
     let requeued = 0;
     for (const card of await this.opts.board.list()) {
       if (card.status !== "doing") continue;
       if (this.opts.onResumeOrphan && (await this.opts.onResumeOrphan(card))) continue;
+      if (card.claim && card.claim.host === hostname() && pidAlive(card.claim.pid)) {
+        this.opts.log?.(`card ${card.id}: held by live pid ${card.claim.pid} (run ${card.claim.run_id ?? "?"}); leaving it`);
+        continue;
+      }
+      const comments = await this.opts.board.comments(card.id);
+      if (comments.some((c) => c.body.startsWith("dispatcher: close failed after run"))) {
+        this.opts.log?.(`card ${card.id}: a finished run could not close it; close it manually`);
+        continue;
+      }
       await this.opts.board.update(card.id, { status: "todo" });
       await this.opts.board.comment(card.id, "dispatcher: requeued to todo — restarted with no live run for this card", "dispatcher");
       this.opts.log?.(`requeued orphaned doing card ${card.id} (${card.assignee ?? "unassigned"})`);
@@ -115,25 +168,52 @@ export class Dispatcher {
     return { started, skipped, killed: false };
   }
 
-  /** Claim a card and run its assignee; closes the card when the run settles. */
+  /** Claim a card (conditional, nonce-checked in the local backend) and run its assignee;
+   *  closes the card when the run settles. The claim is a comment, never a note (R5). */
   private async start(card: BoardCard): Promise<void> {
     const spec = this.opts.specs.get(card.assignee!)!;
     const board = this.opts.board;
-    await board.update(card.id, { status: "doing", note: `dispatcher: claimed for a local run (${spec.name})` });
+    const runId = `${stamp()}-${spec.name}`;
+    await board.update(card.id, { status: "doing", claim: { pid: process.pid, host: hostname(), run_id: runId } });
+    await board.comment(card.id, `dispatcher: claimed for local run ${runId}`, "dispatcher");
     const blockers = await Promise.all(card.blocked_by.map((id) => board.get(id)));
     const task = cardTask(card, blockers);
     this.opts.log?.(`▶ ${spec.name} on card ${card.id}: ${card.title}`);
-    const done = this.run(spec, card, task);
+    const done = this.run(spec, card, task, runId);
     this.inflight.set(spec.name, done);
     done.finally(() => this.inflight.delete(spec.name)).catch(() => {});
   }
 
-  private async run(spec: AgentSpec, card: BoardCard, task: string): Promise<void> {
+  private async run(spec: AgentSpec, card: BoardCard, task: string, runId: string): Promise<void> {
     const board = this.opts.board;
     const runsDir = this.opts.runsDir ?? RUNS_DIR;
+    /** A finished run MUST close its card; a transient board error is retried, and a close
+     *  that still fails leaves a marker comment so a restart never re-runs the run (R3). */
+    const close = async (status: "done" | "blocked" | "todo", note?: string): Promise<boolean> => {
+      for (let attempt = 1; ; attempt++) {
+        try {
+          await board.update(card.id, note !== undefined ? { status, note } : { status });
+          return true;
+        } catch (e) {
+          if (attempt >= 3) {
+            this.opts.log?.(`✗✗ could not close card ${card.id} after run ${runId} (${errText(e)}); marking it do-not-requeue`);
+            try {
+              await board.comment(card.id, `dispatcher: close failed after run ${runId} (status ${status}): ${errText(e)} — run finished; not requeuing`, "dispatcher");
+            } catch {
+              this.opts.log?.(`✗✗✗ could not even comment on card ${card.id}; it will need manual attention`);
+            }
+            return false;
+          }
+          const { promise: tick, resolve: wake } = Promise.withResolvers<void>();
+          setTimeout(wake, 200 * attempt);
+          await tick;
+        }
+      }
+    };
     let r: RunResult;
     try {
       r = await runAgent(spec, {
+        runId,
         task,
         provider: this.opts.provider(spec),
         naive: this.opts.naive ?? null,
@@ -143,47 +223,51 @@ export class Dispatcher {
         log: (l) => this.opts.log?.(`  ${l}`),
       });
     } catch (e) {
-      await board.update(card.id, { status: "blocked", note: `dispatcher error: ${errText(e)}` });
+      await close("blocked", `dispatcher error: ${errText(e)}`);
       this.opts.log?.(`✗ card ${card.id} blocked: ${errText(e)}`);
       return;
     }
     const money = `$${(r.spent_micro_usd / 1e6).toFixed(4)}`;
     if (r.status === "done") {
-      await board.update(card.id, { status: "done", note: `done: run ${r.run_id}, ${money} — ${summary(r)}` });
+      await close("done", `done: run ${r.run_id}, ${money} — ${summary(r)}`);
       this.opts.log?.(`✓ card ${card.id} done: run ${r.run_id}, ${money}`);
     } else if (r.status === "killed") {
       // The kill switch stops spend, not the work: requeue so the loop picks the card up
       // again once runs/KILL is gone. (Any other failure blocks the card with the error.)
-      await board.update(card.id, { status: "todo" });
-      await board.comment(card.id, `dispatcher: requeued — run ${r.run_id} was killed by the kill switch`, "dispatcher");
-      this.opts.log?.(`■ card ${card.id} requeued: run ${r.run_id} killed`);
+      if (await close("todo")) {
+        await board.comment(card.id, `dispatcher: requeued — run ${r.run_id} was killed by the kill switch`, "dispatcher").catch(() => {});
+        this.opts.log?.(`■ card ${card.id} requeued: run ${r.run_id} killed`);
+      }
     } else {
-      await board.update(card.id, { status: "blocked", note: `${r.status}: run ${r.run_id}, ${money} — ${r.error ?? "(no error text)"}` });
+      await close("blocked", `${r.status}: run ${r.run_id}, ${money} — ${r.error ?? "(no error text)"}`);
       this.opts.log?.(`✗ card ${card.id} blocked: run ${r.run_id} ended ${r.status}`);
     }
   }
 }
 
-/** The studio loop: requeue orphans, then pass/sleep until killed or (with once) after one pass. */
 export async function studioLoop(
   opts: DispatchOptions & { pollS?: number; once?: boolean },
 ): Promise<void> {
   const d = new Dispatcher(opts);
   const log = opts.log ?? (() => {});
-  const requeued = await d.requeueOrphans();
-  if (requeued) log(`startup: requeued ${requeued} orphaned card(s)`);
-  for (;;) {
-    const res = await d.pass();
-    if (res.killed) {
-      log("kill switch on: not dispatching; waiting for in-flight runs, then exiting");
-      break;
+  const lock = acquireStudioLock(opts.runsDir ?? RUNS_DIR); // one dispatcher per runs dir (R2)
+  try {
+    const requeued = await d.requeueOrphans();
+    if (requeued) log(`startup: requeued ${requeued} orphaned card(s)`);
+    for (;;) {
+      const res = await d.pass();
+      if (res.killed) {
+        log("kill switch on: not dispatching; waiting for in-flight runs, then exiting");
+        break;
+      }
+      if (opts.once) break;
+      const { promise: tick, resolve: wake } = Promise.withResolvers<void>();
+      setTimeout(wake, Math.max(1, opts.pollS ?? 10) * 1000);
+      await tick;
     }
-    if (opts.once) break;
-    const { promise: tick, resolve: wake } = Promise.withResolvers<void>();
-    setTimeout(wake, Math.max(1, opts.pollS ?? 10) * 1000);
-    await tick;
-
+    await d.wait(); // both --once and a kill let started runs finish and close their cards
+    log("dispatcher exit");
+  } finally {
+    lock.release();
   }
-  await d.wait(); // both --once and a kill let started runs finish and close their cards
-  log("dispatcher exit");
 }

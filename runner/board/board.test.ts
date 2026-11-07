@@ -74,10 +74,11 @@ test("state is the fold: a fresh instance over the same file sees every card and
   const file = tmpFile();
   const b = new LocalBoard(file);
   const { card } = await b.create({ title: "Persistent" });
-  await b.update(card.id, { status: "doing", note: "claimed" });
+  await b.update(card.id, { status: "doing" });
+  await b.update(card.id, { note: "claimed" });
   await b.comment(card.id, "halfway there", "dispatcher");
   const raw = readFileSync(file, "utf8").trim().split("\n");
-  assert.equal(raw.length, 3); // created + updated + commented — append-only
+  assert.equal(raw.length, 4); // created + claim + note + comment — append-only
   const b2 = new LocalBoard(file);
   const read = await b2.get(card.id);
   assert.equal(read.status, "doing");
@@ -90,4 +91,30 @@ test("unknown card ids refuse with unknown_card", async () => {
   await rejects(b.get("crd_missing"), "unknown_card");
   await rejects(b.update("crd_missing", { status: "todo" }), "unknown_card");
   await rejects(b.comment("crd_missing", "hi", "x"), "unknown_card");
+});
+
+test("R2: claiming a doing card again is refused — first claim in file order wins", async () => {
+  const file = tmpFile();
+  const one = await new LocalBoard(file).create({ title: "Contested", assignee: "alpha-agent" });
+  const b1 = new LocalBoard(file);
+  const b2 = new LocalBoard(file); // a second dispatcher over the same board
+  const won = await b1.update(one.card.id, { status: "doing", claim: { pid: 111, host: "h1" } });
+  assert.equal(won.status, "doing");
+  assert.equal(won.claim?.pid, 111);
+  await rejects(b2.update(one.card.id, { status: "doing", claim: { pid: 222, host: "h2" } }), "already_claimed");
+  await rejects(b1.update(one.card.id, { status: "doing", claim: { pid: 333, host: "h3" } }), "already_claimed"); // not todo anymore
+  // the winner is recorded on the card, and cleared when the card moves on
+  const seen = await new LocalBoard(file).get(one.card.id);
+  assert.equal(seen.claim?.pid, 111);
+  await b1.update(one.card.id, { status: "done", note: "done by the winner" });
+  assert.equal((await new LocalBoard(file).get(one.card.id)).claim, null);
+});
+
+test("R5: a claim is not a note — done still needs one", async () => {
+  const b = new LocalBoard(tmpFile());
+  const { card } = await b.create({ title: "Claimed", assignee: "alpha-agent" });
+  await b.update(card.id, { status: "doing", claim: { pid: 1, host: "h" } });
+  await b.comment(card.id, "dispatcher: claimed for local run", "dispatcher"); // the claim rides as a comment, never the note
+  assert.equal((await b.get(card.id)).note, null);
+  await rejects(b.update(card.id, { status: "done" }), "missing_note");
 });

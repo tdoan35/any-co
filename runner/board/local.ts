@@ -13,9 +13,10 @@ import { BoardError, type Board, type BoardCard, type BoardComment, type BoardCr
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const DEFAULT_BOARD_FILE = process.env.STUDIO_BOARD_FILE ?? path.join(ROOT, "runs", "board.jsonl");
 
+type Claim = NonNullable<BoardCard["claim"]>;
 type Event =
   | { t: "created"; at: string; card: BoardCard; key?: string }
-  | { t: "updated"; at: string; id: string; status?: BoardStatus; note?: string; body?: string; title?: string }
+  | { t: "updated"; at: string; id: string; status?: BoardStatus; note?: string; body?: string; title?: string; blocked_by?: string[]; claim?: Claim }
   | { t: "commented"; at: string; comment: BoardComment };
 
 interface State {
@@ -62,6 +63,11 @@ export class LocalBoard implements Board {
         if (e.note !== undefined) c.note = e.note;
         if (e.body !== undefined) c.body = e.body;
         if (e.title !== undefined) c.title = e.title;
+        if (e.blocked_by !== undefined) c.blocked_by = e.blocked_by;
+        // claims are first-wins in file order (the re-fold/nonce pattern from tools/approvals):
+        // two writers may both append; only the one whose nonce stuck holds the card.
+        if (e.claim && !c.claim) c.claim = e.claim;
+        if (e.status !== undefined && e.status !== "doing") c.claim = null;
         c.updated_at = e.at;
       } else if (e.t === "commented") {
         const list = s.comments.get(e.comment.card_id) ?? [];
@@ -123,17 +129,40 @@ export class LocalBoard implements Board {
     if (patch.status === "done" && !(patch.note ?? raw.note)) {
       throw new BoardError("missing_note", "a done needs a note: pass one saying what was done and what is left");
     }
-    if (patch.status === "doing" && raw.assignee) {
-      const holder = [...s.cards.values()].find((c) => c.id !== cardId && c.status === "doing" && c.assignee === raw.assignee);
-      if (holder) throw new BoardError("already_working", `${raw.assignee} is already doing card ${holder.id}`);
+    if (patch.status === "doing") {
+      // a claim takes only a todo card, and only if our claim is the first in file order (R2)
+      if (view.status !== "todo") throw new BoardError("already_claimed", `card ${cardId} is ${view.status}, not todo; only a todo card can be claimed`);
+      if (raw.assignee) {
+        const holder = [...s.cards.values()].find((c) => c.id !== cardId && c.status === "doing" && c.assignee === raw.assignee);
+        if (holder) throw new BoardError("already_working", `${raw.assignee} is already doing card ${holder.id}`);
+      }
+      const claim: Claim = {
+        nonce: randomUUID(),
+        pid: patch.claim?.pid ?? process.pid,
+        host: patch.claim?.host ?? "unknown",
+        run_id: patch.claim?.run_id,
+        at: new Date().toISOString(),
+      };
+      this.append({ t: "updated", at: claim.at, id: cardId, status: "doing", note: raw.note ?? undefined, body: raw.body, title: raw.title, blocked_by: raw.blocked_by, claim });
+      const reread = this.load().cards.get(cardId); // re-fold: did our nonce stick?
+      if (reread?.claim?.nonce !== claim.nonce) throw new BoardError("already_claimed", `another claim on card ${cardId} landed first`);
+      return { ...reread };
     }
     if (patch.body !== undefined) raw.body = patch.body;
     if (patch.title !== undefined) raw.title = patch.title;
     if (patch.note !== undefined) raw.note = patch.note;
-    if (patch.status !== undefined && patch.status !== view.status) raw.status = patch.status;
+    if (patch.status !== undefined && patch.status !== view.status) {
+      raw.status = patch.status;
+      raw.claim = null;
+      // a block keeps only OPEN blockers (R1): the done ones never explain a failure, and
+      // leaving them in lets heal-on-read reopen a card the dispatcher just blocked.
+      if (patch.status === "blocked" || patch.status === "todo") {
+        raw.blocked_by = raw.blocked_by.filter((id) => s.cards.get(id)?.status !== "done");
+      }
+    }
     const now = new Date().toISOString();
     raw.updated_at = now;
-    this.append({ t: "updated", at: now, id: cardId, status: raw.status, note: raw.note ?? undefined, body: raw.body, title: raw.title });
+    this.append({ t: "updated", at: now, id: cardId, status: raw.status, note: raw.note ?? undefined, body: raw.body, title: raw.title, blocked_by: raw.blocked_by });
     return { ...raw };
   }
 
