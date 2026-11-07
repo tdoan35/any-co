@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -30,4 +30,23 @@ test("createGameRepo makes a git repo with one empty commit and refuses to overw
   assert.equal(log.length, 1);
   assert.equal(execFileSync("git", ["ls-files"], { cwd: r.dir, encoding: "utf8" }).trim(), "");
   assert.throws(() => createGameRepo("Placeholder Title", games), /already exists/);
+});
+
+test("guards: only tech-lead pushes main (and it updates the repo's files); agent branches are open", () => {
+  const games = mkdtempSync(path.join(tmpdir(), "games-"));
+  const { dir } = createGameRepo("Guarded", games);
+  const clone = mkdtempSync(path.join(tmpdir(), "clone-"));
+  execFileSync("git", ["clone", "-q", dir, clone]);
+  const git = (env: Record<string, string>, ...args: string[]) =>
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t.invalid", ...args], {
+      cwd: clone, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...env },
+    });
+  writeFileSync(path.join(clone, "a.txt"), "x\n");
+  git({}, "add", "a.txt");
+  git({}, "commit", "-q", "-m", "a");
+  assert.throws(() => git({ ANYCO_AGENT: "gameplay-engineer" }, "push", "-q", "origin", "main"), /single-merger/);
+  git({ ANYCO_AGENT: "gameplay-engineer" }, "push", "-q", "origin", "main:agent/gameplay-engineer");
+  git({ ANYCO_AGENT: "tech-lead" }, "push", "-q", "origin", "main");
+  assert.equal(execFileSync("git", ["ls-files"], { cwd: dir, encoding: "utf8" }).trim(), "a.txt");
+  assert.ok(existsSync(path.join(dir, "a.txt")), "updateInstead checks the pushed main out in the repo");
 });

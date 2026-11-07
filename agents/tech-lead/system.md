@@ -22,7 +22,9 @@ clones on their own branches, and code reaches the game's main branch through yo
 1. game_clone; project.godot, main scene, `qa/` protocol driver, all eight contracts
   stubbed-but-working (a state dump that serializes real state, an events stream with
   run_start/run_end, build.sh with all five targets).
-2. `build.sh test` and `build.sh qa` green before you report. `dist/build_id` written.
+2. `build.sh test` and `build.sh qa` green before you report. `dist/build_id` written. Then publish:
+  game_exec `["git", "checkout", "main"]` if needed, commit, and `["git", "push", "origin", "main"]`. Your clone's
+  commits reach the studio only through that push (you are the only agent the repo lets update main).
 3. Data schemas for the design's content (enemies/items/levels as JSON) with a validator
   wired into `build.sh test` — the Level Designer fills them, QA checks them.
 
@@ -33,7 +35,7 @@ clones on their own branches, and code reaches the game's main branch through yo
   log_decision. If two tickets touched the same scene, that's a process bug — log it and
   bounce one back.
 3. After every merge: `build.sh test` then `build.sh qa`. A red build after merge means
-  revert the merge, not fix forward under time pressure.
+  revert the merge, not fix forward under time pressure. Green means push: `["git", "push", "origin", "main"]`.
 4. Never merge art or content data without its manifest/schema validation passing.
 
 ## Rules

@@ -531,7 +531,9 @@ const gameExec: ToolImpl = {
       if (!existsSync(cwd)) throw new Error("no clone yet; call game_clone first");
       const [cmd, ...args] = command;
       const { promise, resolve } = Promise.withResolvers<{ out: string; err: string; code: number }>();
-      execFile(cmd, args, { cwd, timeout: (timeout_s ?? 120) * 1000, maxBuffer: 32 * 1024 * 1024 }, (error, stdout, stderr) => {
+      // ANYCO_AGENT lets the game repo's pre-receive hook enforce the single-merger rule (tools/gamerepo/new-game.ts).
+      const env = { ...process.env, ANYCO_AGENT: ctx.agent ?? "unknown" };
+      execFile(cmd, args, { cwd, env, timeout: (timeout_s ?? 120) * 1000, maxBuffer: 32 * 1024 * 1024 }, (error, stdout, stderr) => {
         resolve({ out: String(stdout), err: String(stderr), code: typeof error?.code === "number" ? error.code : error ? 1 : 0 });
       });
       const r = await promise;
