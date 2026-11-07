@@ -86,3 +86,38 @@ test("email_send: a Naïve send failure comes back as an error result", async ()
     assert.match(out.content, /credit exhausted/);
   });
 });
+
+test("email_send: the blocklist covers subdomains of a blocked domain", async () => {
+  const calls: SentCall[] = [];
+  await withEnv({ ...IDS, STUDIO_EMAIL_BLOCKLIST: "@example.com" }, async () => {
+    const ctx = ctxFor(fakeNaive(calls));
+    const sub = await IMPLS.email_send.email_send.run({ to: "press@mail.example.com", subject: "s", body: "b" }, ctx);
+    assert.equal(sub.is_error, true, "press@mail.example.com must be blocked by @example.com");
+    assert.match(sub.content, /blocklist/);
+    const apex = await IMPLS.email_send.email_send.run({ to: "press@example.com", subject: "s", body: "b" }, ctx);
+    assert.equal(apex.is_error, true);
+    assert.equal(calls.length, 0);
+  });
+});
+
+test("email_send: 'to' accepts one plain address only — no lists, quoting, or brackets", () => {
+  const schema = IMPLS.email_send.email_send.input;
+  for (const bad of ["a,b@other.dev", "x;y@other.dev", '"a"<b@c.dev>', "a b@c.dev", "a@b@c.dev", " a@b.dev"]) {
+    assert.equal(schema.safeParse({ to: bad, subject: "s", body: "b" }).success, false, bad);
+  }
+  assert.equal(schema.safeParse({ to: "plain.address+tag@sub.domain.dev", subject: "s", body: "b" }).success, true);
+});
+
+test("email_send: accepted:false is an error result, not a silent success", async () => {
+  const refused = {
+    emails: {
+      send: async () => ({ object: "email_send", accepted: false, from: "studio@any-co.games", to: ["a@b.example"], sent_at: "t" }),
+    },
+  } as unknown as NaiveClient;
+  await withEnv(IDS, async () => {
+    const out = await IMPLS.email_send.email_send.run({ to: "a@b.example", subject: "s", body: "b" }, ctxFor(refused));
+    assert.equal(out.is_error, true);
+    assert.match(out.content, /accepted/);
+    assert.match(out.content, /false/);
+  });
+});

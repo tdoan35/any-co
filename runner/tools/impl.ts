@@ -634,7 +634,7 @@ const itchStatus: ToolImpl = {
 const blocklisted = (to: string, entries: string[]) => {
   const t = to.toLowerCase();
   const domain = t.split("@")[1] ?? "";
-  return entries.some((b) => t === b || (domain !== "" && domain === b.replace(/^@/, "")));
+  return entries.some((b) => t === b || (domain !== "" && (domain === b.replace(/^@/, "") || domain.endsWith("." + b.replace(/^@/, "")))));
 };
 
 const emailSend: ToolImpl = {
@@ -642,7 +642,7 @@ const emailSend: ToolImpl = {
     "Send one outreach email from the studio's own inbox. One recipient per call, plain text only. The operator approves every send; write the draft first, then send it.",
   input: z
     .object({
-      to: z.string().regex(/^[^@\s]+@[^@\s]+\.[^@\s]+$/).describe("One recipient address"),
+      to: z.string().regex(/^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/).describe("One recipient address, plain form only"),
       subject: z.string().min(1).max(200),
       body: z.string().min(1).max(10_000),
     })
@@ -657,6 +657,7 @@ const emailSend: ToolImpl = {
     if (blocklisted(to, entries)) return { content: `"${to}" is on the send blocklist (STUDIO_EMAIL_BLOCKLIST)`, is_error: true };
     try {
       const r = await ctx.naive.emails.send(identityId, inboxId, { to: [to], subject, text: body });
+      if (!r.accepted) return { content: JSON.stringify({ ...r, note: "Naïve did not accept this send; do not report it as sent" }), is_error: true };
       return { content: JSON.stringify({ accepted: r.accepted, from: r.from, to: r.to, sent_at: r.sent_at }) };
     } catch (e) {
       const status = e instanceof Error && "status" in e ? `${String(e.status)} ` : "";
