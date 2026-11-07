@@ -831,10 +831,21 @@ const emailSend: ToolImpl = {
 const SITE_MAX_FILES = 500;
 const SITE_MAX_BYTES = 2 * 1024 * 1024;
 
-/** Collect a directory into the deploy file map: key = prefix + relative path. */
+/** A deploy dir must really live strictly inside the clone: lexical checks miss a symlinked dir (dist/web -> /elsewhere),
+ *  which readdir would follow and publish. Same rule as itch_push's dist confinement. */
+function realDirInsideClone(clone: string, dirAbs: string, label: string): string {
+  const cloneReal = realpathSync(clone);
+  const real = realpathSync(dirAbs);
+  if (real === cloneReal || !real.startsWith(cloneReal + path.sep))
+    throw new Error(`"${label}" must be a directory strictly inside your clone (it resolves to ${real === cloneReal ? "the clone root" : "a path outside it"})`);
+  return real;
+}
+
+/** Collect a directory into the deploy file map: key = prefix + relative path. Symlinks are refused, not followed. */
 async function collectSiteFiles(abs: string, prefix: string, includeHidden: boolean, files: Map<string, Buffer>) {
   for (const entry of await readdir(abs, { withFileTypes: true })) {
     if (entry.name.startsWith(".") && !includeHidden) continue;
+    if (entry.isSymbolicLink()) throw new Error(`${prefix}${entry.name} is a symlink; the site deploy publishes real files only`);
     const p = path.join(abs, entry.name);
     if (entry.isDirectory()) await collectSiteFiles(p, `${prefix}${entry.name}/`, includeHidden, files);
     else if (entry.isFile()) {
@@ -875,9 +886,10 @@ const siteDeploy: ToolImpl = {
       const webRoot = resolveInWorkspace(clone, dir);
       if (!(await stat(webRoot)).isDirectory()) throw new Error(`"${dir}" is not a directory in your clone`);
       const files = new Map<string, Buffer>();
-      await collectSiteFiles(webRoot, "", include_hidden, files);
+      await collectSiteFiles(realDirInsideClone(clone, webRoot, dir), "", include_hidden, files);
       const siteRoot = resolveInWorkspace(clone, site_dir);
-      if (existsSync(siteRoot) && (await stat(siteRoot)).isDirectory()) await collectSiteFiles(siteRoot, "site/", include_hidden, files);
+      if (existsSync(siteRoot) && (await stat(siteRoot)).isDirectory())
+        await collectSiteFiles(realDirInsideClone(clone, siteRoot, site_dir), "site/", include_hidden, files);
       if (files.size === 0) throw new Error(`"${dir}" is empty; nothing to deploy`);
       files.set("build_id.txt", Buffer.from(`${buildId}\n`, "utf8"));
       // Stable digest over sorted (name, bytes) pairs: the platform echoes it, so unchanged sites can be skipped.

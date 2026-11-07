@@ -160,3 +160,31 @@ test("site_status: app url + last 5 deployments + latest build_id", async () => 
     assert.equal(r.deployments[0].id, "apd_1");
   });
 });
+
+test("site_deploy refuses a web dir symlinked out of the clone, symlinks inside the tree, and the clone root (nothing deployed)", async () => {
+  const { symlinkSync, rmSync } = await import("node:fs");
+  const calls: FakeCalls = { deploy: [], redeploys: [], statusCalls: 0 };
+  await withEnv({ STUDIO_SITE_APP_ID: "app_1" }, async () => {
+    // 1. dist/web -> a directory outside the clone (the R4 itch_push hole)
+    const a = setup();
+    const outside = mkdtempSync(path.join(tmpdir(), "anyco-outside-"));
+    writeFileSync(path.join(outside, "secret.txt"), "not for the public site");
+    const web = path.join(a.workspace, "game", "dist", "web");
+    rmSync(web, { recursive: true });
+    symlinkSync(outside, web);
+    const r1 = await deploy(a.ctx, fakeNaive(calls));
+    assert.equal(r1.is_error, true);
+    assert.match(String(r1.content), /strictly inside your clone/);
+    // 2. a symlink inside the tree
+    const b = setup();
+    symlinkSync(outside, path.join(b.workspace, "game", "dist", "web", "linked"));
+    const r2 = await deploy(b.ctx, fakeNaive(calls));
+    assert.equal(r2.is_error, true);
+    assert.match(String(r2.content), /symlink/);
+    // 3. the clone root itself
+    const c = setup();
+    const r3 = await deploy(c.ctx, fakeNaive(calls), { dir: "." });
+    assert.equal(r3.is_error, true);
+    assert.equal(calls.deploy.length, 0, "nothing reached apps.deploy");
+  });
+});
