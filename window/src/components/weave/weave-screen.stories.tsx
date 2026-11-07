@@ -10,6 +10,7 @@
 //                         re-open; identical heading both times)
 //   direct navigation   → DirectLoadDetail (play: ?item= lands on the same detail,
 //                         same rail date, as repeated navigation)
+//   resize columns      → ResizePanes (separators: keys move, Enter resets)
 //   mid (900px)         → MidThreeColumn (rail stays a column)
 //   narrow + sheet      → NarrowRailSheet (play: sheet open/close, pick inside the
 //                         sheet, stacked detail open)
@@ -160,6 +161,33 @@ export const DirectLoadDetail: Story = {
 };
 
 // ---- narrow: stacked layout and the rail sheet ----
+
+/** Column borders are separators: arrow keys move them 16px, Enter resets to the default width. */
+export const ResizePanes: Story = {
+  name: "Wide · resize columns",
+  parameters: wide,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const user = userEvent.setup();
+    const inbox = await canvas.findByRole("separator", { name: "Resize inbox" });
+    const rail = canvas.getByRole("separator", { name: "Resize day rail" });
+    const section = canvasElement.querySelector<HTMLElement>('section[aria-label="Inbox"]')!;
+    inbox.focus();
+    await user.keyboard("{Enter}"); // start from the default whatever an earlier run stored
+    await waitFor(() => expect(inbox).toHaveAttribute("aria-valuenow", "300"));
+    await user.keyboard("{ArrowRight}");
+    await waitFor(() => expect(inbox).toHaveAttribute("aria-valuenow", "316"));
+    expect(Math.round(section.getBoundingClientRect().width)).toBe(316);
+    // The rail grows leftward: ArrowLeft widens it.
+    rail.focus();
+    await user.keyboard("{Enter}{ArrowLeft}");
+    await waitFor(() => expect(rail).toHaveAttribute("aria-valuenow", "304"));
+    await user.keyboard("{Enter}");
+    inbox.focus();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(inbox).toHaveAttribute("aria-valuenow", "300"));
+  },
+};
 
 /** 900px (a small display or a narrow Electron window): the day rail stays a third column, no sheet. */
 export const MidThreeColumn: Story = {

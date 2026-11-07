@@ -14,6 +14,7 @@ import { fullDayLabel, greeting, shortDayLabel, TODAY } from "./format";
 import { Inbox } from "./inbox";
 import { ItemDetail } from "./item-detail";
 import { ColumnHeader } from "./parts";
+import { PANE_LIMITS, PaneHandle, usePaneWidths } from "./pane-resize";
 import { Pulse, type PulseFilter } from "./pulse";
 import { quietScroll, useEdgeFade } from "./use-edge-fade";
 
@@ -21,7 +22,8 @@ import { quietScroll, useEdgeFade } from "./use-edge-fade";
  *  app sidebar and a small display (or a narrow Electron window) don't push the day rail into a sheet. */
 const TWO_COLS = 680;
 const THREE_COLS = 860;
-/** Above this the inbox gets Fabric's full 300px; below it 264px, so Pulse keeps a readable width. */
+/** Default inbox width: Fabric's 300px above this panel width, 264px below it, so Pulse keeps a readable width.
+ *  Dragging a column border overrides the defaults (pane-resize.tsx). */
 const ROOMY = 1100;
 
 function usePanelWidth<T extends HTMLElement>() {
@@ -63,6 +65,12 @@ export function WeaveScreen() {
   // Before the first measurement (width 0) assume the common desktop case: three columns.
   const cols = panelWidth === 0 || panelWidth >= THREE_COLS ? 3 : panelWidth >= TWO_COLS ? 2 : 1;
   useEffect(() => { if (cols === 3) setRailOpen(false); }, [cols]);
+  // Pulse rows animate their position; while a border is dragged that animation chases every pixel.
+  const [resizing, setResizing] = useState(false);
+  const panes = usePaneWidths(panelWidth, { inbox: panelWidth >= ROOMY ? 300 : 264, rail: 288 }, cols === 3);
+  // Measured: explicit widths from the drag state. Unmeasured first frame: the static default.
+  const template = panelWidth === 0 || cols === 1 ? undefined
+    : cols === 3 ? `${panes.inbox}px minmax(0,1fr) ${panes.rail}px` : `${panes.inbox}px minmax(0,1fr)`;
   const colsRef = useRef(cols);
   colsRef.current = cols;
 
@@ -150,14 +158,26 @@ export function WeaveScreen() {
         <span className={headerTitle}>Weave</span>
       </PageHeader>
       <div className="min-h-0 flex-1 animate-in fade-in slide-in-from-bottom-3 p-4 pt-3 duration-500 ease-out fill-mode-backwards">
-        <div ref={panelRef} className={cn(
-          "grid h-full rounded-2xl border border-foreground/10 bg-background/20 shadow-sm backdrop-blur-xl",
-          cols === 1 && "grid-cols-1 overflow-y-auto",
-          cols === 2 && "grid-cols-[264px_minmax(0,1fr)] overflow-hidden",
-          cols === 3 && (panelWidth === 0 || panelWidth >= ROOMY ? "grid-cols-[300px_minmax(0,1fr)_288px]" : "grid-cols-[264px_minmax(0,1fr)_288px]"),
-          cols === 3 && "overflow-hidden",
+        <div ref={panelRef} style={{ gridTemplateColumns: template }} className={cn(
+          "relative grid h-full rounded-2xl border border-foreground/10 bg-background/20 shadow-sm backdrop-blur-xl",
+          cols === 1 ? "grid-cols-1 overflow-y-auto" : "overflow-hidden",
+          panelWidth === 0 && "grid-cols-[300px_minmax(0,1fr)_288px]",
           quietScroll,
         )}>
+          {template && (
+            <PaneHandle
+              label="Resize inbox" edge="left" x={panes.inbox} width={panes.inbox}
+              min={PANE_LIMITS.inbox.min} max={Math.min(PANE_LIMITS.inbox.max, panelWidth - PANE_LIMITS.center - panes.rail)}
+              onResize={(px) => panes.set("inbox", px)} onReset={() => panes.set("inbox", undefined)} onDragChange={setResizing}
+            />
+          )}
+          {template && cols === 3 && (
+            <PaneHandle
+              label="Resize day rail" edge="right" x={panelWidth - panes.rail} width={panes.rail}
+              min={PANE_LIMITS.rail.min} max={Math.min(PANE_LIMITS.rail.max, panelWidth - PANE_LIMITS.center - panes.inbox)}
+              onResize={(px) => panes.set("rail", px)} onReset={() => panes.set("rail", undefined)} onDragChange={setResizing}
+            />
+          )}
           <section aria-label="Inbox" className={cn(
             "flex min-h-0 flex-col border-foreground/10 bg-background/40",
             cols === 1 ? "max-h-[60vh] border-b" : "border-r",
@@ -189,7 +209,7 @@ export function WeaveScreen() {
                 >
                   {selected
                     ? <ItemDetail item={selected} st={state.status[selected.id]} last={state.last} />
-                    : <Pulse state={state} filter={filter} onFilter={setFilter} onSelectItem={open} scrollTo={scrollTo} />}
+                    : <Pulse state={state} filter={filter} onFilter={setFilter} onSelectItem={open} scrollTo={scrollTo} animateLayout={!resizing} />}
                 </motion.div>
               </AnimatePresence>
             </div>
