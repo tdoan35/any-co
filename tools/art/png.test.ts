@@ -269,3 +269,16 @@ test("encoded PNG has the standard chunk structure", () => {
   const tail = String.fromCharCode(...bytes.subarray(bytes.length - 8, bytes.length - 4));
   assert.equal(tail, "IEND");
 });
+
+test("rejects deflate bombs via the inflate output cap", () => {
+  // 70 MB of zeros (~70 KB deflated) behind an IHDR claiming a huge RGBA image
+  const raw = Buffer.alloc(70 * 1024 * 1024);
+  const ihdr = new Uint8Array(13);
+  const dv = new DataView(ihdr.buffer);
+  dv.setUint32(0, 4680);
+  dv.setUint32(4, 3736); // expected inflated ≈ 70 MB > the 64 MB cap
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  const bomb = Buffer.concat([SIG, chunk("IHDR", ihdr), chunk("IDAT", new Uint8Array(deflateSync(raw))), chunk("IEND", new Uint8Array(0))]);
+  assert.throws(() => decodePng(bomb), /inflate/i);
+});

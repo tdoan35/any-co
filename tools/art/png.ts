@@ -12,6 +12,8 @@ export interface RgbaImage {
 }
 
 export class PngError extends Error {}
+/** Inflated pixel data larger than this is treated as a bomb and rejected. */
+const MAX_INFLATED_BYTES = 64 * 1024 * 1024;
 
 export function makeImage(width: number, height: number): RgbaImage {
   if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0)
@@ -116,7 +118,7 @@ export function decodePng(bytes: Uint8Array): RgbaImage {
       joined.set(d, off);
       off += d.length;
     }
-    inflated = new Uint8Array(inflateSync(joined));
+        inflated = new Uint8Array(inflateSync(joined, { maxOutputLength: MAX_INFLATED_BYTES }));
   } catch (e) {
     throw new PngError(`IDAT stream failed to inflate: ${(e as Error).message}`);
   }

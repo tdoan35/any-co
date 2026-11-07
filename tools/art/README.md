@@ -16,7 +16,7 @@ sheet   <out.png> --frames "a.png,b.png,..." [--anchor N] [--scale N] [--gap N]
 gate    <game-repo-dir> [--schema <asset.schema.json>]
 ```
 
-Exit codes: 0 = ok, 1 = operation/gate failure, 2 = unknown command. `sheet` also writes
+Exit codes: 0 = ok, 1 = gate verdict fail, 2 = usage error or crash (bad args, unreadable file). `sheet` also writes
 a `<out>.cells.json` sidecar mapping cell rectangles → frame index. `gate` prints the
 full report and exits 1 when the repo fails.
 
@@ -47,12 +47,13 @@ truth, without loading the game:
 
 | check | rule |
 | --- | --- |
-| manifest | schema-valid (small validator for the schema's feature subset), unique asset ids |
-| files | every manifest path exists; every file under `assets/` is listed (manifest.json itself exempt) |
+| manifest | schema-valid (small validator for exactly the schema's keywords — an unknown keyword throws instead of weakening the gate), unique asset ids |
+| files | every manifest path exists; every file under `assets/` is listed (manifest.json itself exempt); symlinks under `assets/` are reported and fail (never followed) |
+| path_safe | manifest paths must normalize to a location under `assets/` — `..` escapes are a failing check and are never probed on disk |
 | palette_subset | the asset's declared palette ⊆ the locked (file-level) palette |
 | pixels_in_palette | off-palette share of **opaque** pixels ≤ threshold (a pixel matches iff fully transparent or fully opaque with in-palette RGB) |
-| size | declared size = real PNG size; PNG assets must declare one |
-| grid | real size is a multiple of `grid` |
+| size | `size` is one frame: `file.w == size.w × frames` and `file.h == size.h`; PNG assets must declare one |
+| grid | the frame size (`file.w / frames` × `file.h`) is a multiple of `grid` |
 | frames | strip width divides by `frames` |
 | anchor | non-anchor sprites name an existing, non-self anchor id |
 | frame_drift | max fraction of differing pixels between consecutive frames ≤ threshold |

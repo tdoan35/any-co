@@ -91,7 +91,7 @@ function gateRepo(dir: string): string {
   const repo = path.join(dir, "game");
   mkdirSync(path.join(repo, "assets", "sprites"), { recursive: true });
   const img = makeImage(16, 16);
-  for (let i = 0; i < 256; i++) img.data.set([26, 28, 44, 255], i * 4); // #1a1c2c
+  for (let i = 0; i < 256; i++) img.data.set([1, 2, 3, 255], i * 4); // #010203, arbitrary test color
   writeFileSync(path.join(repo, "assets", "sprites", "player.png"), encodePng(img));
   writeFileSync(
     path.join(repo, "assets", "manifest.json"),
@@ -99,8 +99,8 @@ function gateRepo(dir: string): string {
       schema_version: 1,
       style_bible: "docs/style-bible.md",
       grid: { w: 16, h: 16 },
-      palette: ["#1a1c2c", "#5d275d"],
-      assets: [{ id: "player", type: "sprite", path: "assets/sprites/player.png", size: { w: 16, h: 16 }, frames: 1, palette: ["#1a1c2c"], anchor: null }],
+      palette: ["#010203", "#040506"],
+      assets: [{ id: "player", type: "sprite", path: "assets/sprites/player.png", size: { w: 16, h: 16 }, frames: 1, palette: ["#010203"], anchor: null }],
     }),
   );
   return repo;
@@ -115,10 +115,9 @@ test("gate returns exit 0 on a healthy repo and 1 on a failing one", () => {
 
   // break it: unlisted file
   const repo2 = gateRepo(temp());
-  writeTestPng(repo2, "assets/sprites/extra.png", 16, 16, () => [26, 28, 44, 255]);
+  writeTestPng(repo2, "assets/sprites/extra.png", 16, 16, () => [1, 2, 3, 255]);
   const bad = runCommand(["gate", repo2]);
   assert.equal(bad.exitCode, 1);
-  if (bad.kind !== "ok") throw new Error(bad.json.error);
   assert.equal(bad.json.ok, false);
 });
 
@@ -128,7 +127,10 @@ test("unknown commands and bad invocations exit non-zero with an error message",
   assert.equal(bad.exitCode, 2);
   const missing = runCommand(["lock", "only-one-arg"]);
   assert.equal(missing.kind, "error");
-  assert.equal(missing.exitCode, 1);
+  assert.equal(missing.exitCode, 2); // usage errors are 2, not a gate-fail 1
+  const crash = runCommand(["lock", path.join(temp(), "no-such-input.png"), path.join(temp(), "out.png"), "--palette", "#000000"]);
+  assert.equal(crash.kind, "error");
+  assert.equal(crash.exitCode, 2); // crashes (unreadable input) are 2; 1 is reserved for gate verdicts
 });
 
 // ---- runner capability (art_tools) ----
@@ -152,7 +154,7 @@ test("art_gate checks the game clone inside the workspace and reports JSON", asy
   const out = await IMPLS.art_tools.art_gate.run({}, ctx(ws));
   assert.equal(JSON.parse(out.content).ok, true);
 
-  writeTestPng(path.join(ws, "game"), "assets/sprites/extra.png", 16, 16, () => [26, 28, 44, 255]);
+  writeTestPng(path.join(ws, "game"), "assets/sprites/extra.png", 16, 16, () => [1, 2, 3, 255]);
   const bad = await IMPLS.art_tools.art_gate.run({}, ctx(ws));
   assert.equal(JSON.parse(bad.content).ok, false);
 });

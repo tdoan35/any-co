@@ -574,7 +574,7 @@ const artTools: Record<string, ToolImpl> = {
       .object({
         path: z.string().min(1).describe("workspace-relative input PNG"),
         out: z.string().min(1).describe("workspace-relative output PNG"),
-        palette: z.array(hexColor).min(1).max(64).describe('palette hexes, e.g. ["#1a1c2c", "#ffcd75"]'),
+        palette: z.array(hexColor).min(1).max(64).describe('palette hexes from the style bible, e.g. ["#rrggbb", "#rrggbb"]'),
         alpha_threshold: z.number().int().min(0).max(255).optional().describe("alpha ≥ threshold → opaque (default 128)"),
       })
       .strict(),
@@ -592,7 +592,7 @@ const artTools: Record<string, ToolImpl> = {
   art_snap: {
     description:
       "Downscale an upscaled render to exactly w×h by majority vote per cell (ties → lexicographically smallest RGBA). " +
- "Reports the detected scale and whether it was an integer.",
+      "Reports the detected scale and whether it was an integer.",
     input: z
       .object({
         path: z.string().min(1),

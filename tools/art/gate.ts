@@ -2,7 +2,7 @@
 // (docs/contracts/asset-manifest.md + asset.schema.json) without loading the game.
 // Pure read-only analysis; returns a JSON-shaped report. The CLI turns `ok` into the exit code.
 
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { decodePng, type RgbaImage } from "./png.ts";
@@ -55,7 +55,7 @@ export interface AssetResult {
 export interface GateReport {
   ok: boolean;
   manifest: { valid: boolean; errors: string[] };
-  files: { missing: string[]; unlisted: string[] };
+  files: { missing: string[]; unlisted: string[]; symlinks: string[] };
   assets: AssetResult[];
   thresholds: Required<GateThresholds>;
 }
@@ -76,9 +76,18 @@ const typeMatches = (v: unknown, t: string): boolean => {
  * additionalProperties: false, items, minItems/maxItems, minLength/maxLength,
  * pattern, minimum/maximum/exclusiveMinimum. Returns one message per violation.
  */
+const KNOWN_KEYWORDS: Record<string, true> = {
+  type: true, const: true, enum: true, required: true, properties: true, additionalProperties: true, items: true,
+  minItems: true, maxItems: true, minLength: true, maxLength: true, pattern: true, minimum: true, maximum: true,
+  exclusiveMinimum: true, exclusiveMaximum: true, $schema: true, $id: true, title: true, description: true,
+};
+
 export function validateSchema(value: unknown, schema: unknown, at = "$"): string[] {
   if (typeof schema !== "object" || schema === null) return [`${at}: invalid schema node`];
   const s = schema as Record<string, unknown>;
+  // The validator covers a fixed keyword set; an unknown keyword must fail loudly, not weaken the gate silently.
+  for (const keyword of Object.keys(s))
+    if (!KNOWN_KEYWORDS[keyword]) throw new Error(`validateSchema: unsupported keyword "${keyword}" at ${at} — extend the validator before trusting the gate`);
   const errors: string[] = [];
 
   if ("type" in s) {
@@ -146,20 +155,31 @@ interface Manifest {
 const pass = (name: string, detail?: string): Check => ({ name, pass: true, ...(detail ? { detail } : {}) });
 const fail = (name: string, detail: string): Check => ({ name, pass: false, detail });
 
-/** Repo-relative paths of every regular file under <repo>/assets, posix-style, sorted. */
-function walkAssets(dir: string, prefix = "assets"): string[] {
-  const out: string[] = [];
-  if (!existsSync(dir)) return out;
+/** Repo-relative paths under <repo>/assets: regular files and symlinks, posix-style, sorted. */
+function walkAssets(dir: string, prefix = "assets"): { files: string[]; symlinks: string[] } {
+  const files: string[] = [];
+  const symlinks: string[] = [];
+  if (!existsSync(dir)) return { files, symlinks };
   for (const entry of readdirSync(dir).sort()) {
     const abs = path.join(dir, entry);
     const rel = `${prefix}/${entry}`;
-    if (statSync(abs).isDirectory()) out.push(...walkAssets(abs, rel));
-    else out.push(rel);
+    const st = lstatSync(abs); // never follow links: a loop must not crash the gate
+    if (st.isSymbolicLink()) symlinks.push(rel);
+    else if (st.isDirectory()) {
+      const nested = walkAssets(abs, rel);
+      files.push(...nested.files);
+      symlinks.push(...nested.symlinks);
+    } else files.push(rel);
   }
-  return out;
+  return { files, symlinks };
 }
 
-const frameOf = (img: RgbaImage, count: number, index: number): RgbaImage => splitStrip(img, count)[index];
+/** True when a manifest path normalizes to a real location under assets/ (no "..", no escape). */
+export function assetPathIsSafe(p: string): boolean {
+  const normalized = path.posix.normalize(p);
+  return normalized.startsWith("assets/") && !normalized.split("/").includes("..");
+}
+
 
 function differingShare(a: RgbaImage, b: RgbaImage): number | null {
   if (a.width !== b.width || a.height !== b.height) return null;
@@ -176,7 +196,7 @@ export function runGate(repoDir: string, opts?: GateOptions): GateReport {
   const report: GateReport = {
     ok: false,
     manifest: { valid: false, errors: [] },
-    files: { missing: [], unlisted: [] },
+    files: { missing: [], unlisted: [], symlinks: [] },
     assets: [],
     thresholds,
   };
@@ -199,10 +219,13 @@ export function runGate(repoDir: string, opts?: GateOptions): GateReport {
   if (schemaErrors.length > 0) return report; // unreliable asset list; schema errors are the verdict
   report.manifest.valid = true;
 
-  // File coverage: manifest paths exist; every file under assets/ is listed (manifest.json itself exempt).
+  // File coverage: manifest paths exist (only paths that stay inside assets/ are probed);
+  // every file under assets/ is listed (manifest.json itself exempt); symlinks are reported, not followed.
   const listed = new Set(manifest.assets.map((a) => a.path));
-  const onDisk = walkAssets(path.join(repoDir, "assets")).filter((p) => p !== "assets/manifest.json");
-  report.files.missing = [...listed].filter((p) => !existsSync(path.join(repoDir, p))).sort();
+  const walked = walkAssets(path.join(repoDir, "assets"));
+  const onDisk = walked.files.filter((p) => p !== "assets/manifest.json");
+  report.files.symlinks = walked.symlinks.sort();
+  report.files.missing = [...listed].filter((p) => assetPathIsSafe(p) && !existsSync(path.join(repoDir, p))).sort();
   report.files.unlisted = onDisk.filter((p) => !listed.has(p)).sort();
 
   const lockedSet = new Set(manifest.palette.map((hex) => hex.toLowerCase()));
@@ -226,6 +249,12 @@ export function runGate(repoDir: string, opts?: GateOptions): GateReport {
     const checks: Check[] = [];
     const numbers: AssetNumbers = {};
 
+    if (!assetPathIsSafe(asset.path)) {
+      checks.push(fail("path_safe", `path "${asset.path}" does not stay under assets/`));
+      report.assets.push({ id: asset.id, path: asset.path, type: asset.type, pass: false, checks, numbers });
+      continue; // never read from (or satisfy the gate with) files outside the repo
+    }
+
     const img = decode(asset);
     if (!img) {
       // PNG assets must decode; non-PNG (audio, ttf, …) are checked for existence only.
@@ -238,6 +267,7 @@ export function runGate(repoDir: string, opts?: GateOptions): GateReport {
       continue;
     }
 
+    const frameCount = asset.frames ?? 1;
     checks.push(
       (asset.palette ?? []).every((hex) => lockedSet.has(hex.toLowerCase()))
         ? pass("palette_subset")
@@ -263,20 +293,28 @@ export function runGate(repoDir: string, opts?: GateOptions): GateReport {
         : fail("pixels_in_palette", `off-palette share ${numbers.offPaletteShare.toFixed(4)} of ${opaque} opaque px exceeds ${thresholds.maxOffPaletteShare}`),
     );
 
+    // `size` is ONE frame (contract): the file is frames × size.w wide and size.h tall.
     checks.push(
-      asset.size && asset.size.w === img.width && asset.size.h === img.height
-        ? pass("size", `declared ${asset.size.w}x${asset.size.h} = real`)
-        : fail("size", asset.size ? `declared ${asset.size.w}x${asset.size.h} but the file is ${img.width}x${img.height}` : "PNG asset has no declared size"),
+      asset.size && img.width === asset.size.w * frameCount && img.height === asset.size.h
+        ? pass("size", `declared frame ${asset.size.w}x${asset.size.h} × ${frameCount} = file ${img.width}x${img.height}`)
+        : fail(
+            "size",
+            asset.size
+              ? `declared frame ${asset.size.w}x${asset.size.h} × ${frameCount} frames = ${asset.size.w * frameCount}x${asset.size.h}, but the file is ${img.width}x${img.height}`
+              : "PNG asset has no declared size",
+          ),
     );
 
+    // The grid multiple applies to the frame size, not the whole strip.
+    const frameWidth = img.width / frameCount;
     checks.push(
-      img.width % manifest.grid.w === 0 && img.height % manifest.grid.h === 0
-        ? pass("grid", `${img.width}x${img.height} is a multiple of grid ${manifest.grid.w}x${manifest.grid.h}`)
-        : fail("grid", `${img.width}x${img.height} is not a multiple of grid ${manifest.grid.w}x${manifest.grid.h}`),
+      Number.isInteger(frameWidth) && frameWidth % manifest.grid.w === 0 && img.height % manifest.grid.h === 0
+        ? pass("grid", `frame ${frameWidth}x${img.height} is a multiple of grid ${manifest.grid.w}x${manifest.grid.h}`)
+        : fail("grid", `frame ${Number.isInteger(frameWidth) ? frameWidth : img.width / frameCount}x${img.height} is not a multiple of grid ${manifest.grid.w}x${manifest.grid.h}`),
     );
 
     if (asset.frames === undefined) {
-      checks.push(pass("frames", "no frames declared; not checked"));
+      checks.push(pass("frames", "no frames declared; single frame"));
     } else {
       checks.push(
         img.width % asset.frames === 0
@@ -296,7 +334,6 @@ export function runGate(repoDir: string, opts?: GateOptions): GateReport {
       );
     }
 
-    const frameCount = asset.frames ?? 1;
     const divisible = img.width % frameCount === 0;
     const frames = divisible ? splitStrip(img, frameCount) : [img];
     const drifts: number[] = [];
@@ -346,6 +383,7 @@ export function runGate(repoDir: string, opts?: GateOptions): GateReport {
     report.manifest.valid &&
     report.files.missing.length === 0 &&
     report.files.unlisted.length === 0 &&
+    report.files.symlinks.length === 0 &&
     report.assets.every((a) => a.pass);
   return report;
 }

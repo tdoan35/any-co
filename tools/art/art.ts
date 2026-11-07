@@ -20,7 +20,7 @@ function writePng(file: string, img: RgbaImage): void {
 
 export type CommandResult =
   | { kind: "ok"; json: Record<string, unknown>; exitCode: number }
-  | { kind: "error"; json: { error: string }; exitCode: 1 | 2 };
+  | { kind: "error"; json: { error: string }; exitCode: 2 }
 
 const USAGE = `usage: art.ts <command> ...
   lock    <in.png> <out.png> --palette "#rrggbb,#rrggbb,..." [--alpha-threshold N]
@@ -115,7 +115,7 @@ export function runCommand(argv: string[]): CommandResult {
         return { kind: "error", json: { error: command ? `unknown command "${command}"` : `missing command\n${USAGE}` }, exitCode: 2 };
     }
   } catch (e) {
-    return { kind: "error", json: { error: (e as Error).message }, exitCode: 1 };
+    return { kind: "error", json: { error: (e as Error).message }, exitCode: 2 }; // crash/usage; 1 is reserved for gate verdicts
   }
 }
 

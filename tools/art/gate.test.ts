@@ -1,12 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { encodePng, makeImage, type RgbaImage } from "./png.ts";
 import { DEFAULT_THRESHOLDS, runGate, validateSchema } from "./gate.ts";
 
-const PALETTE = ["#1a1c2c", "#b13e53", "#ef7d57", "#ffcd75", "#a7f070", "#38b764", "#41a6f6"];
+// Arbitrary test colors (not any published palette).
+const PALETTE = ["#111111", "#222233", "#334455", "#667788", "#99aabb", "#ccddee", "#ee0011"];
+const BODY = "#ccddee";
+const DARK = "#111111";
+const RED = "#ee0011";
 const rgb = (hex: string): [number, number, number] => [
   parseInt(hex.slice(1, 3), 16),
   parseInt(hex.slice(3, 5), 16),
@@ -62,9 +66,9 @@ function goodManifest(): ManifestFixture {
         id: "player",
         type: "sprite",
         path: "assets/sprites/player.png",
-        size: { w: 64, h: 16 },
+        size: { w: 16, h: 16 }, // one frame; the 4-frame strip is 64x16
         frames: 4,
-        palette: ["#1a1c2c", "#ffcd75"],
+        palette: [DARK, BODY],
         anchor: null,
         anim: { mode: "frame-strip", fps: 8 },
         notes: "anchor sheet",
@@ -73,9 +77,9 @@ function goodManifest(): ManifestFixture {
         id: "enemy-slug",
         type: "sprite",
         path: "assets/sprites/enemy-slug.png",
-        size: { w: 32, h: 16 },
+        size: { w: 16, h: 16 },
         frames: 2,
-        palette: ["#1a1c2c", "#b13e53"],
+        palette: [DARK, RED],
         anchor: "player",
         anim: { mode: "cutout", parts: ["body"] },
       },
@@ -85,17 +89,17 @@ function goodManifest(): ManifestFixture {
 
 function goodFiles(): Record<string, Uint8Array> {
   return {
-    // 4 frames: #ffcd75 body plus one #1a1c2c detail pixel per frame ≥ 1 → drift 1/256 per pair
+    // 4 frames of 16x16 (64x16 file): body + one detail pixel per frame ≥ 1 → drift 1/256, 2/256 per pair
     "assets/sprites/player.png": encodePng(
       strip(4, 16, 16, (f, x, y) => {
-        if (x >= 4 && x < 12 && y >= 4 && y < 12) return "#ffcd75";
-        if (f > 0 && x === f && y === 15) return "#1a1c2c";
+        if (x >= 4 && x < 12 && y >= 4 && y < 12) return BODY;
+        if (f > 0 && x === f && y === 15) return DARK;
         return null;
       }),
     ),
-    // 2 frames; frame 0 identical to player frame 0 → anchorDrift 0
+    // 2 frames of 16x16 (32x16 file); frame 0 identical to player frame 0 → anchorDrift 0
     "assets/sprites/enemy-slug.png": encodePng(
-      strip(2, 16, 16, (f, x, y) => (x >= 4 && x < 12 && y >= 4 && y < 12 ? (f === 0 ? "#ffcd75" : "#b13e53") : null)),
+      strip(2, 16, 16, (f, x, y) => (x >= 4 && x < 12 && y >= 4 && y < 12 ? (f === 0 ? BODY : RED) : null)),
     ),
   };
 }
@@ -125,8 +129,8 @@ test("validator rejects each schema violation by name", () => {
   const cases: Array<[string, unknown, RegExp]> = [
     ["wrong schema_version", { ...goodManifest(), schema_version: 2 }, /schema_version/],
     ["missing style_bible", (() => { const { style_bible: _omit, ...rest } = goodManifest(); return rest; })(), /style_bible/],
-    ["bad palette hex", { ...goodManifest(), palette: ["#1a1c2c", "red"] }, /palette/],
-    ["palette too short", { ...goodManifest(), palette: ["#1a1c2c"] }, /palette/],
+    ["bad palette hex", { ...goodManifest(), palette: [DARK, "red"] }, /palette/],
+    ["palette too short", { ...goodManifest(), palette: [DARK] }, /palette/],
     ["extra top-level property", { ...goodManifest(), extra: 1 }, /extra/],
     ["grid zero", { ...goodManifest(), grid: { w: 0, h: 16 } }, /grid/],
     ["bad asset id", { ...goodManifest(), assets: [{ ...goodManifest().assets[0], id: "Player!" }] }, /id/],
@@ -147,30 +151,35 @@ test("validator rejects each schema violation by name", () => {
   }
 });
 
+test("validator throws on keywords it does not implement (no silent gaps)", () => {
+  assert.throws(() => validateSchema(1, { oneOf: [] }), /oneOf/);
+  assert.throws(() => validateSchema(1, { $ref: "#/x" }), /\$ref/);
+});
+
 // ---- gate: passing repo ----
 
-test("gate passes a healthy synthetic repo and reports drift numbers", () => {
+test("gate passes a repo shaped like the contract example (size = one frame, strip = frames × size.w)", () => {
+  // exactly the docs/contracts/asset-manifest.md example shape: size 16x16, frames 4, 64x16 strip
   const dir = writeRepo(goodManifest(), goodFiles());
   const report = runGate(dir);
   assert.equal(report.ok, true, JSON.stringify(report));
   assert.equal(report.manifest.valid, true);
-  assert.deepEqual(report.files, { missing: [], unlisted: [] });
+  assert.deepEqual(report.files, { missing: [], unlisted: [], symlinks: [] });
   const player = report.assets.find((a) => a.id === "player")!;
   assert.equal(player.pass, true);
   assert.equal(player.numbers.offPaletteShare, 0);
-  assert.deepEqual(player.numbers.frameDrift, [1 / 256, 2 / 256, 2 / 256]); // detail pixel at x=f: pairs (1,2),(2,3) differ in 2 px
+  assert.deepEqual(player.numbers.frameDrift, [1 / 256, 2 / 256, 2 / 256]);
   assert.equal(player.numbers.anchorDrift, null); // anchor sheets have no anchor
   const slug = report.assets.find((a) => a.id === "enemy-slug")!;
   assert.equal(slug.pass, true);
-  assert.equal(slug.numbers.anchorDrift, 0); // frame 0 identical to player frame 0
+  assert.equal(slug.numbers.anchorDrift, 0);
   assert.deepEqual(report.thresholds, DEFAULT_THRESHOLDS);
 });
 
 test("gate fails frame drift over the default threshold, and thresholds are options", () => {
-  // fully alternating frames → drift 1.0 > default 0.5, but ≤ custom 1.0
   const files: Record<string, Uint8Array | string> = {
     "assets/sprites/player.png": encodePng(
-      strip(4, 16, 16, (f, x, _y) => (f % 2 === 0 ? (x < 8 ? "#ffcd75" : "#1a1c2c") : x < 8 ? "#1a1c2c" : "#ffcd75")),
+      strip(4, 16, 16, (f, x, _y) => (f % 2 === 0 ? (x < 8 ? BODY : DARK) : x < 8 ? DARK : BODY)),
     ),
     "assets/sprites/enemy-slug.png": goodFiles()["assets/sprites/enemy-slug.png"],
   };
@@ -190,41 +199,59 @@ test("gate fails on off-palette pixels and reports the share", () => {
   const files: Record<string, Uint8Array | string> = {
     ...goodFiles(),
     "assets/sprites/enemy-slug.png": encodePng(
-      strip(2, 16, 16, (f, x, y) => (x >= 4 && x < 12 && y >= 4 && y < 12 ? (f === 0 ? "#fe0000" : "#b13e53") : null)),
+      strip(2, 16, 16, (f, x, y) => (x >= 4 && x < 12 && y >= 4 && y < 12 ? (f === 0 ? "#fe0000" : RED) : null)),
     ),
   };
   const report = runGate(writeRepo(goodManifest(), files));
   assert.equal(report.ok, false);
   const slug = report.assets.find((a) => a.id === "enemy-slug")!;
   assert.equal(slug.checks.find((c) => c.name === "pixels_in_palette")!.pass, false);
-  assert.equal(slug.numbers.offPaletteShare, 64 / 128); // 64 of 128 opaque px off-palette
+  assert.equal(slug.numbers.offPaletteShare, 64 / 128);
 });
 
 test("gate fails when the asset palette is not a subset of the locked palette", () => {
   const manifest = goodManifest();
-  manifest.assets[1].palette = ["#1a1c2c", "#123456"];
+  manifest.assets[1].palette = [DARK, "#123456"];
   const report = runGate(writeRepo(manifest, goodFiles()));
   assert.equal(report.assets.find((a) => a.id === "enemy-slug")!.checks.find((c) => c.name === "palette_subset")!.pass, false);
   assert.equal(report.ok, false);
 });
 
-test("gate fails on a wrong declared size and on sizes that are not grid multiples", () => {
-  const wrongSize = goodManifest();
-  wrongSize.assets[0].size = { w: 60, h: 16 }; // real is 64x16
-  const r1 = runGate(writeRepo(wrongSize, goodFiles()));
+test("gate fails unless the file is exactly frames × size (declared per frame)", () => {
+  const wrongW = goodManifest();
+  wrongW.assets[0].size = { w: 15, h: 16 }; // 15 × 4 = 60 ≠ 64
+  const r1 = runGate(writeRepo(wrongW, goodFiles()));
   assert.equal(r1.assets.find((a) => a.id === "player")!.checks.find((c) => c.name === "size")!.pass, false);
   assert.equal(r1.ok, false);
 
+  const wrongH = goodManifest();
+  wrongH.assets[0].size = { w: 16, h: 15 };
+  const r2 = runGate(writeRepo(wrongH, goodFiles()));
+  assert.equal(r2.assets.find((a) => a.id === "player")!.checks.find((c) => c.name === "size")!.pass, false);
+
+  const noFrames = goodManifest();
+  delete noFrames.assets[0].frames; // single frame: file must be 16x16, is 64x16
+  const r3 = runGate(writeRepo(noFrames, goodFiles()));
+  assert.equal(r3.assets.find((a) => a.id === "player")!.checks.find((c) => c.name === "size")!.pass, false);
+});
+
+test("gate applies the grid check to the frame size, not the whole strip", () => {
   const oddGrid = goodManifest();
-  oddGrid.grid = { w: 5, h: 5 }; // 64x16 is not a 5-multiple
-  const r2 = runGate(writeRepo(oddGrid, goodFiles()));
+  oddGrid.grid = { w: 5, h: 5 }; // frame 16x16 is not a 5-multiple; the 64x16 strip isn't either
+  const r1 = runGate(writeRepo(oddGrid, goodFiles()));
+  assert.equal(r1.assets.find((a) => a.id === "player")!.checks.find((c) => c.name === "grid")!.pass, false);
+
+  // grid 8: the strip 64x16 divides, but the frame 16x16 does too — both pass here; use 32 to separate them
+  const grid32 = goodManifest();
+  grid32.grid = { w: 32, h: 16 }; // strip width 64 divides by 32, frame width 16 does not → must fail
+  const r2 = runGate(writeRepo(grid32, goodFiles()));
   assert.equal(r2.assets.find((a) => a.id === "player")!.checks.find((c) => c.name === "grid")!.pass, false);
   assert.equal(r2.ok, false);
 });
 
 test("gate fails when the frame count does not divide the strip width", () => {
   const manifest = goodManifest();
-  manifest.assets[0].frames = 5; // 64/5 not integer
+  manifest.assets[0].frames = 5;
   const report = runGate(writeRepo(manifest, goodFiles()));
   assert.equal(report.assets.find((a) => a.id === "player")!.checks.find((c) => c.name === "frames")!.pass, false);
   assert.equal(report.ok, false);
@@ -244,16 +271,38 @@ test("gate fails on unknown and self anchors", () => {
 });
 
 test("gate fails on unlisted files under assets/ and missing manifest paths", () => {
-  const files: Record<string, Uint8Array | string> = { ...goodFiles(), "assets/sprites/rogue.png": encodePng(frame0Sprite("#a7f070")) };
+  const files: Record<string, Uint8Array | string> = { ...goodFiles(), "assets/sprites/rogue.png": encodePng(frame0Sprite("#99aabb")) };
   const report = runGate(writeRepo(goodManifest(), files));
   assert.deepEqual(report.files.unlisted, ["assets/sprites/rogue.png"]);
   assert.equal(report.ok, false);
 
   const manifest = goodManifest();
-  manifest.assets[1].path = "assets/sprites/vapor.png"; // declared, absent
+  manifest.assets[1].path = "assets/sprites/vapor.png";
   const r2 = runGate(writeRepo(manifest, goodFiles()));
   assert.deepEqual(r2.files.missing, ["assets/sprites/vapor.png"]);
   assert.equal(r2.ok, false);
+});
+
+test("gate rejects manifest paths that escape assets/ instead of reading outside the repo", () => {
+  const outside = path.join(tmpdir(), `artgate-outside-${process.pid}.png`);
+  writeFileSync(outside, encodePng(frame0Sprite(DARK)));
+  const manifest = goodManifest();
+  manifest.assets[1].path = "assets/../../../artgate-outside.png"; // schema-legal, escapes after normalization
+  const report = runGate(writeRepo(manifest, goodFiles()));
+  const slug = report.assets.find((a) => a.id === "enemy-slug")!;
+  assert.equal(slug.checks.find((c) => c.name === "path_safe")!.pass, false);
+  assert.equal(slug.pass, false);
+  assert.ok(!report.files.missing.includes(manifest.assets[1].path), "unsafe path must not be probed on disk");
+  assert.equal(report.ok, false);
+});
+
+test("gate reports symlinks under assets/ as failures instead of crashing on loops", () => {
+  const dir = writeRepo(goodManifest(), goodFiles());
+  symlinkSync(path.join(dir, "assets/sprites/player.png"), path.join(dir, "assets/sprites/linked.png"));
+  symlinkSync(path.join(dir, "assets/loop.png"), path.join(dir, "assets/loop.png")); // self-loop
+  const report = runGate(dir);
+  assert.deepEqual(report.files.symlinks.sort(), ["assets/loop.png", "assets/sprites/linked.png"]);
+  assert.equal(report.ok, false);
 });
 
 test("gate fails on duplicate asset ids and on PNG assets without a declared size", () => {
@@ -298,17 +347,16 @@ test("gate reports a missing or unreadable manifest without throwing", () => {
 });
 
 test("gate computes anchor drift against the anchor's frame 0 when sizes match, null otherwise", () => {
-  // enemy frame 0 body shifted down 4 rows: 64 of 256 pixels differ from player frame 0
   const shifted: Record<string, Uint8Array | string> = {
     ...goodFiles(),
     "assets/sprites/enemy-slug.png": encodePng(
       strip(2, 16, 16, (f, x, y) =>
         f === 0
           ? x >= 4 && x < 12 && y >= 8 && y < 16
-            ? "#ffcd75"
+            ? BODY
             : null
           : x >= 4 && x < 12 && y >= 4 && y < 12
-            ? "#b13e53"
+            ? RED
             : null,
       ),
     ),
@@ -316,12 +364,12 @@ test("gate computes anchor drift against the anchor's frame 0 when sizes match, 
   const slug = runGate(writeRepo(goodManifest(), shifted)).assets.find((a) => a.id === "enemy-slug")!;
   assert.ok(Math.abs((slug.numbers.anchorDrift ?? -1) - 64 / 256) < 1e-9, `anchorDrift ${slug.numbers.anchorDrift}`);
 
-  // mismatched frame size → skipped (null), check passes
+  // frame sizes differ (12x16 vs 16x16) → skipped (null), check passes
   const manifest = goodManifest();
-  manifest.assets[1].size = { w: 24, h: 16 }; // frame 0 is 12x16 vs player's 16x16
+  manifest.assets[1].size = { w: 12, h: 16 };
   const narrow: Record<string, Uint8Array | string> = {
     ...goodFiles(),
-    "assets/sprites/enemy-slug.png": encodePng(strip(2, 12, 16, (_f, x, y) => (x >= 4 && x < 12 && y >= 4 && y < 12 ? "#b13e53" : null))),
+    "assets/sprites/enemy-slug.png": encodePng(strip(2, 12, 16, (_f, x, y) => (x >= 4 && x < 12 && y >= 4 && y < 12 ? RED : null))),
   };
   const slug2 = runGate(writeRepo(manifest, narrow)).assets.find((a) => a.id === "enemy-slug")!;
   assert.equal(slug2.numbers.anchorDrift, null);
