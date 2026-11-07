@@ -109,3 +109,11 @@ test("server refusals surface as BoardError with the server's code", async () =>
   const b = new NaiveBoard(boom, "brd_1");
   await assert.rejects(b.update("crd_1", { status: "done" }), (e: unknown) => e instanceof BoardError && e.code === "missing_note");
 });
+
+test("R4: a card a hosted agent or human owns keeps its wire assignee even if the body starts with the header", async () => {
+  const c = fakeClient(() => card({ assignee: "writer", body: "local-assignee: market-analyst\n\nnot ours" }));
+  const b = new NaiveBoard(c, "brd_1");
+  const seen = await b.get("crd_1");
+  assert.equal(seen.assignee, "writer"); // the platform's assignee outranks the body header
+  assert.equal(seen.body, "local-assignee: market-analyst\n\nnot ours");
+});

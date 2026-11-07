@@ -50,7 +50,7 @@ export interface BoardClient {
 function decode(raw: NaiveCard): BoardCard {
   let assignee = raw.assignee;
   let body = raw.body;
-  if (body.startsWith(HEADER)) {
+  if (assignee === null && body.startsWith(HEADER)) { // wire assignee outranks the header (R4)
     const rest = body.slice(HEADER.length);
     const end = rest.indexOf("\n\n");
     if (end !== -1) {
