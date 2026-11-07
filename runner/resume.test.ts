@@ -11,6 +11,7 @@ import { runAgent } from "./run.ts";
 import { readEvents, rebuildConversation, resumeRun } from "./resume.ts";
 import { listOrphans, orphanAfterMin, orphanStatus, pidAlive } from "./liveness.ts";
 import { SpendLedger } from "./spend.ts";
+import { get, request } from "../tools/approvals/approvals.ts";
 import type { ToolUseBlock } from "./types.ts";
 
 const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), "__fixtures__", "agents");
@@ -111,7 +112,9 @@ test("orphan detection: dead pid, stale heartbeat, live, finished, foreign host,
   const now = new Date();
   const iso = (minAgo: number) => new Date(now.getTime() - minAgo * 60_000).toISOString();
   assert.equal(orphanStatus({ status: "running", pid: dead.pid, host: hostname(), heartbeat_at: iso(0) }, now).orphaned, true);
-  assert.equal(orphanStatus({ status: "running", pid: process.pid, host: hostname(), heartbeat_at: iso(11) }, now).orphaned, true);
+  // A live pid wins over a stale heartbeat: a long tool call or approval wait must not make a
+  // running process look orphaned (review R3 blocking 1). Refusing to resume is the safe side.
+  assert.equal(orphanStatus({ status: "running", pid: process.pid, host: hostname(), heartbeat_at: iso(11) }, now).orphaned, false);
   assert.equal(orphanStatus({ status: "running", pid: process.pid, host: hostname(), heartbeat_at: iso(0) }, now).orphaned, false);
   assert.equal(orphanStatus({ status: "done", pid: dead.pid, host: hostname(), heartbeat_at: iso(60) }, now).orphaned, false);
   assert.equal(orphanStatus({ status: "running", pid: 4711, host: "some-other-host", heartbeat_at: iso(0) }, now).orphaned, false);
@@ -122,7 +125,9 @@ test("orphan detection: dead pid, stale heartbeat, live, finished, foreign host,
   const prev = process.env.STUDIO_ORPHAN_AFTER_MIN;
   try {
     process.env.STUDIO_ORPHAN_AFTER_MIN = "0.01"; // < 1 min: a 5s-old heartbeat is already stale
-    assert.equal(orphanStatus({ status: "running", pid: process.pid, host: hostname(), heartbeat_at: new Date(now.getTime() - 5000).toISOString() }, now).orphaned, true);
+    const stale = { status: "running", pid: 4711, host: "some-other-host", heartbeat_at: new Date(now.getTime() - 5000).toISOString() };
+    assert.equal(orphanStatus(stale, now).orphaned, true);
+    assert.equal(orphanStatus({ ...stale, host: hostname(), pid: process.pid }, now).orphaned, false); // still: live pid wins
     process.env.STUDIO_ORPHAN_AFTER_MIN = "junk";
     assert.equal(orphanAfterMin(), 10);
   } finally {
@@ -248,4 +253,99 @@ test("rebuildConversation replays history, task, messages and notes exactly", ()
   assert.equal(c.turns, 2);
   assert.equal(c.wrapUp, true);
   assert.equal(c.task, "do it");
+});
+
+test("review R3-1: a live run blocked past the heartbeat threshold is not resumable", async () => {
+  const spec = await loadAgent("good-agent", FIX);
+  const runsDir = tmp();
+  const child = crashChild(runsDir, "msg:assistant");
+  assert.equal(child.signal, "SIGKILL");
+  const runId = onlyRun(runsDir);
+  // The reviewer's repro shape: the owning process is alive (this test process adopts the run)
+  // while the heartbeat has gone stale — an approval wait or long tool call does this.
+  const runFile = path.join(runsDir, runId, "run.json");
+  const run = JSON.parse(readFileSync(runFile, "utf8"));
+  run.pid = process.pid;
+  run.host = hostname();
+  run.heartbeat_at = new Date(Date.now() - 11 * 60_000).toISOString();
+  writeFileSync(runFile, JSON.stringify(run, null, 2));
+  await assert.rejects(
+    resumeRun(spec, runId, { provider: new FakeProvider([{ content: [use("submit_result", { answer: "x" }, "s9")] }]), naive: null, runsDir }),
+    /still looks alive/,
+  );
+  assert.equal(readEvents(path.join(runsDir, runId)).some((e) => e.type === "resume"), false); // nothing executed
+});
+
+test("review R3-1a: the heartbeat refreshes on a timer, not only per turn", async () => {
+  const spec = await loadAgent("good-agent", FIX);
+  const runsDir = tmp();
+  // Real clock on purpose: the heartbeat is an unref'd setInterval in runAgent, and node:test
+  // has no fake timers to drive it; 200 ms lets a 40 ms interval fire several times.
+  const { promise: waited, resolve } = Promise.withResolvers<void>();
+  const slow = {
+    label: "slow",
+    complete: async () => {
+      setTimeout(resolve, 200);
+      await waited;
+      return { content: [use("submit_result", { answer: "ok" }, "s1")], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 }, cost_micro_usd: 1000, request_id: "x", model: "slow" };
+    },
+  };
+  const r = await runAgent(spec, { task: "t", provider: slow, naive: null, runsDir, heartbeatMs: 40 });
+  assert.equal(r.status, "done");
+  const run = JSON.parse(readFileSync(path.join(runsDir, r.run_id, "run.json"), "utf8"));
+  // Without the timer the heartbeat only moved at loop top, ~0 ms after started_at.
+  assert.ok(Date.parse(run.heartbeat_at) - Date.parse(run.started_at) >= 80, `heartbeat ${run.heartbeat_at} vs start ${run.started_at}`);
+});
+
+test("review R3-2: resume expires pending approvals of the crashed run, not other runs'", async () => {
+  const spec = await loadAgent("good-agent", FIX);
+  const runsDir = tmp();
+  const child = crashChild(runsDir, "approval:workspace_write"); // crash while the ask tool waits
+  assert.equal(child.signal, "SIGKILL");
+  const runId = onlyRun(runsDir);
+  // An operator queued the request; nobody answered before the crash. Another run's pending must survive.
+  const approvalsFile = path.join(runsDir, "approvals.jsonl");
+  const pendingId = request({ agent: "good-agent", run_id: runId, tool: "workspace_write", input: { path: "x", content: "y" } }, approvalsFile);
+  const otherId = request({ agent: "good-agent", run_id: "some-other-run", tool: "workspace_write", input: {} }, approvalsFile);
+
+  const fake = new FakeProvider([{ content: [use("submit_result", { answer: "ok" }, "s2")] }]);
+  const r = await resumeRun(spec, runId, { provider: fake, naive: null, runsDir, approver: async () => true });
+  assert.equal(r.status, "done");
+  assert.equal(get(pendingId, approvalsFile)?.state, "expired");
+  assert.equal(get(otherId, approvalsFile)?.state, "pending");
+  const ledgerLines = readFileSync(path.join(runsDir, "ledger.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  const entry = ledgerLines.find((e: { request_id?: string }) => e.request_id === pendingId);
+  assert.equal(entry?.decision, "expired");
+  assert.equal(entry?.who, "run ended");
+});
+
+test("review R3-4: resume keeps the original run cap; --max-usd can only lower it", async () => {
+  const spec = await loadAgent("good-agent", FIX); // spec cap would be 500_000 micro-USD
+  const runsDir = tmp();
+  const child = crashChild(runsDir, "msg:assistant"); // spent 1000 under a 2000 cap
+  assert.equal(child.signal, "SIGKILL");
+  const runId = onlyRun(runsDir);
+  const runFile = path.join(runsDir, runId, "run.json");
+  const run = JSON.parse(readFileSync(runFile, "utf8"));
+  run.limits = { ...run.limits, run_cap: 2000 };
+  writeFileSync(runFile, JSON.stringify(run, null, 2));
+
+  // Without --max-usd the cap stays 2000: one more call at 1500 exhausts it (headroom allows
+  // the call pre-flight, then the next loop-top stops). With the loosened spec cap it would end "done".
+  const r = await resumeRun(spec, runId, { provider: new FakeProvider([{ content: [use("workspace_read", { path: "." }, "r1")] }], 1500), naive: null, runsDir });
+  assert.equal(r.status, "budget_exceeded");
+  assert.equal(JSON.parse(readFileSync(runFile, "utf8")).limits.run_cap, 2000);
+
+  // --max-usd above the original cap does not raise it (separate crashed run).
+  const runsDir2 = tmp();
+  const child2 = crashChild(runsDir2, "msg:assistant");
+  assert.equal(child2.signal, "SIGKILL");
+  const runId2 = onlyRun(runsDir2);
+  const runFile2 = path.join(runsDir2, runId2, "run.json");
+  const run2 = JSON.parse(readFileSync(runFile2, "utf8"));
+  run2.limits = { ...run2.limits, run_cap: 2000 };
+  writeFileSync(runFile2, JSON.stringify(run2, null, 2));
+  const r2 = await resumeRun(spec, runId2, { provider: new FakeProvider([{ content: [use("submit_result", { answer: "ok" }, "s2")] }], 1500), naive: null, runsDir: runsDir2, runCapUsd: 5 });
+  assert.equal(r2.status, "done");
+  assert.equal(JSON.parse(readFileSync(runFile2, "utf8")).limits.run_cap, 2000); // spec cap not restored
 });

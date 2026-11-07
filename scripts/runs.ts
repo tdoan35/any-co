@@ -1,19 +1,21 @@
 // List and resume local runs (crash recovery, AGENTS.md rule 7).
 //   npm run runs -- orphans                       list runs stuck at "running" whose process is gone
-//   npm run runs -- resume <run_id> [--max-usd N] [--model id] [--approve-all]
+//   npm run runs -- resume <run_id> [--max-usd N] [--model id] [--approve-all] [--approvals tty|queue] [--approval-timeout-min N]
 import { readFileSync } from "node:fs";
-import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { loadAgent } from "../runner/load.ts";
 import { naiveClient, providerFor } from "../runner/providers.ts";
-import { RUNS_DIR, type Approver } from "../runner/run.ts";
+import { RUNS_DIR } from "../runner/run.ts";
 import { resumeRun } from "../runner/resume.ts";
 import { listOrphans } from "../runner/liveness.ts";
+import { approvalFlags, buildApprover } from "./approver.ts";
 
-/** Shared by `npm run agent -- --resume <run_id>`: load the run's spec and continue it. */
-export async function resumeCli(runId: string, o: { maxUsd?: number; model?: string; approveAll?: boolean }): Promise<void> {
+/** Shared by `npm run agent -- --resume <run_id>`: load the run's spec and continue it.
+ * `flags` carries the approval CLI flags (approve-all / approvals / approval-timeout-min), so a
+ * resumed run goes through the same approval gate and ledger as a fresh one (rule 4). */
+export async function resumeCli(runId: string, o: { maxUsd?: number; model?: string; flags: Record<string, unknown> }): Promise<void> {
   let agent: string;
   try {
     agent = JSON.parse(readFileSync(path.join(RUNS_DIR, runId, "run.json"), "utf8")).agent;
@@ -24,16 +26,7 @@ export async function resumeCli(runId: string, o: { maxUsd?: number; model?: str
   const spec = await loadAgent(agent);
   const naive = process.env.NAIVE_API_KEY ? naiveClient() : null;
   const provider = providerFor(spec, naive, o.model);
-  // Approval gate for `ask` tools: interactive y/N on a terminal, deny otherwise.
-  const approver: Approver = o.approveAll
-    ? async () => true
-    : async (req) => {
-        if (!process.stdin.isTTY) return false;
-        const rl = createInterface({ input: process.stdin, output: process.stdout });
-        const a = await rl.question(`\n[approval] ${req.agent} wants ${req.tool} ${JSON.stringify(req.input).slice(0, 400)}\nallow? [y/N] `);
-        rl.close();
-        return a.trim().toLowerCase() === "y";
-      };
+  const approver = buildApprover(approvalFlags(o.flags));
   console.log(`resuming ${runId} (${agent}) on ${provider.label}`);
   let r;
   try {
@@ -55,6 +48,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       model: { type: "string" },
       "max-usd": { type: "string" },
       "approve-all": { type: "boolean", default: false },
+      approvals: { type: "string" }, // tty | queue
+      "approval-timeout-min": { type: "string" },
     },
   });
   if (positionals[0] === "orphans") {
@@ -71,10 +66,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     await resumeCli(positionals[1], {
       maxUsd: values["max-usd"] !== undefined ? Number(values["max-usd"]) : undefined,
       model: values.model,
-      approveAll: values["approve-all"],
+      flags: values,
     });
   } else {
-    console.error("usage: npm run runs -- orphans | resume <run_id> [--max-usd N] [--model id] [--approve-all]");
+    console.error("usage: npm run runs -- orphans | resume <run_id> [--max-usd N] [--model id] [--approve-all] [--approvals tty|queue] [--approval-timeout-min N]");
     process.exit(2);
   }
 }

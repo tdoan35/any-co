@@ -3,6 +3,8 @@
 // same run id, workspace and spend. Anything that cannot be rebuilt exactly is refused.
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { expireForRun } from "../tools/approvals/approvals.ts";
+import { microUsd } from "./spec.ts";
 import { specHash } from "./load.ts";
 import { runAgent, RUNS_DIR, type Approver, type RunResult } from "./run.ts";
 import { SpendLedger } from "./spend.ts";
@@ -160,17 +162,31 @@ export async function resumeRun(spec: AgentSpec, runId: string, opts: ResumeOpti
   }
   const convo = rebuildConversation(events);
   const repaired = repairInterruptedTurn(convo.messages, events);
+  // Approvals the crash left pending belong to calls that will never run (they get the crash
+  // notice above), so they expire now — ledgered as "run ended", never as an intervention.
+  const approvalsFile = process.env.STUDIO_APPROVALS_FILE ?? path.join(runsDir, "approvals.jsonl");
+  const expired = expireForRun(runId, approvalsFile, path.join(runsDir, "ledger.jsonl"));
   const ledger = new SpendLedger(path.join(runsDir, "spend.jsonl"));
   const mine = ledger.entries().filter((e) => e.run_id === runId);
   const spent = mine.reduce((s, e) => s + e.micro_usd, 0);
   const maxCallCost = mine.filter((e) => e.kind === "model").reduce((m, e) => Math.max(m, e.micro_usd), 0);
-  opts.log?.(`resuming from turn ${convo.turns}: ${verdict.reason}${repaired.length ? `; answered as crashed: ${repaired.join(", ")}` : ""}`);
+  // The run cap continues from run.json; --max-usd can only lower it (otherwise a run started
+  // at --max-usd 0.25 would resume under the full spec cap).
+  const limits = run.limits as { run_cap?: unknown } | undefined;
+  const origCap = typeof limits?.run_cap === "number" ? limits.run_cap : undefined;
+  const capMicro = opts.runCapUsd !== undefined ? Math.min(origCap ?? Infinity, microUsd(opts.runCapUsd)) : origCap;
+  opts.log?.(
+    `resuming from turn ${convo.turns}: ${verdict.reason}` +
+      `${repaired.length ? `; answered as crashed: ${repaired.join(", ")}` : ""}` +
+      `${expired.length ? `; expired ${expired.length} pending approval${expired.length > 1 ? "s" : ""} (run ended)` : ""}` +
+      (capMicro !== undefined ? `; cap $${(capMicro / 1e6).toFixed(4)}` : ""),
+  );
   return runAgent(spec, {
     task: convo.task,
     provider: opts.provider,
     naive: opts.naive,
     approver: opts.approver,
-    runCapUsd: opts.runCapUsd,
+    runCapUsd: capMicro !== undefined ? capMicro / 1e6 : undefined,
     runsDir,
     log: opts.log,
     onEvent: opts.onEvent,

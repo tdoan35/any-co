@@ -79,6 +79,8 @@ export interface RunOptions {
   onEvent?: (type: string, data: Record<string, unknown>) => void;
   /** Continue a crashed run under the same run id, workspace and spend. Built by resumeRun(). */
   resume?: ResumeState;
+  /** Heartbeat refresh interval for run.json liveness (default 60 s; also refreshed per turn). */
+  heartbeatMs?: number;
 }
 
 /** State carried over from a crashed run; only runner/resume.ts builds one. */
@@ -145,12 +147,15 @@ export async function runAgent(spec: AgentSpec, opts: RunOptions): Promise<RunRe
     limits, started_at: rs?.startedAt ?? new Date().toISOString(),
   };
   const saveRun = () => writeFileSync(path.join(dir, "run.json"), JSON.stringify({ ...meta, ...state, dir: undefined }, null, 2));
-  /** Liveness: run.json is what `runs orphans` reads; refreshed at least once per turn. */
+  /** Liveness: run.json is what `runs orphans` reads; refreshed per turn AND on a timer, so a
+ *  stale heartbeat really means the process is gone even during a long tool call or approval wait. */
   const beat = () => {
     state.heartbeat_at = new Date().toISOString();
     saveRun();
   };
   saveRun();
+  const heartbeat = setInterval(beat, opts.heartbeatMs ?? 60_000);
+  heartbeat.unref?.(); // the run's own lifecycle decides when the process exits, not this timer
   if (rs) event("resume", { from_turn: rs.turns, reason: rs.reason, spent_micro_usd: rs.spentMicroUsd });
   else event("start", { ...meta, system: spec.system, tools: tools.map((t) => t.name), history: opts.history ?? [] });
 
@@ -298,6 +303,7 @@ export async function runAgent(spec: AgentSpec, opts: RunOptions): Promise<RunRe
   }
 
   if (state.output !== null) writeFileSync(path.join(dir, "output.json"), JSON.stringify(state.output, null, 2));
+  clearInterval(heartbeat);
   Object.assign(state, { finished_at: new Date().toISOString() });
   saveRun();
   event("end", { status: state.status, spent_micro_usd: state.spent_micro_usd, turns: state.turns, error: state.error });

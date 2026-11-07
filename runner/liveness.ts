@@ -39,16 +39,20 @@ export interface OrphanVerdict {
 }
 
 /**
- * A run is orphaned when its status is "running" and its heartbeat is older than the
- * threshold, or its pid is not alive on this host. Pids are per-host: a run from another
- * host (shared runs dir) is judged by heartbeat only. Finished runs are never orphaned.
- * The heartbeat check runs first so pid reuse and old-format runs (no liveness fields)
+ * A run is orphaned when its status is "running" and it is provably not executing: on this
+ * host, a live pid means the run is alive even with a stale heartbeat (a long tool call or an
+ * approval wait can outlast the threshold — refusing to resume is the safe side, and pid
+ * reuse only ever causes a false "alive"). Otherwise a heartbeat older than the threshold,
+ * or a dead pid on this host, means orphaned. Pids are per-host: a run from another host
+ * (shared runs dir) is judged by heartbeat only. Finished runs are never orphaned; runs with
+ * no liveness fields at all are judged by the heartbeat (missing = stale), so old-format runs
  * still get caught.
  */
 export function orphanStatus(run: RunFileLike, now = new Date()): OrphanVerdict {
   if (run.status !== "running") return { orphaned: false };
   const hb = typeof run.heartbeat_at === "string" ? Date.parse(run.heartbeat_at) : NaN;
   const ageMin = Number.isFinite(hb) ? (now.getTime() - hb) / 60_000 : Infinity;
+  if (run.host === hostname() && pidAlive(run.pid)) return { orphaned: false, heartbeat_age_min: ageMin };
   if (ageMin > orphanAfterMin()) {
     return {
       orphaned: true,
