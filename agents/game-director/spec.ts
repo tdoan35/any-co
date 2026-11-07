@@ -14,7 +14,7 @@ const Pitch = z
     session_minutes: z.number().int().min(5).max(180).describe("Length of one run or session"),
     hook: z.string().min(20).max(250).describe("What a 5-second GIF of this game shows"),
     wants_addressed: z
-      .array(z.object({ want: z.string().describe("A want statement copied exactly from the Player Voice findings"), how: z.string().max(250) }).strict())
+      .array(z.object({ want: z.string().describe("The Player Voice finding's id from the task, e.g. \"W3\" (preferred), or its whole statement copied exactly. Never a shortened or reworded statement."), how: z.string().max(250) }).strict())
       .min(2)
       .max(4),
     loves_kept: z.array(z.string().max(200)).min(1).max(3).describe("Player Voice loves this pitch keeps"),
