@@ -1,17 +1,17 @@
 import { z } from "zod";
 import { defineAgent } from "../../runner/spec.ts";
 
-// Builds and staging are local work; anything that leaves the machine (butler/steamcmd
-// push, page edits) is a send: it needs the operator's go named in the task, and every
-// send is logged. There is no upload capability yet — status says so honestly.
+// Builds and staging are local work. Sends that leave the machine go through gated tools:
+// itch_push is ask-gated (the operator approves each push, dry-run is the default) and every
+// decision lands in the approval queue and the ledger. Steam uploads stay staged-only for now.
 export default defineAgent({
   name: "build-release",
-  description: "Eng: runs web and Windows builds through build.sh, stages every release artifact, and prepares (gated) itch and Steam uploads.",
+  description: "Eng: runs web and Windows builds through build.sh, stages every release artifact, and pushes to itch through the operator-gated itch_push.",
   dept: "eng",
   runner: "local",
   model: "z-ai/glm-5.3",
   budget: { cap_usd: 4, max_task_usd: 1, period: "day" },
-  tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow", web_fetch: "allow" },
+  tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow", web_fetch: "allow", itch_push: "ask", itch_status: "allow" },
   output_schema: z
     .object({
       build_id: z.string().min(1).max(60).describe("From dist/build_id, exactly"),
@@ -35,7 +35,7 @@ export default defineAgent({
               channel: z.enum(["itch-web", "itch-windows", "steam-windows", "studio-site"]),
               dist_path: z.string().max(200),
               status: z.enum(["ready", "sent", "blocked"]),
-              command: z.string().max(300).describe("The exact command the operator (or a future gated tool) would run, or '' if blocked"),
+              command: z.string().max(300).describe("The exact command the operator would run for channels without a gated tool, or 'itch_push <dir> <target>' when it used the gated tool, or '' if blocked"),
               blocker: z.string().max(200).optional().describe("Why blocked: missing go-ahead, missing tool, missing page draft"),
             })
             .strict(),

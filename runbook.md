@@ -31,3 +31,16 @@ Unattended runs (`--approvals queue`, the default without a TTY) block on this q
 after `--approval-timeout-min` minutes (default 30). Every decision — approve, deny, expire,
 `--approve-all` — is written to the ledger as an `approval` entry; human approve/deny counts as an
 intervention in `ledger_recent`.
+
+## Ship a build to itch
+butler is not installed on this machine by default. The gated tool `itch_push` (build-release)
+needs `BUTLER_BIN` (default `butler` on PATH) and `BUTLER_API_KEY` in env — the key is never
+put in argv, results, or the ledger. The agent dry-runs first; a real push (`dry_run: false`)
+waits on the approval queue:
+
+    npm run approvals -- list             # pending request shows dir, target, build_id
+    npm run approvals -- show <id>
+    npm run approvals -- approve <id> --note "go"
+
+Declined or timed out (`--approval-timeout-min`, default 30) = no push; every decision is in the
+ledger. `itch_status` checks a channel's latest pushes without gating.
