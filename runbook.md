@@ -3,6 +3,13 @@
 For overnight operations. Fill in as the harness takes shape.
 
 ## Start the studio
+`npm run studio` — the dispatcher polls the studio board and runs local agents on due cards:
+one card per agent at a time, `blocked_by` for order, `--max-parallel N` (default 2),
+`--poll-s S` (default 10), `--once` for a single pass (cron), `--approve-all` to pass the ask-gate.
+Board backend: `STUDIO_BOARD=local` (default; `runs/board.jsonl`, override `STUDIO_BOARD_FILE`) or
+`STUDIO_BOARD=naive` (needs `NAIVE_API_KEY` + `STUDIO_BOARD_REF` = the Studio Head agent's `brd_`/`agt_`
+id). Cards come from the Studio Head (`board_create`) or by hand; done notes carry run id and spend.
+Restart-safe: on startup a `doing` card with no live run is requeued to `todo` with a comment.
 ## Check health (what "fine" looks like)
 - `npm run runs -- orphans` prints `no orphaned runs`: every run at status "running" has a live
   pid on this host and a heartbeat under 10 min old (`STUDIO_ORPHAN_AFTER_MIN` to change).

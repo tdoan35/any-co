@@ -28,6 +28,7 @@
     "window:live": "node window/scripts/live.mjs",
     "window:live:electron": "node window/scripts/live.mjs electron",
     "ledger": "node --import tsx tools/ledger/ledger.ts",
+    "studio": "node --env-file-if-exists=.env --import tsx scripts/studio-loop.ts",
     "approvals": "node --import tsx tools/approvals/approvals.ts",
     "eval:greenlight-chair": "node --env-file-if-exists=.env --import tsx scripts/eval-greenlight-chair.ts",
     "new-game": "node --import tsx tools/gamerepo/new-game.ts",
