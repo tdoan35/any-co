@@ -1,5 +1,6 @@
 // Run one agent locally on one task.
 //   npm run agent -- <name> --task "..." | --task-file path   [--model id] [--max-usd 0.25] [--approve-all]
+//   npm run agent -- --resume <run_id>   [--max-usd N]        continue a crashed run (see scripts/runs.ts)
 // Output goes to runs/<run_id>/ (gitignored). `touch runs/KILL` stops every run before its next call.
 import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
@@ -7,6 +8,7 @@ import { parseArgs } from "node:util";
 import { loadAgent } from "../runner/load.ts";
 import { naiveClient, providerFor } from "../runner/providers.ts";
 import { runAgent, type Approver } from "../runner/run.ts";
+import { resumeCli } from "./runs.ts";
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
@@ -16,12 +18,23 @@ const { values, positionals } = parseArgs({
     model: { type: "string" },
     "max-usd": { type: "string" },
     "approve-all": { type: "boolean", default: false },
+    resume: { type: "string" },
   },
 });
+// Crash recovery: continue an orphaned run (same id, workspace, spend). scripts/runs.ts owns the flow.
+if (values.resume) {
+  await resumeCli(values.resume, {
+    maxUsd: values["max-usd"] !== undefined ? Number(values["max-usd"]) : undefined,
+    model: values.model,
+    approveAll: values["approve-all"],
+  });
+  process.exit(0); // resumeCli exits with the run's status; this is unreachable
+}
+
 const name = positionals[0];
 const task = values.task ?? (values["task-file"] ? readFileSync(values["task-file"], "utf8") : undefined);
 if (!name || !task) {
-  console.error('usage: npm run agent -- <name> --task "..." | --task-file path [--model id] [--max-usd N] [--approve-all]');
+  console.error('usage: npm run agent -- <name> --task "..." | --task-file path [--model id] [--max-usd N] [--approve-all] [--resume <run_id>]');
   process.exit(2);
 }
 
