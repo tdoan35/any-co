@@ -29,7 +29,8 @@
     "ledger": "node --import tsx tools/ledger/ledger.ts",
     "approvals": "node --import tsx tools/approvals/approvals.ts",
     "eval:greenlight-chair": "node --env-file-if-exists=.env --import tsx scripts/eval-greenlight-chair.ts",
-    "new-game": "node --import tsx tools/gamerepo/new-game.ts"
+    "new-game": "node --import tsx tools/gamerepo/new-game.ts",
+    "art": "node --import tsx tools/art/art.ts"
   },
   "dependencies": {
     "@usenaive-sdk/managed-agents": "^0.12.1",
