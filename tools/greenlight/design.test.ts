@@ -73,6 +73,14 @@ test("designTask builds the design brief from the real Chair output shape", () =
   // and a doc that brings a rejected title back is flagged using the embedded pick
   const back = goodDoc.replace("One paragraph about the chosen game.", "One paragraph, borrowing from Beta Board.");
   assert.match(checkDesignDoc(back, blocks[0], goodOut).join("\n"), /rejected pitch "Beta Board" appears/);
+  // T13: a numbered brief and a want cited by id resolve to the full sized line
+  writeFileSync(
+    path.join(root, "pv", "handoff-pitches.md"),
+    ["## Gap One", "Wants:", "- [W1] I want to plan without a clock (57% of 120 negative reviews of appid 1 mention \"timer\") — pressure kills the fun.", ""].join("\n"),
+  );
+  writeFileSync(path.join(root, "gd", "output.json"), JSON.stringify({ pitches: [{ ...pitch, wants_addressed: [{ want: "W1", how: "Untimed placement" }] }] }));
+  assert.match(designTask(chairDir, root), /^- \[W1\] I want to plan without a clock \(57% of 120 negative reviews/m);
+  writeFileSync(path.join(root, "gd", "output.json"), JSON.stringify({ pitches: [pitch, { ...pitch, working_title: "Beta Board" }] }));
   // a pick that is not in the final round is a hard error, not a guess
   writeFileSync(path.join(root, "chair", "output.json"), JSON.stringify({ ...chairOut, pick: { ...chairOut.pick, working_title: "No Such Pitch" } }));
   assert.throws(() => designTask(chairDir, root), /No Such Pitch/);
