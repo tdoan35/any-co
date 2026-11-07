@@ -66,6 +66,25 @@ export const CAPABILITIES = {
     local: true,
     note: "Local: per-run clone at runs/<id>/workspace/game, branch agent/<name>; only the Tech Lead merges. Hosted: the harness clones the repo into the agent's computer.",
   },
+  // ----- gated sends (T7): every send is ask-gated by the spec and ledgered via the approval gate -----
+  itch_push: {
+    summary: "Push a built dist/ channel to itch.io with butler (dry-run by default; a real push needs the operator's approval)",
+    naive: ["bash"],
+    local: true,
+    note: "Env only: BUTLER_BIN (default butler) + BUTLER_API_KEY; butler reads the key from env, so it never appears in argv or results.",
+  },
+  itch_status: {
+    summary: "Read-only butler status of an itch channel",
+    naive: ["bash"],
+    local: true,
+    note: "Env only: BUTLER_BIN + BUTLER_API_KEY.",
+  },
+  email_send: {
+    summary: "Send one outreach email from the studio's Naïve identity inbox",
+    naive: [],
+    local: true,
+    note: "SDK emails.send: needs NAIVE_EMAIL_IDENTITY_ID + NAIVE_EMAIL_INBOX_ID in env; STUDIO_EMAIL_BLOCKLIST refuses addresses/domains. No reply_to in the SDK shape.",
+  },
 } as const satisfies Record<string, Capability>;
 
 export type CapabilityName = keyof typeof CAPABILITIES;

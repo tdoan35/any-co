@@ -107,3 +107,8 @@ Re-check https://usenaive.ai/docs/llms.txt when in doubt (`vetta.sh/docs` redire
 - Harness choice matters (pi / vetta / claude_code / hermes). A typed-output issue was
   reported on the `vetta` harness; verify structured output on the one you pick.
 - Docs are inconsistent on whether SDK money fields are numbers or strings; examples use ints.
+- **Email send exists but needs a provisioned identity** (checked Nov 7 in the SDK types):
+  `client.emails.send(identityId, inboxId, { to: string[], subject, text })` sends from an
+  inbox on a Naïve-verified domain and returns `{ accepted, from, to, sent_at }`. There is no
+  `reply_to` in the send shape. The local `email_send` tool takes the identity/inbox ids from
+  env (`NAIVE_EMAIL_IDENTITY_ID`, `NAIVE_EMAIL_INBOX_ID`) until the studio provisions them.

@@ -1,7 +1,7 @@
 // Local implementations of the capabilities in registry.ts.
 import { execFile } from "node:child_process";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { isIP } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -264,6 +264,9 @@ const ledgerTools: Record<string, ToolImpl> = {
     async run({ limit }, ctx) {
       const all = ledgerRead(ctx.ledgerFile ?? LEDGER_FILE);
       const counts = all.reduce<Record<string, number>>((a, e) => ((a[e.kind] = (a[e.kind] ?? 0) + 1), a), {});
+      // A human approve/deny on the approval gate is a human intervention (rule 4); auto-approve and expiry are not.
+      const human = all.filter((e) => e.kind === "approval" && e.decision !== "expired" && !e.who.startsWith("auto")).length;
+      counts.intervention = (counts.intervention ?? 0) + human;
       return { content: JSON.stringify({ total: all.length, counts, recent: all.slice(-limit).reverse() }) };
     },
   },
@@ -458,7 +461,20 @@ async function gameCloneDir(ctx: ToolContext, repo?: string): Promise<{ clone: s
     const b = await execText("git", ["-C", clone, "checkout", "--quiet", "-b", branch], 30_000);
     if (b.code !== 0) throw new Error(`git checkout -b failed: ${b.err}`);
   }
+  await copyContracts(ctx.workspace);
   return { clone, branch, src };
+}
+
+/** The harness contracts (docs/contracts/) the game must implement, copied read-only into the run's workspace at
+ *  contracts/ so game agents can read them with workspace_read. They live in this repo, which game tools can't see. */
+export const CONTRACTS_DIR = path.join(ROOT, "docs", "contracts");
+async function copyContracts(workspace: string) {
+  const dst = path.join(workspace, "contracts");
+  await mkdir(dst, { recursive: true });
+  for (const f of await readdir(CONTRACTS_DIR)) {
+    if (!/\.(md|json)$/.test(f)) continue;
+    await writeFile(path.join(dst, f), await readFile(path.join(CONTRACTS_DIR, f)));
+  }
 }
 
 const gameClone: ToolImpl = {
@@ -471,7 +487,10 @@ const gameClone: ToolImpl = {
       const { clone, branch, src } = await gameCloneDir(ctx, repo);
       const head = await execText("git", ["-C", clone, "rev-parse", "--short", "HEAD"], 15_000);
       return {
-        content: JSON.stringify({ game: src.name, clone: path.relative(ctx.workspace, clone), branch, head: head.out.trim(), main: "main" }),
+        content: JSON.stringify({
+          game: src.name, clone: path.relative(ctx.workspace, clone), branch, head: head.out.trim(), main: "main",
+          contracts: "contracts/ in your workspace (read with workspace_read): the harness contracts the game must implement, start at contracts/README.md. Read-only copies: implement them, never rewrite them in the game repo.",
+        }),
       };
     } catch (e) {
       return { content: clip(errText(e), 2000), is_error: true };
@@ -529,7 +548,9 @@ const gameExec: ToolImpl = {
       if (!existsSync(cwd)) throw new Error("no clone yet; call game_clone first");
       const [cmd, ...args] = command;
       const { promise, resolve } = Promise.withResolvers<{ out: string; err: string; code: number }>();
-      execFile(cmd, args, { cwd, timeout: (timeout_s ?? 120) * 1000, maxBuffer: 32 * 1024 * 1024 }, (error, stdout, stderr) => {
+      // ANYCO_AGENT lets the game repo's pre-receive hook enforce the single-merger rule (tools/gamerepo/new-game.ts).
+      const env = { ...process.env, ANYCO_AGENT: ctx.agent ?? "unknown" };
+      execFile(cmd, args, { cwd, env, timeout: (timeout_s ?? 120) * 1000, maxBuffer: 32 * 1024 * 1024 }, (error, stdout, stderr) => {
         resolve({ out: String(stdout), err: String(stderr), code: typeof error?.code === "number" ? error.code : error ? 1 : 0 });
       });
       const r = await promise;
@@ -764,12 +785,122 @@ const artGenerate: ToolImpl = {
       if (i.postprocess && (i.postprocess.snap || i.postprocess.lock || i.postprocess.outline))
         postprocess = await applyArtPostprocess(ctx.workspace, i.postprocess, result.images);
       return { content: JSON.stringify({ ...result, postprocess }), cost_micro_usd: result.cost_micro_usd };
+// ---------- itch_push / itch_status: butler sends (ask-gated by spec) ----------
+// butler reads BUTLER_API_KEY from env itself, so the key is never in argv, results, or the ledger.
+
+const ITCH_TARGET = /^[a-z0-9][a-z0-9-]{1,39}\/[a-z0-9][a-z0-9-]{1,39}:[a-z0-9][a-z0-9-]{0,19}$/;
+
+/** Refuse symlinks anywhere inside the tree butler is about to upload. */
+async function assertNoSymlinks(dir: string) {
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    if (entry.isSymbolicLink()) throw new Error(`symlink "${entry.name}" inside the push dir is not allowed`);
+    const p = path.join(dir, entry.name);
+    if (entry.isDirectory()) await assertNoSymlinks(p);
+  }
+}
+
+/** Run butler; a missing binary is a named error, not an empty spawn failure. Butler gets a
+ *  minimal env (it only needs PATH/HOME + its key) and its output is redacted: the key value
+ *  never reaches the tool result, whatever butler prints. */
+async function butler(args: string[], timeoutMs: number): Promise<{ out: string; err: string; code: number }> {
+  const bin = process.env.BUTLER_BIN ?? "butler";
+  const key = process.env.BUTLER_API_KEY ?? "";
+  const redact = (s: string) => (key ? s.split(key).join("***") : s);
+  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: process.env.HOME, ...(key ? { BUTLER_API_KEY: key } : {}) };
+  const { promise, resolve } = Promise.withResolvers<{ out: string; err: string; code: number }>();
+  execFile(bin, args, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, env }, (error, stdout, stderr) => {
+    // string code = spawn failure (ENOENT, ENOTDIR, EACCES...); a number is a real exit code
+    if (error && typeof error.code !== "number") resolve({ out: "", err: redact(`butler failed to start (${bin}): ${error.message}; set BUTLER_BIN or install butler`), code: -1 });
+    else resolve({ out: redact(String(stdout)), err: redact(String(stderr)), code: typeof error?.code === "number" ? error.code : 0 });
+  });
+  return promise;
+}
+
+const noKey = "BUTLER_API_KEY is not set; the operator provides it in env only";
+
+const itchPush: ToolImpl = {
+  description:
+    "Push a build from your clone's dist/ to an itch.io channel with butler. Dry-run by default; a real push needs dry_run:false and the operator's approval. " +
+    "dir must be a directory inside dist/, and build_id must match dist/build_id exactly.",
+  input: z
+    .object({
+      dir: z.string().min(1).max(200).describe("Channel dir inside the clone's dist/, e.g. 'web' or 'windows'"),
+      target: z.string().regex(ITCH_TARGET).describe("itch target '<user>/<game>:<channel>', lowercase, e.g. 'any-co/studio-game:html5'"),
+      build_id: z.string().min(8).max(60).describe("Exactly the contents of dist/build_id"),
+      dry_run: z.boolean().default(true).describe("Default true (no upload); false pushes for real, after operator approval"),
+    })
+    .strict(),
+  async run({ dir, target, build_id, dry_run = true }, ctx) {
+    try {
+      if (!process.env.BUTLER_API_KEY) throw new Error(noKey);
+      const distRoot = path.join(ctx.workspace, "game", "dist");
+      if (!existsSync(path.join(distRoot, "build_id"))) throw new Error("no dist/build_id in your clone; run build.sh first");
+      const built = (await readFile(path.join(distRoot, "build_id"), "utf8")).trim();
+      if (built !== build_id) throw new Error(`build_id mismatch: dist/build_id says "${built}", you passed "${build_id}"`);
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(built)) throw new Error(`dist/build_id "${built}" breaks the build_id contract (<yyyymmdd-hhmm>-<short-sha>); refusing to pass it to butler`);
+      // Lexical checks are not enough (symlinks): pin both sides to real paths, require the
+      // channel dir to sit strictly INSIDE dist/, and refuse any symlink in the pushed tree —
+      // the agent controls dist/, and butler would happily upload wherever a link points.
+      const distReal = realpathSync(distRoot);
+      const dirReal = realpathSync(resolveInWorkspace(distRoot, dir));
+      if (dirReal === distReal || !dirReal.startsWith(distReal + path.sep)) throw new Error(`"${dir}" must be a channel directory strictly inside dist/, not dist/ itself or a link out of it`);
+      await assertNoSymlinks(dirReal);
+      const r = await butler(["push", dirReal, target, `--userversion=${build_id}`, ...(dry_run ? ["--dry-run"] : [])], 600_000);
+      return { content: clip(`exit ${r.code}${dry_run ? " (dry-run)" : " (REAL PUSH)"}\n${r.out}${r.err ? `\nstderr:\n${r.err}` : ""}`), is_error: r.code !== 0 };
     } catch (e) {
       return { content: errText(e), is_error: true };
     }
   },
 };
 
+const itchStatus: ToolImpl = {
+  description: "Read-only: butler status of an itch channel (latest pushes per channel). No upload, not gated.",
+  input: z.object({ target: z.string().regex(ITCH_TARGET).describe("itch target '<user>/<game>:<channel>'") }).strict(),
+  async run({ target }) {
+    if (!process.env.BUTLER_API_KEY) return { content: noKey, is_error: true };
+    const r = await butler(["status", target], 120_000);
+    return { content: clip(`exit ${r.code}\n${r.out}${r.err ? `\nstderr:\n${r.err}` : ""}`), is_error: r.code !== 0 };
+  },
+};
+
+// ---------- email_send: outreach mail from the studio's Naïve identity inbox ----------
+// SDK shape: emails.send(identityId, inboxId, { to: [addr], subject, text }). The studio address
+// (identity + inbox ids) comes from env only; the blocklist refuses addresses or whole domains.
+
+const blocklisted = (to: string, entries: string[]) => {
+  const t = to.toLowerCase();
+  const domain = t.split("@")[1] ?? "";
+  return entries.some((b) => t === b || (domain !== "" && (domain === b.replace(/^@/, "") || domain.endsWith("." + b.replace(/^@/, "")))));
+};
+
+const emailSend: ToolImpl = {
+  description:
+    "Send one outreach email from the studio's own inbox. One recipient per call, plain text only. The operator approves every send; write the draft first, then send it.",
+  input: z
+    .object({
+      to: z.string().regex(/^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/).describe("One recipient address, plain form only"),
+      subject: z.string().min(1).max(200),
+      body: z.string().min(1).max(10_000),
+    })
+    .strict(),
+  async run({ to, subject, body }, ctx) {
+    if (!ctx.naive) return { content: "email_send needs a Naïve client (NAIVE_API_KEY)", is_error: true };
+    const identityId = process.env.NAIVE_EMAIL_IDENTITY_ID;
+    const inboxId = process.env.NAIVE_EMAIL_INBOX_ID;
+    if (!identityId || !inboxId)
+      return { content: "email_send needs NAIVE_EMAIL_IDENTITY_ID and NAIVE_EMAIL_INBOX_ID in env (the studio identity + inbox to send from)", is_error: true };
+    const entries = (process.env.STUDIO_EMAIL_BLOCKLIST ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+    if (blocklisted(to, entries)) return { content: `"${to}" is on the send blocklist (STUDIO_EMAIL_BLOCKLIST)`, is_error: true };
+    try {
+      const r = await ctx.naive.emails.send(identityId, inboxId, { to: [to], subject, text: body });
+      if (!r.accepted) return { content: JSON.stringify({ ...r, note: "Naïve did not accept this send; do not report it as sent" }), is_error: true };
+      return { content: JSON.stringify({ accepted: r.accepted, from: r.from, to: r.to, sent_at: r.sent_at }) };
+    } catch (e) {
+      const status = e instanceof Error && "status" in e ? `${String(e.status)} ` : "";
+      return { content: clip(`email send failed: ${status}${errText(e)}`, 2000), is_error: true };
+    }
+  },
+};
 /** Each capability provides one or more model-facing tools. */
 export const IMPLS: Record<CapabilityName, Record<string, ToolImpl>> = {
   catalog_query: catalogTools,
@@ -784,6 +915,9 @@ export const IMPLS: Record<CapabilityName, Record<string, ToolImpl>> = {
   game_repo: gameRepoTools,
   art_tools: artTools,
   art_generate: { art_generate: artGenerate },
+  itch_push: { itch_push: itchPush },
+  itch_status: { itch_status: itchStatus },
+  email_send: { email_send: emailSend },
 };
 
 /** Model-facing tool name → its capability and implementation. */
