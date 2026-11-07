@@ -28,7 +28,14 @@ PixelLab OpenAPI `https://api.pixellab.ai/v2/openapi.json` + `llms.txt`, and Ret
 - **Sizes**: API validates 12×12–512×512; each style is tighter (RD Pro 12–256, Plus/Fast
   16–384, several fixed sizes for animation styles). Live limits: `GET /v2/styles/selector`.
 - **Errors**: v2 JSON `{error:{code,message,request_id}}`; 402 `not_enough_balance`,
-  429 rate limit, 5xx provider failures (auto-refunded). `check_cost: true` is a free dry run.
+  429 rate limit, 5xx provider failures (auto-refunded). `check_cost: true` is a free dry run:
+  `POST /v2/inferences` with the same body plus `check_cost: true` and **no** Idempotency-Key →
+  `{balance_cost, model:"check_cost", base64_images:[], remaining_balance}`; nothing generated or charged.
+- **Out of balance**: 402 `{error:{code:"not_enough_balance", message:"Not enough balance."}}`
+  (the code is named on edit tools/Pixel Fixer; inferences document 402 "insufficient balance";
+  v1 answered 400 `{"detail":[{"msg":"Not enough balance."}]}`). We treat any 402, or that code, as exhausted.
+- **Balance**: `GET /v2/inferences/credits` (`X-RD-Token`) → `{credits, balance}`, `balance` in USD.
+  Successful task results also carry `remaining_balance` (USD), which is what we log.
 - **Cost reporting**: `balance_cost` in USD on success — **reported**, we pass it through.
 
 ### Price table (USD per request) — used only when the response omits `balance_cost`, then marked `estimated`
@@ -64,6 +71,12 @@ PixelLab OpenAPI `https://api.pixellab.ai/v2/openapi.json` + `llms.txt`, and Ret
 - **Animation**: separate endpoints (`/animate-with-text-v3`, `/characters/animations`, `/vfx`)
   need character ids or a reference frame pipeline we do not wrap yet — our interface rejects
   `frames` for pixellab. Documented for a later ticket.
+- **Out of balance**: `402` "Insufficient credits" on `/generate-image-v2` (and the pixflux/pixen
+  endpoints; "Insufficient generations" on character endpoints). The spec documents no body
+  schema or code for it, so any 402 counts as exhausted.
+- **Balance**: `GET /v2/balance` (Bearer) → `BalanceResponse {credits, subscription}`. The
+  `credits` sub-schema was not in the part of the spec we read (unverified); we take the first
+  number among `credits.usd`, `credits.amount`, `credits`, `usd`, `balance`, else no reading.
 - **Cost reporting**: `usage.usd` when present (subscription `generations` usage has no USD
   value) — reported; when `usage` is null we fall back to the estimate below, marked
   `estimated`.
@@ -83,3 +96,24 @@ never carried the request (refused, DNS, unreachable): a reset, abort, timeout, 
 no job id may have left a billed job behind, so it is charged (it can overcount an auto-refunded 5xx).
 This spend is **budget-capped like inference** (per-agent period caps in the spec, global
 daily cap in the runner), not per-call approved — recorded in `docs/decisions.md`.
+
+## Credits (T19): free-trial tiers, never purchased
+
+Both accounts are free trials and nobody adds money; no billing or purchase endpoint is ever
+called. The `art_generate` capability (runner/tools/impl.ts over tools/art/credits.ts):
+- **Exhausted**: a 402 (or `not_enough_balance`) is `ProviderExhausted` — uncharged, never
+  retried — and is recorded in `runs/art-providers.json` (`{provider: {exhausted, ts,
+  remaining_balance, reason}}`, atomic write, `ART_PROVIDERS_FILE` overrides). Exhausted
+  providers are refused without a request until a human runs `npm run art -- providers --clear <p>`.
+- **Fallback**: an exhausted provider → the other one, once, same prompt/size (`fallback_from`
+  in the result; PixelLab cannot take an animation fallback). Both gone →
+  `{exhausted: "all", fallback: "procedural"}` at zero cost: the Art Director's ladder floor.
+- **Conserve**: bake-offs are for anchors; `art_anchor_winner` records the winner in
+  `runs/art-gallery.json` and calls that reference the anchor default to it (the loser is
+  refused). One generation + 2 regenerations per asset (counted in the gallery). Animation
+  (frames, `rd_animation__*`, `rd_advanced_animation__*`) needs `justify`. `art_quote` returns
+  RD's free check_cost quote (PixelLab: price table) × count against the remaining balance.
+- **Visibility**: every reported balance (RD `remaining_balance`; PixelLab `GET /v2/balance`
+  after a generation) goes to `runs/art-credits.jsonl` (ts, provider, remaining, run_id, source)
+  and into the result. Below 20% of the day's first reading, and at 0, ONE ledger decision per
+  threshold per provider per day (topic `art.credits_low`, deduplicated by its `refs` key).

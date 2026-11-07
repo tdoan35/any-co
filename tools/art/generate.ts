@@ -96,6 +96,31 @@ export class ChargedFailure extends Error {
   }
 }
 
+/**
+ * The provider's account cannot fund the call (free-trial credits gone): Retro Diffusion 402
+ * (`not_enough_balance`), PixelLab 402 "Insufficient credits/generations". Never retried and
+ * never charged (nothing was accepted); the capability marks the provider exhausted.
+ */
+export class ProviderExhausted extends Error {
+  provider: ProviderName;
+  remaining_balance: number | null;
+  constructor(provider: ProviderName, detail: string, remaining: number | null = null) {
+    super(`${provider} is out of credits (${detail}); it is marked exhausted until a human clears it (npm run art -- providers --clear ${provider})`);
+    this.name = "ProviderExhausted";
+    this.provider = provider;
+    this.remaining_balance = remaining;
+  }
+}
+
+/** Out-of-balance answers, per PROVIDERS.md: any 402, or RD's not_enough_balance code (v1 answered 400). */
+export function exhaustedAnswer(status: number, body: any): boolean {
+  return status === 402 || body?.error?.code === "not_enough_balance";
+}
+
+/** Expensive animation endpoints: frames, or an rd_animation / rd_advanced_animation style. */
+export const isAnimation = (input: Pick<GenerateInput, "frames" | "style">) =>
+  input.frames !== undefined || /^rd_(advanced_)?animation__/.test(input.style ?? "");
+
 /** Reported cost if the provider stated one, else the table estimate for the in-flight call. */
 function failureCost(provider: ProviderName, input: GenerateInput, reportedUsd?: number): { micro: number; source: string } {
   if (reportedUsd !== undefined) return { micro: usdToMicro(reportedUsd), source: "reported" };
@@ -236,6 +261,25 @@ async function submitJson(provider: ProviderName, input: GenerateInput, fetchImp
   return submitted;
 }
 
+/** The Retro Diffusion inference body (shared by generation and the free check_cost quote). */
+async function rdBody(input: GenerateInput, workspace: string, style: string): Promise<Record<string, unknown>> {
+  const body: Record<string, unknown> = {
+    prompt: input.prompt,
+    prompt_style: style,
+    width: input.width,
+    height: input.height,
+    num_images: 1,
+    remove_bg: input.transparent ?? true,
+  };
+  if (input.seed !== undefined) body.seed = input.seed;
+  if (input.frames !== undefined) {
+    body.frames_duration = input.frames;
+    body.return_spritesheet = true;
+  }
+  if (input.reference) body.reference_images = [(await readReference(workspace, input.reference)).base64];
+  return body;
+}
+
 async function retrodiffusion(
   input: GenerateInput,
   opts: GenerateOptions,
@@ -250,26 +294,15 @@ async function retrodiffusion(
   if (input.frames !== undefined && !(RD_FRAMES as readonly number[]).includes(input.frames))
     throw new Error(`frames must be one of frames_duration ${RD_FRAMES.join("|")}, got ${input.frames}`);
 
-  const body: Record<string, unknown> = {
-    prompt: input.prompt,
-    prompt_style: style,
-    width: input.width,
-    height: input.height,
-    num_images: 1,
-    remove_bg: input.transparent ?? true,
-  };
-  if (input.seed !== undefined) body.seed = input.seed;
-  if (input.frames !== undefined) {
-    body.frames_duration = input.frames;
-    body.return_spritesheet = true;
-  }
-  if (input.reference) body.reference_images = [(await readReference(opts.workspace, input.reference)).base64];
+  const body = await rdBody(input, opts.workspace, style);
 
   const submitted = await submitJson("retrodiffusion", input, fetchImpl, `${base}/v2/inferences`, {
     method: "POST",
     headers: { "content-type": "application/json", "X-RD-Token": key, "Idempotency-Key": randomUUID() },
     body: JSON.stringify(body),
   }, deadline);
+  if (exhaustedAnswer(submitted.status, submitted.body))
+    throw new ProviderExhausted("retrodiffusion", `${submitted.status} ${submitted.body?.error?.code ?? ""} ${submitted.body?.error?.message ?? ""}`.trim(), typeof submitted.body?.remaining_balance === "number" ? submitted.body.remaining_balance : null);
   if (submitted.status >= 400)
     throw new Error(`retrodiffusion rejected the request (${submitted.status}): ${submitted.body?.error?.message ?? submitted.body?.detail ?? JSON.stringify(submitted.body).slice(0, 300)}`);
   const taskId = submitted.body?.task_id;
@@ -364,6 +397,8 @@ async function pixellab(
     headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
     body: JSON.stringify(body),
   }, deadline);
+  if (exhaustedAnswer(submitted.status, submitted.body))
+    throw new ProviderExhausted("pixellab", `${submitted.status} ${submitted.body?.detail ?? "Insufficient credits"}`);
   if (submitted.status >= 400)
     throw new Error(`pixellab rejected the request (${submitted.status}): ${submitted.body?.detail ?? JSON.stringify(submitted.body).slice(0, 300)}`);
   const jobId = submitted.body?.background_job_id;
@@ -406,4 +441,62 @@ async function pixellab(
     cost_source: reportedUsd === undefined ? "estimated" : "reported",
     metadata: { background_job_id: jobId, usage: usage ?? null, created_at: job?.created_at },
   };
+}
+
+// ---------- free reads: cost quotes and balances (T19). Never a billing or purchase endpoint. ----------
+
+export interface Quote {
+  provider: ProviderName;
+  per_call_usd: number;
+  source: "check_cost" | "price table";
+  remaining_balance: number | null;
+}
+
+/**
+ * What one call would cost. Retro Diffusion: the documented free dry run (`check_cost: true`,
+ * no Idempotency-Key, generates and charges nothing) → `balance_cost` + `remaining_balance`.
+ * PixelLab has no dry run: the price table, plus the balance read if it answers.
+ */
+export async function quote(input: GenerateInput, opts: GenerateOptions): Promise<Quote> {
+  const env = opts.env ?? process.env;
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const deadline = Date.now() + (opts.timeoutMs ?? 30_000);
+  if (input.provider === "pixellab") {
+    const b = await balance("pixellab", opts).catch(() => null);
+    return { provider: "pixellab", per_call_usd: PIXELLAB_ESTIMATE_USD, source: "price table", remaining_balance: b };
+  }
+  const key = requireKey(env, "RETRO_DIFFUSION_API_KEY");
+  const base = (opts.baseUrl?.retrodiffusion ?? env.RETRO_DIFFUSION_BASE_URL ?? "https://api.retrodiffusion.ai").replace(/\/$/, "");
+  const style = input.style ?? "rd_pro__default";
+  const body = { ...(await rdBody(input, opts.workspace, style)), check_cost: true };
+  const r = await httpJson(fetchImpl, `${base}/v2/inferences`, { method: "POST", headers: { "content-type": "application/json", "X-RD-Token": key }, body: JSON.stringify(body) }, deadline);
+  if (exhaustedAnswer(r.status, r.body)) throw new ProviderExhausted("retrodiffusion", `${r.status} on check_cost`, typeof r.body?.remaining_balance === "number" ? r.body.remaining_balance : null);
+  if (r.status >= 400 || typeof r.body?.balance_cost !== "number")
+    throw new Error(`retrodiffusion check_cost failed (${r.status}): ${JSON.stringify(r.body).slice(0, 300)}`);
+  return { provider: "retrodiffusion", per_call_usd: r.body.balance_cost, source: "check_cost", remaining_balance: typeof r.body.remaining_balance === "number" ? r.body.remaining_balance : null };
+}
+
+/**
+ * Remaining balance from the provider's read-only endpoint, or null when it doesn't say.
+ * RD `GET /v2/inferences/credits` → `{credits, balance}` (USD balance). PixelLab `GET /v2/balance`
+ * → `{credits, subscription}`; the sub-schema isn't in the public spec we read, so we take the
+ * first number among credits.usd, credits.amount, credits (numeric), usd, balance.
+ */
+export async function balance(provider: ProviderName, opts: Omit<GenerateOptions, "workspace">): Promise<number | null> {
+  const env = opts.env ?? process.env;
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const deadline = Date.now() + (opts.timeoutMs ?? 15_000);
+  if (provider === "retrodiffusion") {
+    const key = requireKey(env, "RETRO_DIFFUSION_API_KEY");
+    const base = (opts.baseUrl?.retrodiffusion ?? env.RETRO_DIFFUSION_BASE_URL ?? "https://api.retrodiffusion.ai").replace(/\/$/, "");
+    const r = await httpJson(fetchImpl, `${base}/v2/inferences/credits`, { headers: { "X-RD-Token": key } }, deadline);
+    return r.status < 400 && typeof r.body?.balance === "number" ? r.body.balance : null;
+  }
+  const key = requireKey(env, "PIXELLAB_API_KEY");
+  const base = (opts.baseUrl?.pixellab ?? env.PIXELLAB_BASE_URL ?? "https://api.pixellab.ai").replace(/\/$/, "");
+  const r = await httpJson(fetchImpl, `${base}/v2/balance`, { headers: { authorization: `Bearer ${key}` } }, deadline);
+  if (r.status >= 400) return null;
+  const b = r.body ?? {};
+  for (const v of [b.credits?.usd, b.credits?.amount, b.credits, b.usd, b.balance]) if (typeof v === "number") return v;
+  return null;
 }

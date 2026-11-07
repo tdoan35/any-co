@@ -144,3 +144,22 @@ test("game_clone: repo names that leave games/ are refused and nothing is cloned
   const named = await IMPLS.game_repo.game_clone.run({ repo: "realgame" }, ctxFor(games));
   assert.equal(JSON.parse(named.content).game, "realgame");
 });
+
+test("game_exec timeout kills the whole process group, including children that ignore SIGTERM", async () => {
+  const { root } = makeGamesRoot();
+  const ctx = ctxFor(root);
+  await IMPLS.game_repo.game_clone.run({}, ctx);
+  const marker = `anyco-orphan-probe-${process.pid}-${Date.now()}`;
+  const t0 = Date.now();
+  const r = await IMPLS.game_repo.game_exec.run(
+    { command: ["sh", "-c", `trap '' TERM; (trap '' TERM; sleep 60; : ${marker}) & sleep 60`], timeout_s: 1 },
+    ctx,
+  );
+  assert.equal(r.is_error, true);
+  assert.match(r.content, /timed out after 1 s/);
+  assert.ok(Date.now() - t0 < 10_000, "returns soon after the timeout");
+  await new Promise((res) => setTimeout(res, 2500)); // SIGKILL follows SIGTERM after 2 s
+  let left = "";
+  try { left = execFileSync("pgrep", ["-f", marker], { encoding: "utf8" }).trim(); } catch { /* exit 1 = no match */ }
+  assert.equal(left, "", "no child survives");
+});
