@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { appendFileSync, mkdtempSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { request, decide, pending, get, queueApprover } from "./approvals.ts";
@@ -57,6 +59,47 @@ test("queueApprover times out: expired event, expired ledger entry, returns fals
   assert.equal(e.decision, "expired");
   assert.equal(e.agent, "build-release");
   assert.equal(get(e.request_id, f)?.state, "expired");
+});
+
+test("a torn last line does not swallow the next event", () => {
+  const { f, ledger } = files();
+  const id = request({ agent: "a", run_id: "r", tool: "t", input: {} }, f);
+  appendFileSync(f, '{"event":"appro'); // a writer killed mid-append leaves a fragment
+  const rec = decide(id, true, "operator", undefined, f, ledger);
+  assert.equal(rec?.state, "approved");
+  assert.equal(get(id, f)?.state, "approved");
+  assert.equal(pending(f).length, 0);
+  assert.equal(approvalsOf(readLedger(ledger)).length, 1);
+});
+
+test("a duplicate requested event never resets a decided record", () => {
+  const { f, ledger } = files();
+  const id = request({ agent: "a", run_id: "r", tool: "t", input: {} }, f);
+  decide(id, true, "operator", undefined, f, ledger);
+  appendFileSync(f, JSON.stringify({ event: "requested", id, ts: "2026-11-07T00:00:00.000Z", agent: "a", run_id: "r", tool: "t", input: {} }) + "\n");
+  assert.equal(get(id, f)?.state, "approved"); // not reset to pending
+  assert.equal(pending(f).length, 0);
+});
+
+// The reviewer's repro: CLI approve and deny racing on the same ids ledgered both outcomes.
+// Invariant regardless of timing: exactly one ledger entry per id, and no id left pending.
+test("concurrent CLI decisions on one id ledger exactly one terminal decision", async () => {
+  const { f, ledger } = files();
+  const ids = Array.from({ length: 6 }, () => request({ agent: "a", run_id: "r", tool: "t", input: {} }, f));
+  const cli = (args: string[]) => {
+    const { promise, resolve } = Promise.withResolvers<{ code: number | undefined }>();
+    const cliPath = fileURLToPath(new URL("./approvals.ts", import.meta.url));
+    execFile(process.execPath, ["--import", "tsx", cliPath, ...args], { env: { ...process.env, STUDIO_APPROVALS_FILE: f, STUDIO_LEDGER_FILE: ledger } }, (error) => resolve({ code: error?.code === undefined ? 0 : typeof error.code === "number" ? error.code : 1 }));
+    return promise;
+  };
+  const jobs = ids.flatMap((id) => [cli(["approve", id, "--note", "yes"]), cli(["deny", id, "--note", "no"])]);
+  await Promise.all(jobs);
+  const entries = approvalsOf(readLedger(ledger));
+  assert.equal(entries.length, ids.length); // one decision per id, never two
+  for (const id of ids) {
+    assert.equal(entries.filter((e) => e.request_id === id).length, 1);
+    assert.notEqual(get(id, f)?.state, "pending");
+  }
 });
 
 test("queueApprover polls until a human decides", async () => {

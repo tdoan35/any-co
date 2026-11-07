@@ -45,18 +45,26 @@ function readEvents(file: string): ApprovalEvent[] {
     try { return [JSON.parse(l) as ApprovalEvent]; } catch { return []; } // a torn last line is dropped
   });
 }
-
 function appendEvent(e: ApprovalEvent, file: string) {
   mkdirSync(path.dirname(file), { recursive: true });
-  appendFileSync(file, JSON.stringify(e) + "\n");
+  // A writer killed mid-append can leave a fragment without a newline; start our line with one
+  // so the next event is not glued onto it (the fold already drops unparseable fragments).
+  let sep = "";
+  if (existsSync(file)) {
+    const prev = readFileSync(file);
+    if (prev.length > 0 && prev[prev.length - 1] !== 0x0a) sep = "\n";
+  }
+  appendFileSync(file, sep + JSON.stringify(e) + "\n");
 }
 
-/** Fold events into records, insertion order; the first terminal event for an id wins. */
+/** Fold events into records, insertion order; the first terminal event for an id wins, and a duplicate
+ *  requested never resurrects a decided record (same-second id collisions are ~1/65k, but cheap to guard). */
 export function fold(file = APPROVALS_FILE): ApprovalRecord[] {
   const byId = new Map<string, ApprovalRecord>();
   for (const e of readEvents(file)) {
-    if (e.event === "requested") byId.set(e.id, { id: e.id, state: "pending", ts: e.ts, agent: e.agent, run_id: e.run_id, tool: e.tool, input: e.input });
-    else {
+    if (e.event === "requested") {
+      if (!byId.has(e.id)) byId.set(e.id, { id: e.id, state: "pending", ts: e.ts, agent: e.agent, run_id: e.run_id, tool: e.tool, input: e.input });
+    } else {
       const rec = byId.get(e.id);
       if (!rec || rec.state !== "pending") continue;
       rec.state = e.event;
@@ -96,22 +104,35 @@ function logDecision(rec: ApprovalRecord, decision: "approved" | "denied" | "exp
   }, ledgerFile);
 }
 
-/** Record a human (or auto) decision. Returns the decided record, or null if the id is unknown or already terminal. */
-export function decide(id: string, approve: boolean, who: string, note?: string, file = APPROVALS_FILE, ledgerFile = LEDGER_FILE): ApprovalRecord | null {
-  const rec = get(id, file);
-  if (!rec || rec.state !== "pending") return null;
-  const ts = new Date().toISOString();
-  appendEvent({ event: approve ? "approved" : "denied", id, ts, who, ...(note ? { note } : {}) }, file);
-  logDecision(rec, approve ? "approved" : "denied", ts, who, note, ledgerFile);
-  return { ...rec, state: approve ? "approved" : "denied", decided_ts: ts, who, ...(note ? { note } : {}) };
+/** The folded record iff the first terminal event for id in file order is exactly the one just appended.
+ *  Two processes can both see "pending" and both append; only the file-order winner may ledger. */
+function winnerOf(id: string, event: "approved" | "denied" | "expired", ts: string, file: string): ApprovalRecord | null {
+  const first = readEvents(file).find((e) => e.id === id && e.event !== "requested");
+  if (first?.ts !== ts || first.event !== event) return null; // another process's event won
+  return get(id, file) ?? null;
 }
 
-/** A request nobody answered in time expires; not a human action, but ledgered like every terminal decision. */
+/** Record a human (or auto) decision. Returns the decided record, or null if the id is unknown,
+ *  already terminal, or another process's terminal event landed first (then nothing is ledgered). */
+export function decide(id: string, approve: boolean, who: string, note?: string, file = APPROVALS_FILE, ledgerFile = LEDGER_FILE): ApprovalRecord | null {
+  if (get(id, file)?.state !== "pending") return null; // fast path: unknown or already decided
+  const event = approve ? "approved" as const : "denied" as const;
+  const ts = new Date().toISOString();
+  appendEvent({ event, id, ts, who, ...(note ? { note } : {}) }, file);
+  const rec = winnerOf(id, event, ts, file);
+  if (!rec) return null; // lost the race: the fold already has another terminal event
+  logDecision(rec, event, ts, who, note, ledgerFile);
+  return rec;
+}
+
+/** A request nobody answered in time expires; not a human action, but ledgered like every terminal
+ *  decision. Returns true only when this expiry is the winning terminal event. */
 function expire(id: string, file: string, ledgerFile: string): boolean {
-  const rec = get(id, file);
-  if (!rec || rec.state !== "pending") return false;
+  if (get(id, file)?.state !== "pending") return false;
   const ts = new Date().toISOString();
   appendEvent({ event: "expired", id, ts }, file);
+  const rec = winnerOf(id, "expired", ts, file);
+  if (!rec) return false;
   logDecision(rec, "expired", ts, "timeout", undefined, ledgerFile);
   return true;
 }
@@ -127,7 +148,7 @@ export function queueApprover(opts: { timeoutMs: number; pollMs?: number; file?:
     for (;;) {
       const rec = get(id, file);
       if (rec && rec.state !== "pending") return rec.state === "approved";
-      if (Date.now() >= deadline) return (expire(id, file, ledgerFile), false);
+      if (Date.now() >= deadline) return expire(id, file, ledgerFile) ? false : get(id, file)?.state === "approved";
       const { promise, resolve } = Promise.withResolvers<void>();
       setTimeout(resolve, pollMs);
       await promise;

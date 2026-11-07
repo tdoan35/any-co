@@ -41,7 +41,7 @@ export interface ApprovalEntry {
   input_summary: string; // clipped JSON of the tool input
 }
 
- export type LedgerEntry = DecisionEntry | InterventionEntry | ApprovalEntry;
+export type LedgerEntry = DecisionEntry | InterventionEntry | ApprovalEntry;
 
 export function append(e: LedgerEntry, file = LEDGER_FILE) {
   mkdirSync(path.dirname(file), { recursive: true });
