@@ -1,7 +1,7 @@
 // Studio ledger: decisions and human interventions, append-only JSONL (CLAUDE.md, rule 4).
 // Local backend for now (runs/ledger.jsonl); the plan moves it to an MCP tool on a Naïve App.
 // Agents reach it through the `studio_ledger` capability, so swapping the backend changes no spec.
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -26,7 +26,22 @@ export interface InterventionEntry {
   who: string; // the human, by role
   action: string;
   reason: string;
+  /** harness | account | steering | approval; missing on pre-T17 lines reads as "uncategorized". */
+  category?: InterventionCategory;
 }
+
+export const INTERVENTION_CATEGORIES = ["harness", "account", "steering", "approval"] as const;
+export type InterventionCategory = (typeof INTERVENTION_CATEGORIES)[number];
+
+/** Backfill keyword table (first match wins), T17: account beats steering beats approval beats harness. */
+export const CATEGORY_RULES: Array<{ category: InterventionCategory; re: RegExp; why: string }> = [
+  { category: "account", re: /key|account|provision|identity|inbox|app id|credit|butler/i, why: "keys, accounts, provisioning" },
+  { category: "steering", re: /started .*run|pressed start|killed .*run|kill switch|greenlight/i, why: "run control and picks" },
+  { category: "approval", re: /approv/i, why: "gate approve/deny" },
+  { category: "harness", re: /./, why: "everything else is repo/infra work" },
+];
+
+export const categorize = (action: string): InterventionCategory => CATEGORY_RULES.find((r) => r.re.test(action))!.category;
 
 export interface ApprovalEntry {
   kind: "approval";
@@ -55,21 +70,94 @@ export function read(file = LEDGER_FILE): LedgerEntry[] {
   });
 }
 
-/** CLI for the human side: node --import tsx tools/ledger/ledger.ts intervention "<action>" "<reason>" | list */
+export interface RecategorizeResult {
+  matched: Array<{ index: number; ts: string; action: string; from: string; to: string }>;
+  bytes: number;
+}
+
+/**
+ * One-off migration (T17): assign a category to today's uncategorized operator interventions by
+ * keyword (CATEGORY_RULES, first match wins). Dry-run prints the proposal; `apply` rewrites the
+ * file atomically (temp + rename) keeping every line byte-for-byte except the added `"category"`
+ * key on matched entries, and appends one harness intervention noting the backfill. Idempotent:
+ * entries that already carry a category are left untouched, so a second run is a no-op.
+ */
+export function recategorize(opts: { file?: string; apply?: boolean; log?: (line: string) => void } = {}): RecategorizeResult {
+  const file = opts.file ?? LEDGER_FILE;
+  const log = opts.log ?? (() => {});
+  const lines = existsSync(file) ? readFileSync(file, "utf8").split("\n") : [];
+  const out: RecategorizeResult = { matched: [], bytes: 0 };
+  const rewritten = lines.map((line, index) => {
+    if (!line.trim()) return line;
+    let e: LedgerEntry;
+    try {
+      e = JSON.parse(line) as LedgerEntry;
+    } catch {
+      return line;
+    }
+    if (e.kind !== "intervention" || e.category !== undefined || e.who !== "operator") return line;
+    const to = categorize(e.action);
+    out.matched.push({ index, ts: e.ts, action: e.action, from: "uncategorized", to });
+    log(`${index}\t${e.ts}\t[${to}]\t${e.action.slice(0, 80)}`);
+    // Re-stringify with `category` last so the rest of the object is byte-identical on old entries.
+    const ordered: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(e)) if (k !== "category") ordered[k] = v;
+    ordered.category = to;
+    return JSON.stringify(ordered);
+  });
+  if (!opts.apply || out.matched.length === 0) {
+    out.bytes = lines.join("\n").length;
+    if (opts.apply) log("nothing to do: 0 uncategorized operator interventions");
+    return out;
+  }
+  const note: InterventionEntry = {
+    kind: "intervention",
+    ts: new Date().toISOString(),
+    who: "operator",
+    action: "ledger recategorize backfill (T17)",
+    reason: `assigned categories to ${out.matched.length} uncategorized interventions by keyword table (tools/ledger/ledger.ts CATEGORY_RULES); one-off migration, idempotent`,
+    category: "harness",
+  };
+  rewritten.push(JSON.stringify(note));
+  const body = `${rewritten.join("\n")}\n`;
+  const tmp = `${file}.tmp-${process.pid}`;
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(tmp, body);
+  renameSync(tmp, file);
+  out.bytes = statSync(file).size;
+  log(`applied: ${out.matched.length} entries recategorized, backfill note appended (${file})`);
+  return out;
+}
+
+/** CLI for the human side: node --import tsx tools/ledger/ledger.ts intervention "<action>" "<reason>" [--category ...] | recategorize [--apply] | list */
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const [cmd, a, b] = process.argv.slice(2);
+  const argv = process.argv.slice(2);
+  const [cmd, a, b] = argv;
+  const flag = (name: string): string | undefined => {
+    const i = argv.indexOf(name);
+    return i === -1 ? undefined : argv[i + 1];
+  };
   if (cmd === "intervention" && a && b) {
-    append({ kind: "intervention", ts: new Date().toISOString(), who: "operator", action: a, reason: b });
-    console.log("logged");
+    const raw = flag("--category") ?? "harness";
+    if (!INTERVENTION_CATEGORIES.includes(raw as InterventionCategory)) {
+      console.error(`invalid category "${raw}"; one of ${INTERVENTION_CATEGORIES.join(", ")}`);
+      process.exit(2);
+    }
+    const category = raw as InterventionCategory;
+    append({ kind: "intervention", ts: new Date().toISOString(), who: "operator", action: a, reason: b, category });
+    console.log(`logged (${category})`);
+  } else if (cmd === "recategorize") {
+    const apply = argv.includes("--apply");
+    recategorize({ file: LEDGER_FILE, apply, log: (line) => console.log(line) });
   } else if (cmd === "list") {
     for (const e of read())
       console.log(
         e.kind === "decision" ? `${e.ts} decision ${e.topic} by ${e.agent}: ${e.decision}`
           : e.kind === "approval" ? `${e.ts} approval ${e.request_id} ${e.tool} for ${e.agent}: ${e.decision} by ${e.who}`
-            : `${e.ts} INTERVENTION ${e.action}: ${e.reason}`,
+            : `${e.ts} INTERVENTION [${e.category ?? "uncategorized"}] ${e.action}: ${e.reason}`,
       );
   } else {
-    console.error('usage: ledger.ts intervention "<action>" "<reason>" | list');
+    console.error('usage: ledger.ts intervention "<action>" "<reason>" [--category harness|account|steering|approval] | recategorize [--apply] | list');
     process.exit(2);
   }
 }

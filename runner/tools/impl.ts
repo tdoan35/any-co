@@ -14,7 +14,7 @@ import { decodePng, encodePng, type RgbaImage } from "../../tools/art/png.ts";
 import { addOutline, contactSheet, lockPalette, snapToGrid, splitStrip } from "../../tools/art/ops.ts";
 import { runGate } from "../../tools/art/gate.ts";
 import { ChargedFailure, generate } from "../../tools/art/generate.ts";
-import { append as ledgerAppend, read as ledgerRead, LEDGER_FILE } from "../../tools/ledger/ledger.ts";
+import { append as ledgerAppend, read as ledgerRead, LEDGER_FILE, type LedgerEntry } from "../../tools/ledger/ledger.ts";
 import { AGENTS_DIR } from "../load.ts";
 import type { Board } from "../board/index.ts";
 
@@ -272,7 +272,27 @@ const ledgerTools: Record<string, ToolImpl> = {
       // A human approve/deny on the approval gate is a human intervention (rule 4); auto-approve and expiry are not.
       const human = all.filter((e) => e.kind === "approval" && e.decision !== "expired" && !e.who.startsWith("auto")).length;
       counts.intervention = (counts.intervention ?? 0) + human;
-      return { content: JSON.stringify({ total: all.length, counts, recent: all.slice(-limit).reverse() }) };
+      // T17: interventions by category; those approvals count as "approval", old lines as "uncategorized".
+      const interventionCategory = (e: LedgerEntry): string => {
+        if (e.kind === "approval") return e.decision !== "expired" && !e.who.startsWith("auto") ? "approval" : "auto/expired";
+        if (e.kind === "intervention") return e.category ?? "uncategorized";
+        return "decision";
+      };
+      const intervention_counts = all
+        .filter((e) => e.kind !== "decision")
+        .reduce<Record<string, number>>((a, e) => {
+          const k = interventionCategory(e);
+          return ((a[k] = (a[k] ?? 0) + 1), a);
+        }, {});
+      return {
+        content: JSON.stringify({
+          total: all.length,
+          counts,
+          intervention_counts,
+          steering: intervention_counts["steering"] ?? 0,
+          recent: all.slice(-limit).reverse(),
+        }),
+      };
     },
   },
 };
