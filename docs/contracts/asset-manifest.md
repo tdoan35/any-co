@@ -46,6 +46,7 @@ all read it — the gate never loads the game.
   Every non-anchor sprite must have one — that's how drift is measured.
 - **`size` is the size of one frame; a strip of N frames is N×size.w wide.** `size.h` is the
   file height. The gate checks `file.w == size.w × frames` and `file.h == size.h`.
+  `size` is a multiple of `grid`; frames are laid out as a horizontal strip.
 - Types: `sprite`, `tileset`, `ui`, `audio`, `font`, `other`. `audio` entries carry
   `{"duration_s": n}` instead of size/frames.
 - Every asset file on disk appears in the manifest, and every manifest path exists — the

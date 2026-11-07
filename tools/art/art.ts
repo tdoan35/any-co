@@ -20,7 +20,7 @@ function writePng(file: string, img: RgbaImage): void {
 
 export type CommandResult =
   | { kind: "ok"; json: Record<string, unknown>; exitCode: number }
-  | { kind: "error"; json: { error: string }; exitCode: 2 }
+  | { kind: "error"; json: { error: string }; exitCode: 2 };
 
 const USAGE = `usage: art.ts <command> ...
   lock    <in.png> <out.png> --palette "#rrggbb,#rrggbb,..." [--alpha-threshold N]

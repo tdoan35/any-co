@@ -100,3 +100,47 @@ test("game_clone copies the harness contracts into the workspace (read-only refe
   const r = await IMPLS.game_repo.game_exec.run({ command: ["sh", "-c", "printf %s \"$ANYCO_AGENT\""] }, ctx);
   assert.match(r.content, /gameplay-engineer/);
 });
+
+test("game_clone: repo names that leave games/ are refused and nothing is cloned (harness repo unreachable)", async () => {
+  const { symlinkSync } = await import("node:fs");
+  const gitEnv = { env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" } };
+  const commitAll = (dir: string) => {
+    execFileSync("git", ["-C", dir, "init", "--quiet"], gitEnv);
+    execFileSync("git", ["-C", dir, "-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"], gitEnv);
+    execFileSync("git", ["-C", dir, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "--quiet", "-m", "i"], gitEnv);
+  };
+  // Production shape: games/ lives inside the harness repo, so "games/.." IS the harness.
+  const harness = mkdtempSync(path.join(tmpdir(), "anyco-harness-"));
+  writeFileSync(path.join(harness, "harness-secret.txt"), "harness");
+  mkdirSync(path.join(harness, "private"));
+  writeFileSync(path.join(harness, "private", "secret.txt"), "private");
+  commitAll(path.join(harness, "private"));
+  commitAll(harness);
+  const games = path.join(harness, "games");
+  mkdirSync(games);
+  const outside = mkdtempSync(path.join(tmpdir(), "anyco-outside-repo-"));
+  writeFileSync(path.join(outside, "secret.txt"), "outside");
+  commitAll(outside);
+  symlinkSync(outside, path.join(games, "linked"));
+
+  for (const repo of ["..", "../private", "linked", outside, "./linked", "Linked", "a/b"]) {
+    const ctx = ctxFor(games);
+    const r = await IMPLS.game_repo.game_clone.run({ repo }, ctx);
+    assert.equal(r.is_error, true, `repo ${JSON.stringify(repo)} must be refused`);
+    assert.equal(existsSync(path.join(ctx.workspace, "game")), false, `nothing cloned for ${JSON.stringify(repo)}`);
+  }
+  // Auto-pick ignores the symlinked entry too: with only "linked" there is no game repo.
+  const auto = await IMPLS.game_repo.game_clone.run({}, ctxFor(games));
+  assert.equal(auto.is_error, true);
+  assert.match(auto.content, /no game repo/);
+
+  // A real repo next to the symlink still works by name and by auto-pick.
+  mkdirSync(path.join(games, "realgame"));
+  writeFileSync(path.join(games, "realgame", "README.md"), "# real\n");
+  commitAll(path.join(games, "realgame"));
+  const ok = await IMPLS.game_repo.game_clone.run({}, ctxFor(games));
+  assert.equal(ok.is_error, undefined, ok.content);
+  assert.equal(JSON.parse(ok.content).game, "realgame");
+  const named = await IMPLS.game_repo.game_clone.run({ repo: "realgame" }, ctxFor(games));
+  assert.equal(JSON.parse(named.content).game, "realgame");
+});

@@ -74,7 +74,7 @@ const typeMatches = (v: unknown, t: string): boolean => {
  * Validates against the subset of JSON Schema draft 2020-12 the contract uses:
  * type (incl. arrays and "integer"), const, enum, required, properties,
  * additionalProperties: false, items, minItems/maxItems, minLength/maxLength,
- * pattern, minimum/maximum/exclusiveMinimum. Returns one message per violation.
+ * pattern, minimum/maximum/exclusiveMinimum/exclusiveMaximum. Returns one message per violation.
  */
 const KNOWN_KEYWORDS: Record<string, true> = {
   type: true, const: true, enum: true, required: true, properties: true, additionalProperties: true, items: true,
@@ -110,6 +110,7 @@ export function validateSchema(value: unknown, schema: unknown, at = "$"): strin
     if (typeof s.minimum === "number" && value < s.minimum) errors.push(`${at}: below minimum ${s.minimum}`);
     if (typeof s.maximum === "number" && value > s.maximum) errors.push(`${at}: above maximum ${s.maximum}`);
     if (typeof s.exclusiveMinimum === "number" && value <= s.exclusiveMinimum) errors.push(`${at}: must be > ${s.exclusiveMinimum}`);
+    if (typeof s.exclusiveMaximum === "number" && value >= s.exclusiveMaximum) errors.push(`${at}: must be < ${s.exclusiveMaximum}`);
   }
 
   if (Array.isArray(value)) {

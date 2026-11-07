@@ -110,6 +110,11 @@ export function decodePng(bytes: Uint8Array): RgbaImage {
   if (colorType === 3 && (!plte || plte.length === 0 || plte.length % 3 !== 0))
     throw new PngError("indexed PNG has no valid PLTE chunk");
 
+  // The inflate cap comes from IHDR: exactly one filter byte plus one stride per row.
+  const stride = width * bpp;
+  const expected = height * (stride + 1);
+  if (expected > MAX_INFLATED_BYTES)
+    throw new PngError(`image ${width}x${height} would inflate to ${expected} bytes, over the ${MAX_INFLATED_BYTES}-byte cap`);
   let inflated: Uint8Array;
   try {
     const joined = new Uint8Array(idats.reduce((n, d) => n + d.length, 0));
@@ -118,13 +123,11 @@ export function decodePng(bytes: Uint8Array): RgbaImage {
       joined.set(d, off);
       off += d.length;
     }
-        inflated = new Uint8Array(inflateSync(joined, { maxOutputLength: MAX_INFLATED_BYTES }));
+    inflated = new Uint8Array(inflateSync(joined, { maxOutputLength: expected }));
   } catch (e) {
     throw new PngError(`IDAT stream failed to inflate: ${(e as Error).message}`);
   }
 
-  const stride = width * bpp;
-  const expected = height * (stride + 1);
   if (inflated.length !== expected)
     throw new PngError(`decoded pixel data has the wrong size: got ${inflated.length} bytes, expected ${expected}`);
 

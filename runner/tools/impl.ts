@@ -2,7 +2,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
-import { existsSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, realpathSync } from "node:fs";
 import { isIP } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -389,10 +389,41 @@ const webSearch: ToolImpl = {
 };
 
 // ---------- workspace_read / workspace_write ----------
+// Symlink-safe confinement. Returns the lexically normalised path (so `..` after a symlink is never
+// handed to the OS), after checking that what the OS would actually touch stays under the root's
+// realpath: the target's realpath when it exists, else the realpath of its deepest existing ancestor.
+// A dangling symlink anywhere on the path is refused, since a write would follow it to wherever it points.
+// Known limit: check-then-use, so a symlink swapped in between the check and the fs call is not caught.
 export function resolveInWorkspace(workspace: string, rel: string): string {
   const p = path.resolve(workspace, rel || ".");
   if (p !== workspace && !p.startsWith(workspace + path.sep)) throw new Error(`path escapes the workspace: ${rel}`);
-  return p;
+  const rootReal = realOrNull(workspace) ?? path.resolve(workspace);
+  for (let cur = p; ; cur = path.dirname(cur)) {
+    const real = realOrNull(cur);
+    if (real !== null) {
+      if (real !== rootReal && !real.startsWith(rootReal + path.sep)) throw new Error(`path escapes the workspace through a symlink: ${rel}`);
+      return p;
+    }
+    if (lstatOk(cur)) throw new Error(`path goes through a dangling symlink: ${rel}`);
+    if (cur === workspace || path.dirname(cur) === cur) return p; // root not created yet: nothing on disk to follow
+  }
+}
+
+function realOrNull(p: string): string | null {
+  try {
+    return realpathSync(p);
+  } catch {
+    return null;
+  }
+}
+
+function lstatOk(p: string): boolean {
+  try {
+    lstatSync(p);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 const workspaceRead: ToolImpl = {
@@ -432,16 +463,36 @@ const workspaceWrite: ToolImpl = {
 // Each run gets its own clone at <workspace>/game on a per-agent branch; only the Tech Lead
 // merges branches into the game's main branch (single-merger rule, plan.md §6 Engineering).
 
+/** Repo names are single slugs (new-game.ts slugify output): no dots, slashes, or absolute paths. */
+const GAME_REPO_NAME = /^[a-z0-9][a-z0-9-]{0,79}$/;
+
+/** A games/<name> entry is usable only if it is a real directory (not a symlink) whose realpath sits strictly
+ *  inside realpath(root) and that holds a .git. This keeps agents from cloning, and pushing into, any repo
+ *  outside games/ — the harness repo included. */
+function gameRepoDir(root: string, name: string): string | null {
+  const dir = path.join(root, name);
+  try {
+    if (!lstatSync(dir).isDirectory()) return null; // lstat: a symlink is not a directory here
+    const rootReal = realpathSync(root);
+    const real = realpathSync(dir);
+    if (path.dirname(real) !== rootReal) return null;
+  } catch {
+    return null;
+  }
+  return existsSync(path.join(dir, ".git")) ? dir : null;
+}
+
 /** The one game repo the run works on: games/<name> (a git repo with >=1 commit). */
 export function resolveGameRepo(root: string, repo?: string): { name: string; dir: string } {
-  if (repo) {
-    const dir = path.join(root, repo);
-    if (!existsSync(path.join(dir, ".git"))) throw new Error(`games/${repo} is not a git repo`);
+  if (repo !== undefined) {
+    if (!GAME_REPO_NAME.test(repo)) throw new Error(`invalid repo name "${repo}": use the bare name under games/ (lowercase letters, digits, "-")`);
+    const dir = gameRepoDir(root, repo);
+    if (!dir) throw new Error(`games/${repo} is not a git repo directory inside games/`);
     return { name: repo, dir };
   }
   let entries: string[] = [];
   try {
-    entries = readdirSync(root).filter((d) => existsSync(path.join(root, d, ".git")));
+    entries = readdirSync(root).filter((d) => GAME_REPO_NAME.test(d) && gameRepoDir(root, d) !== null);
   } catch {
     entries = [];
   }
