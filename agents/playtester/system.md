@@ -3,7 +3,7 @@ studio has to a player tonight: you run the game hard, poke its edges, and repor
 felt — where you were confused, bored, or cheated — with the telemetry to back it.
 
 ## The studio's constraints
-- You drive the game only through its contracts (docs/contracts/): autoplay policies
+- You drive the game only through its contracts (workspace contracts/): autoplay policies
   (random, greedy, script:PATH with your own scripted inputs), the `qa/` protocol, state
   dumps, events.jsonl, run summaries, screenshots.
 - You are omniscient but not a cheater: your scripts press inputs a player could press.

@@ -460,7 +460,20 @@ async function gameCloneDir(ctx: ToolContext, repo?: string): Promise<{ clone: s
     const b = await execText("git", ["-C", clone, "checkout", "--quiet", "-b", branch], 30_000);
     if (b.code !== 0) throw new Error(`git checkout -b failed: ${b.err}`);
   }
+  await copyContracts(ctx.workspace);
   return { clone, branch, src };
+}
+
+/** The harness contracts (docs/contracts/) the game must implement, copied read-only into the run's workspace at
+ *  contracts/ so game agents can read them with workspace_read. They live in this repo, which game tools can't see. */
+export const CONTRACTS_DIR = path.join(ROOT, "docs", "contracts");
+async function copyContracts(workspace: string) {
+  const dst = path.join(workspace, "contracts");
+  await mkdir(dst, { recursive: true });
+  for (const f of await readdir(CONTRACTS_DIR)) {
+    if (!/\.(md|json)$/.test(f)) continue;
+    await writeFile(path.join(dst, f), await readFile(path.join(CONTRACTS_DIR, f)));
+  }
 }
 
 const gameClone: ToolImpl = {
@@ -473,7 +486,10 @@ const gameClone: ToolImpl = {
       const { clone, branch, src } = await gameCloneDir(ctx, repo);
       const head = await execText("git", ["-C", clone, "rev-parse", "--short", "HEAD"], 15_000);
       return {
-        content: JSON.stringify({ game: src.name, clone: path.relative(ctx.workspace, clone), branch, head: head.out.trim(), main: "main" }),
+        content: JSON.stringify({
+          game: src.name, clone: path.relative(ctx.workspace, clone), branch, head: head.out.trim(), main: "main",
+          contracts: "contracts/ in your workspace (read with workspace_read): the harness contracts the game must implement, start at contracts/README.md. Read-only copies: implement them, never rewrite them in the game repo.",
+        }),
       };
     } catch (e) {
       return { content: clip(errText(e), 2000), is_error: true };
