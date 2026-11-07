@@ -9,7 +9,7 @@
     "typecheck": "tsc",
     "naive:check": "node --env-file=.env --import tsx scripts/naive-check.ts",
     "agents": "node --env-file-if-exists=.env --import tsx scripts/agents.ts",
-    "test": "node --import tsx --test 'runner/**/*.test.ts' 'tools/**/*.test.ts' 'window/server/**/*.test.ts' && python3 tools/catalog/smoke_test.py",
+    "test": "node --import tsx --test 'runner/**/*.test.ts' 'tools/**/*.test.ts' 'scripts/**/*.test.ts' 'window/server/**/*.test.ts' && python3 tools/catalog/smoke_test.py",
     "agent": "node --env-file-if-exists=.env --import tsx scripts/run-agent.ts",
     "runs": "node --env-file-if-exists=.env --import tsx scripts/runs.ts",
     "eval:market-analyst": "node --env-file-if-exists=.env --import tsx scripts/eval-market-analyst.ts",
@@ -32,7 +32,10 @@
     "approvals": "node --import tsx tools/approvals/approvals.ts",
     "eval:greenlight-chair": "node --env-file-if-exists=.env --import tsx scripts/eval-greenlight-chair.ts",
     "new-game": "node --import tsx tools/gamerepo/new-game.ts",
-    "art": "node --import tsx tools/art/art.ts"
+    "art": "node --import tsx tools/art/art.ts",
+    "eval:art-director": "node --env-file-if-exists=.env --import tsx scripts/eval-art-director.ts",
+    "eval:sprite-artist": "node --env-file-if-exists=.env --import tsx scripts/eval-artists.ts",
+    "eval:env-ui-artist": "node --env-file-if-exists=.env --import tsx scripts/eval-artists.ts"
   },
   "dependencies": {
     "@usenaive-sdk/managed-agents": "^0.12.1",

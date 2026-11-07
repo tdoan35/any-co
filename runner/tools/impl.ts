@@ -13,6 +13,7 @@ import { studioStatusTools } from "./studio-status.ts";
 import { decodePng, encodePng, type RgbaImage } from "../../tools/art/png.ts";
 import { addOutline, contactSheet, lockPalette, snapToGrid, splitStrip } from "../../tools/art/ops.ts";
 import { runGate } from "../../tools/art/gate.ts";
+import { ChargedFailure, generate } from "../../tools/art/generate.ts";
 import { append as ledgerAppend, read as ledgerRead, LEDGER_FILE } from "../../tools/ledger/ledger.ts";
 import { AGENTS_DIR } from "../load.ts";
 import type { Board } from "../board/index.ts";
@@ -798,6 +799,109 @@ const boardTools: Record<string, ToolImpl> = {
   },
 };
 
+// ---------- art_generate (tools/art): paid generation, budget-capped like inference ----------
+
+/** Chain the deterministic pipeline over generated PNGs using the game manifest's locked grid/palette. */
+async function applyArtPostprocess(
+  workspace: string,
+  opts: { snap?: boolean; lock?: boolean; outline?: string },
+  images: string[],
+): Promise<Record<string, unknown>> {
+  const manifestFile = resolveInWorkspace(workspace, path.join("game", "assets", "manifest.json"));
+  let manifest: { grid?: { w: number; h: number }; palette?: string[]; assets?: Array<{ path?: string; size?: { w: number; h: number }; frames?: number }> };
+  try {
+    manifest = JSON.parse(await readFile(manifestFile, "utf8"));
+  } catch (e) {
+    throw new Error(`postprocess needs the game manifest at game/assets/manifest.json (game_clone first): ${errText(e)}`);
+  }
+  if (!manifest.grid || !Array.isArray(manifest.palette) || manifest.palette.length === 0)
+    throw new Error("postprocess needs grid and palette locked in game/assets/manifest.json (the Art Director locks them)");
+
+  const steps: Record<string, unknown> = {};
+  let lockChanged = 0;
+  let lockMaxDistance = 0;
+  let lastSnap: { scaleX: number; scaleY: number; uniform: boolean; integerScale: boolean } | null = null;
+  for (const rel of images) {
+    let img = decodePng(new Uint8Array(await readFile(resolveInWorkspace(workspace, rel))));
+    if (opts.snap) {
+      // Snap to the whole asset (size is ONE frame × frames), never to a single grid cell.
+      const repoRel = rel.replace(/^game\//, "");
+      const entry = manifest.assets?.find((a) => a.path === repoRel);
+      if (!entry?.size)
+        throw new Error(`snap needs the manifest entry for "${repoRel}" with its size (one frame) declared first`);
+      if (entry.size.w % manifest.grid.w !== 0 || entry.size.h % manifest.grid.h !== 0)
+        throw new Error(`manifest size ${entry.size.w}x${entry.size.h} for "${repoRel}" is not a multiple of grid ${manifest.grid.w}x${manifest.grid.h}`);
+      const target = { w: entry.size.w * (entry.frames ?? 1), h: entry.size.h };
+      if (img.width < target.w || img.height < target.h)
+        throw new Error(`generated ${img.width}x${img.height} is smaller than the asset ${target.w}x${target.h}; generate at least the target size`);
+      const r = snapToGrid(img, target);
+      lastSnap = { scaleX: r.scaleX, scaleY: r.scaleY, uniform: r.uniform, integerScale: r.integerScale };
+      img = r.image;
+    }
+    if (opts.lock) {
+      const r = lockPalette(img, manifest.palette);
+      lockChanged += r.stats.pixelsChanged;
+      lockMaxDistance = Math.max(lockMaxDistance, r.stats.maxDistance);
+      img = r.image;
+    }
+    if (opts.outline) img = addOutline(img, opts.outline);
+    await artWritePng(workspace, rel, img);
+  }
+  if (opts.snap && lastSnap) steps.snap = lastSnap;
+  if (opts.lock) steps.lock = { pixelsChanged: lockChanged, maxDistance: lockMaxDistance };
+  if (opts.outline) steps.outline = { color: opts.outline };
+  return steps;
+}
+
+const artGenerate: ToolImpl = {
+  description:
+    "Generate pixel art with a paid provider (PixelLab or Retro Diffusion) and write PNGs into the workspace. " +
+    "Every call reports cost_micro_usd and is charged to the run budget — no raw generations land unprocessed when " +
+    "postprocess is set: snap downscales to the manifest grid, lock forces the manifest palette, outline takes the " +
+    "style bible's outline color. The manifest must be locked (game_clone) before postprocess can run.",
+  input: z
+    .object({
+      provider: z.enum(["pixellab", "retrodiffusion"]),
+      prompt: z.string().min(1).max(2000),
+      width: z.number().int().min(12).max(792),
+      height: z.number().int().min(12).max(792),
+      out: z.string().min(1).regex(/\.png$/i, "out must end in .png").describe("workspace-relative output PNG"),
+      reference: z.string().min(1).optional().describe("workspace-relative reference/anchor PNG"),
+      seed: z.number().int().nonnegative().optional(),
+      frames: z.number().int().optional().describe("animation frames_duration (Retro Diffusion only: 4|6|8|10|12|16)"),
+      transparent: z.boolean().optional().describe("transparent background (default true)"),
+      style: z.string().max(120).optional().describe("Retro Diffusion prompt_style id"),
+      postprocess: z
+        .object({
+          snap: z.boolean().optional().describe("downscale to the manifest entry's full size (size × frames) by majority vote"),
+          lock: z.boolean().optional().describe("force the manifest palette (OKLab nearest)"),
+          outline: hexColor.optional().describe("outline color from the style bible; omit to skip outlining"),
+        })
+        .strict()
+        .optional(),
+    })
+    .strict(),
+  async run(i, ctx) {
+    let result: Awaited<ReturnType<typeof generate>>;
+    try {
+      result = await generate(i, { workspace: ctx.workspace });
+    } catch (e) {
+      // a failure after the provider accepted the job still bills: charge it
+      if (e instanceof ChargedFailure) return { content: errText(e), is_error: true, cost_micro_usd: e.cost_micro_usd };
+      return { content: errText(e), is_error: true };
+    }
+    try {
+      let postprocess: Record<string, unknown> | null = null;
+      if (i.postprocess && (i.postprocess.snap || i.postprocess.lock || i.postprocess.outline))
+        postprocess = await applyArtPostprocess(ctx.workspace, i.postprocess, result.images);
+      return { content: JSON.stringify({ ...result, postprocess }), cost_micro_usd: result.cost_micro_usd };
+    } catch (e) {
+      // generation succeeded and was paid; postprocess failing must not erase the charge
+      return { content: `generated ${result.images.join(", ")} but postprocess failed: ${errText(e)}`, is_error: true, cost_micro_usd: result.cost_micro_usd };
+    }
+  },
+};
+
 // ---------- itch_push / itch_status: butler sends (ask-gated by spec) ----------
 // butler reads BUTLER_API_KEY from env itself, so the key is never in argv, results, or the ledger.
 
@@ -1042,6 +1146,7 @@ export const IMPLS: Record<CapabilityName, Record<string, ToolImpl>> = {
   workspace_write: { workspace_write: workspaceWrite },
   game_repo: gameRepoTools,
   art_tools: artTools,
+  art_generate: { art_generate: artGenerate },
   itch_push: { itch_push: itchPush },
   itch_status: { itch_status: itchStatus },
   email_send: { email_send: emailSend },
