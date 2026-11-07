@@ -463,16 +463,36 @@ const workspaceWrite: ToolImpl = {
 // Each run gets its own clone at <workspace>/game on a per-agent branch; only the Tech Lead
 // merges branches into the game's main branch (single-merger rule, plan.md §6 Engineering).
 
+/** Repo names are single slugs (new-game.ts slugify output): no dots, slashes, or absolute paths. */
+const GAME_REPO_NAME = /^[a-z0-9][a-z0-9-]{0,79}$/;
+
+/** A games/<name> entry is usable only if it is a real directory (not a symlink) whose realpath sits strictly
+ *  inside realpath(root) and that holds a .git. This keeps agents from cloning, and pushing into, any repo
+ *  outside games/ — the harness repo included. */
+function gameRepoDir(root: string, name: string): string | null {
+  const dir = path.join(root, name);
+  try {
+    if (!lstatSync(dir).isDirectory()) return null; // lstat: a symlink is not a directory here
+    const rootReal = realpathSync(root);
+    const real = realpathSync(dir);
+    if (path.dirname(real) !== rootReal) return null;
+  } catch {
+    return null;
+  }
+  return existsSync(path.join(dir, ".git")) ? dir : null;
+}
+
 /** The one game repo the run works on: games/<name> (a git repo with >=1 commit). */
 export function resolveGameRepo(root: string, repo?: string): { name: string; dir: string } {
-  if (repo) {
-    const dir = path.join(root, repo);
-    if (!existsSync(path.join(dir, ".git"))) throw new Error(`games/${repo} is not a git repo`);
+  if (repo !== undefined) {
+    if (!GAME_REPO_NAME.test(repo)) throw new Error(`invalid repo name "${repo}": use the bare name under games/ (lowercase letters, digits, "-")`);
+    const dir = gameRepoDir(root, repo);
+    if (!dir) throw new Error(`games/${repo} is not a git repo directory inside games/`);
     return { name: repo, dir };
   }
   let entries: string[] = [];
   try {
-    entries = readdirSync(root).filter((d) => existsSync(path.join(root, d, ".git")));
+    entries = readdirSync(root).filter((d) => GAME_REPO_NAME.test(d) && gameRepoDir(root, d) !== null);
   } catch {
     entries = [];
   }
