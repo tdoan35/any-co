@@ -8,6 +8,8 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { InboxItem } from "@/lib/mock/weave";
 import { inboxGroups, isAsk, weave, type ItemState, type WeaveState } from "@/lib/weave-store";
+import { httpMode } from "@/lib/api";
+import { approvalTitle } from "@/lib/approval-gate";
 import { cn } from "@/lib/utils";
 import { age, fmtTime, waited } from "./format";
 import { ColumnHeader, ColumnLabel, Face, NameRole, agentOf } from "./parts";
@@ -69,7 +71,10 @@ function Row({ item, st, selected, focused, onOpen, snoozeOpen, onSnoozeOpenChan
   const approval = item.kind === "approval" && !item.gated;
   const yes = approval ? item.actions.find((a) => a.variant === "primary" && a.effect) : undefined;
   const no = approval ? item.actions.find((a) => a.variant === "ghost" && a.effect) : undefined;
-  const live = st.status !== "done";
+  const open = st.status !== "done";
+  // Snooze is browser-local, so live mode drops it; a row with nothing left to do keeps its full width.
+  const canSnooze = !httpMode || st.status === "snoozed";
+  const live = open && (!!yes || !!no || (!ask && st.status === "open") || canSnooze);
   return (
     <div className="group/row relative" data-item={item.id}>
       <button
@@ -92,7 +97,7 @@ function Row({ item, st, selected, focused, onOpen, snoozeOpen, onSnoozeOpenChan
             <span className={cn("ml-auto shrink-0 tabular-nums text-muted-foreground", live && "group-hover/row:invisible group-has-[:focus-visible]/row:invisible", snoozeOpen && "invisible")}>{age(item.at)}</span>
           </span>
           <span className={cn("mt-0.5 line-clamp-2 text-[13px] leading-snug", st.status === "done" ? "text-muted-foreground" : "text-foreground", st.unread && "font-medium")}>
-            {item.title}
+            {item.kind === "approval" ? approvalTitle(item) : item.title}
           </span>
           {st.status === "open" && item.blocking && (
             <span className="mt-1 block truncate text-[11px] text-warn">
@@ -118,7 +123,7 @@ function Row({ item, st, selected, focused, onOpen, snoozeOpen, onSnoozeOpenChan
           {!ask && st.status === "open" && <RowAction label="Done" onClick={() => weave.markDone(item.id)}><Check className="size-3.5" /></RowAction>}
           {st.status === "snoozed"
             ? <RowAction label="Unsnooze" onClick={() => weave.unsnooze(item.id)}><AlarmClock className="size-3.5" /></RowAction>
-            : (
+            : canSnooze && (
               <SnoozeMenu item={item} open={snoozeOpen} onOpenChange={onSnoozeOpenChange}>
                 <button type="button" aria-label="Snooze" className="flex size-6 items-center justify-center rounded-md text-muted-foreground hover:bg-foreground/10 hover:text-foreground data-[state=open]:bg-foreground/10">
                   <AlarmClock className="size-3.5" />

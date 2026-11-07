@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Segmented, headerButton, headerTitle } from "@/components/studio/studio-ui";
 import { isAsk, itemById, navigableIds, useWeave, weave } from "@/lib/weave-store";
+import { httpMode } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { DayRail } from "./day-rail";
 import { fullDayLabel, greeting, shortDayLabel, TODAY } from "./format";
@@ -87,7 +88,7 @@ export function WeaveScreen() {
           // Asks need a decision; "done" is for things you only had to read.
           if (item && !isAsk(item) && state.status[item.id].status === "open") weave.markDone(item.id);
           break;
-        case "s": if (item && state.status[item.id].status === "open") setSnoozeFor(item.id); break;
+        case "s": if (!httpMode && item && state.status[item.id].status === "open") setSnoozeFor(item.id); else return; break;
         case "a": {
           const primary = item?.actions.find((a) => a.variant === "primary");
           if (!item || !primary || state.status[item.id].status !== "open") return;
