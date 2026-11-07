@@ -59,6 +59,36 @@ test("declined approval and ungranted tools return errors to the model", async (
   assert.equal(existsSync(path.join(r.dir, "workspace", "x")), false);
 });
 
+test("a declined approval sends no email (the gate stops the tool before it runs)", async () => {
+  const spec = await loadAgent("send-agent", FIX); // email_send: ask
+  const sent: unknown[] = [];
+  // Fake SDK client: records the send instead of reaching Naïve.
+  const naive = { emails: { send: async (...a: unknown[]) => { sent.push(a); return { object: "email_send", accepted: true, from: "s@x.y", to: ["a@b.example"], sent_at: "t" }; } } } as never;
+  const fake = new FakeProvider([
+    { content: [use("email_send", { to: "press@example.com", subject: "s", body: "b" })] },
+    { content: [use("submit_result", { ok: true })] },
+  ]);
+  const r = await runAgent(spec, { task: "t", provider: fake, naive, runsDir: tmp(), approver: async () => false });
+  assert.equal(r.status, "done");
+  assert.equal(sent.length, 0); // nothing left the machine
+  assert.match(JSON.stringify(fake.requests[1].messages.at(-1)), /a human declined this action/);
+});
+
+test("a declined approval deploys nothing to the site", async () => {
+  const spec = await loadAgent("send-agent", FIX); // site_deploy: ask
+  const deploys: unknown[] = [];
+  // Fake SDK client: records the deploy instead of reaching Naïve.
+  const naive = { apps: { deploy: async (...a: unknown[]) => { deploys.push(a); return { id: "apd_x", status: "queued", url: null }; } } } as never;
+  const fake = new FakeProvider([
+    { content: [use("site_deploy", {})] },
+    { content: [use("submit_result", { ok: true })] },
+  ]);
+  const r = await runAgent(spec, { task: "t", provider: fake, naive, runsDir: tmp(), approver: async () => false });
+  assert.equal(r.status, "done");
+  assert.equal(deploys.length, 0); // nothing left the machine
+  assert.match(JSON.stringify(fake.requests[1].messages.at(-1)), /a human declined this action/);
+});
+
 test("run stops at the per-run budget before overspending", async () => {
   const spec = await loadAgent("good-agent", FIX); // max_task_usd 0.5
   const fake = new FakeProvider(Array.from({ length: 10 }, () => ({ content: [use("workspace_read", {})] })), 200_000);

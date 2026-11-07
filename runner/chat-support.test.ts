@@ -56,7 +56,7 @@ test("history precedes the new message, onEvent sees events live, and tool event
   assert.equal(r.output, "One run finished.");
   // history first, then the task, in order
   assert.deepEqual(fake.requests[0].messages.map((m) => m.content), ["hi", "hello", "what is running?"]);
-  assert.deepEqual(seen.filter((t) => t !== "request" && t !== "reply"), ["start", "tool", "end"]);
+  assert.deepEqual(seen.filter((t) => t !== "request" && t !== "reply" && t !== "msg" && t !== "note"), ["start", "tool", "end"]);
   const tool = readFileSync(path.join(r.dir, "transcript.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).find((e) => e.type === "tool");
   assert.equal(tool.id, "call-1");
   // studio_runs listed the fake run and skipped the chat dir

@@ -3,7 +3,7 @@ ships on your pass unless the contract layers actually ran and the invariants he
 paid to be the person who says "not yet."
 
 ## The studio's constraints
-- The game implements docs/contracts/. You never test "the game"; you test the contracts:
+- The game implements workspace contracts/. You never test "the game"; you test the contracts:
   `build.sh test` (scenes + data schemas), `build.sh qa` (autoplay smoke), the `qa/`
   protocol (state dumps, events.jsonl, run summaries), screenshots.
 - Autoplay invariants: no errors, run completes, no softlock, entity counts bounded

@@ -67,8 +67,11 @@ TODO: fill in as they exist.
 - run one agent locally: `npm run agent -- <name> --task "..." [--model id] [--max-usd N]` → `runs/<run_id>/`
 - run toy task end to end: `npm run agent -- toy-catalog-reporter --task "Report the catalog dataset facts."`
 - cut over one agent to Naïve:
+- crashed runs: `npm run runs -- orphans`; `npm run runs -- resume <run_id> [--max-usd N]` (or `npm run agent -- --resume <run_id>`)
 - approvals queue: `npm run approvals -- list | show <id> | approve <id> [--note "..."] | deny <id> --note "..."` (decide gated tool calls; every decision ledgered)
+- game repo after the Greenlight pick: `npm run new-game -- runs/<greenlight-chair-run>` → `games/<slug>` (empty first commit)
 - gap map: `tools/gapmap/README.md` (embed → build → render)
+- art pipeline: `npm run art -- lock|snap|outline|strip|sheet|gate ...` (`tools/art/README.md`)
 - eval Market Analyst: `npm run eval:market-analyst -- runs/<run_id>` (see `agents/market-analyst/eval/`)
 - eval Game Director design doc: `npm run eval:game-director-design -- runs/<run_id>` (design hand-off: `node --import tsx scripts/greenlight-handoff.ts --design runs/<chair-run>`)
 - kill switch: `touch runs/KILL` (remove to resume); or `STUDIO_KILL=1`

@@ -16,6 +16,12 @@ export const CAPABILITIES = {
     local: true,
     note: "Hosted agents need data/catalog.sqlite inside their computer; not set up yet.",
   },
+  art_tools: {
+    summary: "Deterministic art pipeline (tools/art): palette lock, grid snap, outline, strip split, contact sheet, asset gate",
+    naive: ["bash", "read"],
+    local: true,
+    note: "Local tools over the run workspace and the game clone. Hosted setup not done.",
+  },
   gap_map: {
     summary: "Embedding map of the Steam catalog: open regions near proven demand; probe a description (tools/gapmap)",
     naive: ["bash", "read"],
@@ -53,6 +59,37 @@ export const CAPABILITIES = {
     naive: ["bash", "read", "write", "edit"],
     local: true,
     note: "Local: per-run clone at runs/<id>/workspace/game, branch agent/<name>; only the Tech Lead merges. Hosted: the harness clones the repo into the agent's computer.",
+  },
+  // ----- gated sends (T7): every send is ask-gated by the spec and ledgered via the approval gate -----
+  itch_push: {
+    summary: "Push a built dist/ channel to itch.io with butler (dry-run by default; a real push needs the operator's approval)",
+    naive: ["bash"],
+    local: true,
+    note: "Env only: BUTLER_BIN (default butler) + BUTLER_API_KEY; butler reads the key from env, so it never appears in argv or results.",
+  },
+  itch_status: {
+    summary: "Read-only butler status of an itch channel",
+    naive: ["bash"],
+    local: true,
+    note: "Env only: BUTLER_BIN + BUTLER_API_KEY.",
+  },
+  email_send: {
+    summary: "Send one outreach email from the studio's Naïve identity inbox",
+    naive: [],
+    local: true,
+    note: "SDK emails.send: needs NAIVE_EMAIL_IDENTITY_ID + NAIVE_EMAIL_INBOX_ID in env; STUDIO_EMAIL_BLOCKLIST refuses addresses/domains. No reply_to in the SDK shape.",
+  },
+  site_deploy: {
+    summary: "Publish the studio site (web build + marketing pages) to the studio's Naïve App; rollback to an earlier deployment",
+    naive: [],
+    local: true,
+    note: "SDK apps.deploy: files go as path -> base64; needs STUDIO_SITE_APP_ID in env (app created once by the operator). Deployment builds async: poll site_status.",
+  },
+  site_status: {
+    summary: "Read-only: the studio site's current deployment, URL, and history (last 5)",
+    naive: [],
+    local: true,
+    note: "Needs STUDIO_SITE_APP_ID in env.",
   },
 } as const satisfies Record<string, Capability>;
 
