@@ -72,6 +72,12 @@ export const CAPABILITIES = {
     local: true,
     note: "Local: per-run clone at runs/<id>/workspace/game, branch agent/<name>; only the Tech Lead merges. Hosted: the harness clones the repo into the agent's computer.",
   },
+  image_view: {
+    summary: "Look at a PNG image from the workspace or game clone (art_view): the model sees the image itself, plus dimensions; optional integer upscale for tiny pixel art",
+    naive: [],
+    local: true,
+    note: "Local only: sends an image block to the model; the PNG is copied content-addressed into the run dir. Hosted equivalent not set up.",
+  },
   // ----- gated sends (T7): every send is ask-gated by the spec and ledgered via the approval gate -----
   itch_push: {
     summary: "Push a built dist/ channel to itch.io with butler (dry-run by default; a real push needs the operator's approval)",

@@ -2,7 +2,7 @@
 // endpoint (fast external inference, local-only), and a scripted fake for tests.
 import { createClient } from "@usenaive-sdk/managed-agents";
 import type { AgentSpec } from "./spec.ts";
-import type { Block, Message, ModelReply, ModelRequest, Provider } from "./types.ts";
+import type { Block, ImageBlock, Message, ModelReply, ModelRequest, Provider, ToolUseBlock } from "./types.ts";
 
 export type NaiveClient = ReturnType<typeof createClient>;
 
@@ -124,18 +124,29 @@ export class OpenAICompatibleProvider implements Provider {
       if (!r.ok) throw Object.assign(new Error(`${this.label} HTTP ${r.status}: ${(await r.text()).slice(0, 500)}`), { status: r.status });
       return r;
     }, this.label);
-    const body: any = await res.json();
+    // OpenAI chat-completions reply; parsed once, fields read from the typed shape.
+    interface ChatChoiceMessage {
+      content?: unknown;
+      tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }>;
+    }
+    interface ChatReply {
+      choices?: Array<{ message?: ChatChoiceMessage; finish_reason?: string }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number };
+      id?: string;
+      model?: string;
+    }
+    const body = (await res.json()) as ChatReply;
     const msg = body.choices?.[0]?.message ?? {};
     const content: Block[] = [];
     if (msg.content) content.push({ type: "text", text: String(msg.content) });
     for (const tc of msg.tool_calls ?? []) {
       let input: Record<string, unknown> = {};
       try {
-        input = JSON.parse(tc.function?.arguments || "{}");
+        input = JSON.parse(tc.function?.arguments || "{}") as Record<string, unknown>;
       } catch {
         input = { _unparseable_arguments: String(tc.function?.arguments) };
       }
-      content.push({ type: "tool_use", id: tc.id, name: tc.function?.name, input });
+      content.push({ type: "tool_use", id: tc.id ?? "", name: tc.function?.name ?? "", input });
     }
     const inTok = body.usage?.prompt_tokens ?? 0;
     const outTok = body.usage?.completion_tokens ?? 0;
@@ -151,23 +162,49 @@ export class OpenAICompatibleProvider implements Provider {
   }
 }
 
+const imagePart = (b: ImageBlock): Record<string, unknown> => {
+  if (b.source.type !== "base64") throw new Error("toOpenAIMessages got an unexpanded image ref; call wireMessages() first");
+  return { type: "image_url", image_url: { url: `data:${b.source.media_type};base64,${b.source.data}` } };
+};
+
 export function toOpenAIMessages(system: string, messages: Message[]): any[] {
   const out: any[] = [{ role: "system", content: system }];
+  let pendingToolImages: Array<{ id: string; img: ImageBlock }> = [];
   for (const m of messages) {
     if (typeof m.content === "string") {
       out.push({ role: m.role, content: m.content });
       continue;
     }
     if (m.role === "assistant") {
-      const text = m.content.filter((b) => b.type === "text").map((b: any) => b.text).join("\n");
+      const text = m.content.filter((b) => b.type === "text").map((b) => b.text).join("\n");
       const calls = m.content
-        .filter((b) => b.type === "tool_use")
-        .map((b: any) => ({ id: b.id, type: "function", function: { name: b.name, arguments: JSON.stringify(b.input) } }));
+        .filter((b): b is ToolUseBlock => b.type === "tool_use")
+        .map((b) => ({ id: b.id, type: "function", function: { name: b.name, arguments: JSON.stringify(b.input) } }));
       out.push({ role: "assistant", content: text || null, ...(calls.length ? { tool_calls: calls } : {}) });
     } else {
       for (const b of m.content) {
-        if (b.type === "tool_result") out.push({ role: "tool", tool_call_id: b.tool_use_id, content: b.content });
-        else if (b.type === "text") out.push({ role: "user", content: b.text });
+        if (b.type === "tool_result") {
+          // OpenAI tool messages carry TEXT only (string or text parts) — image_url parts in a
+          // `tool` message are refused or dropped by many gateways (R13 A1). Text stays on the
+          // tool message; every image of this turn goes into one user message right after the
+          // tool messages, each preceded by a text part naming the tool_call_id it belongs to.
+          if (typeof b.content === "string") out.push({ role: "tool", tool_call_id: b.tool_use_id, content: b.content });
+          else {
+            const text = b.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
+            const images = b.content.filter((c): c is ImageBlock => c.type === "image");
+            out.push({ role: "tool", tool_call_id: b.tool_use_id, content: images.length ? `${text}\n[image follows]` : text });
+            for (const img of images) pendingToolImages.push({ id: b.tool_use_id, img });
+          }
+        } else if (b.type === "text") out.push({ role: "user", content: b.text });
+        else if (b.type === "image") out.push({ role: "user", content: [imagePart(b)] });
+      }
+      if (pendingToolImages.length) {
+        // Valid order: assistant tool_calls -> tool results -> user images (the turn's images).
+        out.push({
+          role: "user",
+          content: pendingToolImages.flatMap(({ id, img }) => [{ type: "text", text: `image from tool_call ${id}` }, imagePart(img)]),
+        });
+        pendingToolImages = [];
       }
     }
   }

@@ -11,7 +11,7 @@ import type { CapabilityName } from "./registry.ts";
 import type { NaiveClient } from "../providers.ts";
 import { studioStatusTools } from "./studio-status.ts";
 import { decodePng, encodePng, type RgbaImage } from "../../tools/art/png.ts";
-import { addOutline, contactSheet, lockPalette, snapToGrid, splitStrip } from "../../tools/art/ops.ts";
+import { addOutline, contactSheet, lockPalette, snapToGrid, splitStrip, upscaleNearest } from "../../tools/art/ops.ts";
 import { runGate } from "../../tools/art/gate.ts";
 import { ChargedFailure, ProviderExhausted, balance as providerBalance, generate, isAnimation, quote as providerQuote, type GenerateResult, type ProviderName } from "../../tools/art/generate.ts";
 import {
@@ -19,6 +19,7 @@ import {
   readProviders, recordAnchorWinner, recordCredit, statePaths,
 } from "../../tools/art/credits.ts";
 import { append as ledgerAppend, read as ledgerRead, LEDGER_FILE } from "../../tools/ledger/ledger.ts";
+import type { ImageBlock } from "../types.ts";
 import { AGENTS_DIR } from "../load.ts";
 import type { Board } from "../board/index.ts";
 
@@ -38,6 +39,8 @@ export interface ToolContext {
 
 export interface ToolOutput {
   content: string;
+  /** Optional image the model must see next to the text (a ref block; no base64 here). */
+  image?: ImageBlock;
   is_error?: boolean;
   cost_micro_usd?: number;
 }
@@ -459,6 +462,58 @@ const workspaceWrite: ToolImpl = {
       return { content: `wrote ${path.relative(ctx.workspace, p)} (${content.length} chars)` };
     } catch (e: any) {
       return { content: String(e?.message ?? e), is_error: true };
+    }
+  },
+};
+
+// ---------- art_view (image_view capability) ----------
+const MAX_PNG_BYTES = 4 * 1024 * 1024;
+const MAX_IMAGE_SIDE = 1024;
+
+const artView: ToolImpl = {
+  description:
+    "View a PNG image inside your workspace (sprite sheet, contact sheet, screenshot): the image itself is shown to you, along with its dimensions and sha256. Use it to check art against an anchor. Optional integer upscale for tiny pixel art (nearest-neighbour, output capped at 1024 px per side).",
+  input: z
+    .object({
+      path: z.string().min(1).describe("PNG path inside the workspace, e.g. art/sheet.png"),
+      upscale: z.number().int().min(1).max(8).optional().describe("Integer nearest-neighbour upscale for pixel art (max side 1024 px)"),
+    })
+    .strict(),
+  async run({ path: rel, upscale }, ctx) {
+    try {
+      const p = resolveInWorkspace(ctx.workspace, rel);
+      const st = await stat(p);
+      if (st.size > MAX_PNG_BYTES) return { content: `image is too large: ${st.size} bytes (cap ${MAX_PNG_BYTES})`, is_error: true };
+      let bytes: Uint8Array = new Uint8Array(await readFile(p));
+      let img: RgbaImage = decodePng(bytes);
+      const src = `${img.width}x${img.height}`;
+      if (Math.max(img.width, img.height) > MAX_IMAGE_SIDE && !upscale)
+        return { content: `image is ${img.width}x${img.height}: over the ${MAX_IMAGE_SIDE}px per-side cap. Make a smaller sheet (or pass \`upscale\` only on a small source).`, is_error: true };
+      let scaleNote = "";
+      if (upscale) {
+        const k = Math.min(upscale, Math.floor(MAX_IMAGE_SIDE / Math.max(img.width, img.height)));
+        if (k > 1) {
+          const up = upscaleNearest(img, k);
+          scaleNote = ` (${src}, x${k} nearest-neighbour)`;
+          img = up;
+          bytes = encodePng(img);
+        }
+      }
+      if (bytes.length > MAX_PNG_BYTES) return { content: `encoded image is too large: ${bytes.length} bytes (cap ${MAX_PNG_BYTES}); use a smaller upscale`, is_error: true };
+      // Content-addressed copy of the exact bytes sent: the transcript records the ref, a
+      // resume rebuilds the message from this copy even if the workspace file changes.
+      const sha = createHash("sha256").update(bytes).digest("hex");
+      const runDir = path.join(ctx.runsDir ?? path.join(ROOT, "runs"), ctx.run_id ?? "manual");
+      const imagesDir = path.join(runDir, "images");
+      await mkdir(imagesDir, { recursive: true });
+      const copy = path.join(imagesDir, `${sha}.png`);
+      if (!existsSync(copy)) await writeFile(copy, bytes);
+      return {
+        content: `${img.width}×${img.height}${scaleNote} PNG, ${bytes.length} bytes, sha256 ${sha.slice(0, 16)}`,
+        image: { type: "image", source: { type: "ref", path: copy, media_type: "image/png", sha256: sha, size: bytes.length } },
+      };
+    } catch (e) {
+      return { content: `art_view failed: ${e instanceof Error ? e.message : String(e)}`, is_error: true };
     }
   },
 };
@@ -1332,6 +1387,7 @@ export const IMPLS: Record<CapabilityName, Record<string, ToolImpl>> = {
   web_search: { web_search: webSearch },
   workspace_read: { workspace_read: workspaceRead },
   workspace_write: { workspace_write: workspaceWrite },
+  image_view: { art_view: artView },
   game_repo: gameRepoTools,
   art_tools: artTools,
   art_generate: { art_generate: artGenerate, art_quote: artQuote, art_anchor_winner: artAnchorWinner, art_providers: artProviders },

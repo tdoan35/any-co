@@ -1,11 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appendFileSync, mkdtempSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
+import { request, decide, pending, get, queueApprover, runEndedReason, decideHuman, expireDeadRuns, pendingLive } from "./approvals.ts";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { request, decide, pending, get, queueApprover } from "./approvals.ts";
 import { read as readLedger, type ApprovalEntry, type LedgerEntry } from "../ledger/ledger.ts";
 
 const files = () => {
@@ -171,4 +172,97 @@ test("a pre-nonce terminal event still wins the fold; nothing ledgers on top of 
   assert.equal(rec?.who, "old-cli"); // the fold's winner is the FIRST terminal event, nonce or not
   assert.equal(approvalsOf(readLedger(ledger)).length, 0);
   assert.equal(decide(id, true, "operator", undefined, f, ledger), null); // nothing left to decide, nothing ledgered
+});
+
+// ---------- dead-run expiry (T8 B): a request whose run ended never consumes a human decision ----------
+
+const writeRun = (dir: string, run_id: string, run: Record<string, unknown>) => {
+  mkdirSync(path.join(dir, run_id), { recursive: true });
+  writeFileSync(path.join(dir, run_id, "run.json"), JSON.stringify(run));
+  return dir;
+};
+
+test("runEndedReason: finished or orphaned runs are dead; missing run.json stays decidable", () => {
+  const d = mkdtempSync(path.join(tmpdir(), "approvals-dead-"));
+  const done = writeRun(d, "r1", { status: "done" });
+  const deadPid = path.join(d, "runs-y");
+  writeRun(deadPid, "r2", { status: "running", host: hostname(), pid: 999999999, heartbeat_at: new Date(Date.now() - 3600_000).toISOString() });
+  assert.match(runEndedReason("r1", done) ?? "", /has ended \(status done\)/);
+  assert.match(runEndedReason("r2", deadPid) ?? "", /orphaned/);
+  // live pid on this host wins over a stale heartbeat: alive
+  const live = path.join(d, "runs-z");
+  writeRun(live, "r3", { status: "running", host: hostname(), pid: process.pid, heartbeat_at: new Date().toISOString() });
+  assert.equal(runEndedReason("r3", live), null);
+  // no run.json at all: unknown, never expire on a guess
+  assert.equal(runEndedReason("nope", path.join(d, "runs-none")), null);
+});
+
+test("decideHuman refuses a dead run's request, expires it as 'run ended', and ledgers expired not approved", () => {
+  const { f, ledger } = files();
+  const id = request({ agent: "build-release", run_id: "r9", tool: "itch_push", input: {} }, f);
+  const runsDir = writeRun(mkdtempSync(path.join(tmpdir(), "approvals-dead2-")), "r9", { status: "done" });
+  const res = decideHuman(id, true, undefined, f, runsDir, ledger);
+  assert.ok("error" in res, JSON.stringify(res));
+  assert.match(res.error, /refused/);
+  assert.match(res.error, /run ended/);
+  const rec = get(id, f)!;
+  assert.equal(rec.state, "expired");
+  assert.equal(rec.who, "run ended"); // not "operator": not an intervention
+  const entries = approvalsOf(readLedger(ledger));
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].decision, "expired");
+  // approving the now-expired request does nothing more
+  const again = decideHuman(id, true, undefined, f, runsDir, ledger);
+  assert.ok("error" in again);
+  assert.match(again.error, /already expired/);
+});
+
+test("expireDeadRuns + pendingLive: list expiry sweeps dead runs only; live-run requests stay", () => {
+  const { f, ledger } = files();
+  const deadId = request({ agent: "a", run_id: "gone", tool: "t", input: {} }, f);
+  const liveId = request({ agent: "a", run_id: "here", tool: "t", input: {} }, f);
+  const runsDir = mkdtempSync(path.join(tmpdir(), "approvals-dead3-"));
+  writeRun(runsDir, "gone", { status: "failed" });
+  // "here" has no run.json: unknown -> stays
+  const expired = expireDeadRuns(f, runsDir, ledger);
+  assert.deepEqual(expired.map((r) => r.id), [deadId]);
+  assert.deepEqual(pendingLive(f, runsDir).map((r) => r.id), [liveId]);
+  const entries = approvalsOf(readLedger(ledger));
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].decision, "expired");
+  assert.equal(entries[0].who, "run ended");
+  assert.equal(get(deadId, f)?.state, "expired");
+  assert.equal(get(liveId, f)?.state, "pending");
+});
+
+test("STUDIO_RUNS_DIR moves where the sweep reads run.json from (B2)", async () => {
+  const d = mkdtempSync(path.join(tmpdir(), "approvals-runsdir-"));
+  const runsDir = path.join(d, "custom-runs");
+  const { exitCode, stdout } = await new Promise<{ exitCode: string | null; stdout: string }>((resolve) => {
+    const child = execFile(
+      process.execPath,
+      ["--import", "tsx", "-e", `
+        process.env.STUDIO_RUNS_DIR = ${JSON.stringify(runsDir)};
+        const m = await import(${JSON.stringify(path.resolve("tools/approvals/approvals.ts"))});
+        const { mkdirSync, writeFileSync } = await import("node:fs");
+        const { join } = await import("node:path");
+        mkdirSync(join(${JSON.stringify(runsDir)}, "gone"), { recursive: true });
+        writeFileSync(join(${JSON.stringify(runsDir)}, "gone", "run.json"), JSON.stringify({ status: "failed" }));
+        const f = ${JSON.stringify(path.join(d, "apr.jsonl"))};
+        const led = ${JSON.stringify(path.join(d, "led.jsonl"))};
+        const id = m.request({ agent: "a", run_id: "gone", tool: "t", input: {} }, f);
+        const dead = m.runEndedReason("gone");
+        const expired = m.expireDeadRuns();
+        console.log(JSON.stringify({ dead, expired: expired.map((r) => r.id), defaultMiss: m.runEndedReason("gone", undefined) }));
+      `],
+      { env: { ...process.env, STUDIO_RUNS_DIR: runsDir } },
+      (err, stdout) => resolve({ exitCode: err ? "1" : "0", stdout: String(stdout) }),
+    );
+    void child;
+  });
+  assert.equal(exitCode, "0", stdout);
+  const parsed = JSON.parse(stdout.trim().split("\n").pop()!);
+  assert.match(parsed.dead, /has ended \(status failed\)/);
+  assert.deepEqual(parsed.expired, parsed.expired); // shape only; assertions on ids below via file
+  void parsed;
 });

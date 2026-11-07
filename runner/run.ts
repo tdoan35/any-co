@@ -10,11 +10,13 @@ import type { AgentSpec, Permission } from "./spec.ts";
 import type { CapabilityName } from "./tools/registry.ts";
 import { IMPLS, TOOL_INDEX, clip, type ToolContext } from "./tools/impl.ts";
 import { SpendLedger, killSwitchOn, limitsFor } from "./spend.ts";
+import { wireMessages } from "./images.ts";
 import type { Block, Message, Provider, ToolDef, ToolResultBlock, ToolUseBlock } from "./types.ts";
 import type { NaiveClient } from "./providers.ts";
 import type { Board } from "./board/index.ts";
 
-export const RUNS_DIR = path.join(ROOT, "runs");
+/** Run dirs root; STUDIO_RUNS_DIR moves it (must agree with STUDIO_APPROVALS_FILE's parent and the window's runsDir). */
+export const RUNS_DIR = process.env.STUDIO_RUNS_DIR ? path.resolve(process.env.STUDIO_RUNS_DIR) : path.join(ROOT, "runs");
 const SUBMIT = "submit_result";
 const MAX_NUDGES = 2;
 
@@ -217,7 +219,8 @@ export async function runAgent(spec: AgentSpec, opts: RunOptions): Promise<RunRe
       }
       state.turns++;
       event("request", { turn: state.turns, messages: messages.length });
-      const reply = await opts.provider.complete({ system, messages, tools, max_tokens: spec.limits.max_output_tokens });
+      // Image refs become base64 only here, on the wire: the transcript and any resume keep refs.
+      const reply = await opts.provider.complete({ system, messages: wireMessages(messages), tools, max_tokens: spec.limits.max_output_tokens });
       maxCallCost = Math.max(maxCallCost, reply.cost_micro_usd);
       charge("model", reply.model, reply.cost_micro_usd);
       event("reply", { turn: state.turns, ...reply });
@@ -340,9 +343,11 @@ async function callTool(
   const t0 = Date.now();
   const out = await impl.run(parsed.data, ctx);
   charge("tool", use.name, out.cost_micro_usd ?? 0);
-  // `clipped` tells resume.ts the recorded content is not the exact result anymore.
-  event("tool", { id: use.id, name: use.name, input: parsed.data, ms: Date.now() - t0, is_error: !!out.is_error, cost_micro_usd: out.cost_micro_usd ?? 0, content: clip(out.content, 100_000), clipped: out.content.length > 100_000 });
-  return { type: "tool_result", tool_use_id: use.id, content: out.content, ...(out.is_error ? { is_error: true } : {}) };
+  // `clipped` tells resume.ts the recorded content is not the exact result anymore. An image
+  // result records its ref block separately (small, no base64); the model gets text + image.
+  const content = out.image ? [{ type: "text" as const, text: out.content }, out.image] : out.content;
+  event("tool", { id: use.id, name: use.name, input: parsed.data, ms: Date.now() - t0, is_error: !!out.is_error, cost_micro_usd: out.cost_micro_usd ?? 0, content: clip(out.content, 100_000), clipped: out.content.length > 100_000, ...(out.image ? { image: out.image } : {}) });
+  return { type: "tool_result", tool_use_id: use.id, content, ...(out.is_error ? { is_error: true } : {}) };
 }
 
 /**
