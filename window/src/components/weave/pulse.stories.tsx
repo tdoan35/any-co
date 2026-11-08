@@ -226,6 +226,29 @@ export const EventLinesAndArtifacts: Story = {
   },
 };
 
+/** A pulse row whose actor is not in the registry (a renamed spec, an old run) still renders. */
+export const UnknownActor: Story = {
+  name: "Event line · unknown actor",
+  parameters: pulseRoutes(() => setWeaveSnapshot({
+    items: inboxSeed,
+    pulse: [{
+      id: "e-retired",
+      kind: "event",
+      actorId: "gameplay-engineer",
+      at: "2026-10-02T11:00:00-07:00",
+      text: "Started: overnight polish.",
+    }],
+    presence: presenceSeed,
+    calendar: calendarEvents,
+  })),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    expect(canvas.getByText("gameplay-engineer")).toBeInTheDocument();
+    expect(canvas.getByText(/Started: overnight polish\./)).toBeInTheDocument();
+    expect(canvas.getByTitle("gameplay-engineer · Unknown agent")).toBeInTheDocument();
+  },
+};
+
 /** Policy change line: the audit-trail card for autonomy you granted. */
 export const PolicyChange: Story = {
   name: "Policy change line",

@@ -27,7 +27,7 @@ The head turn runs outside `--max-parallel`: count N dispatched runs + 1 head tu
   lives. If the holder died, the next start takes the lock over; on another host, remove the file by hand.
 - Board backend: `STUDIO_BOARD=local` (default; `runs/board.jsonl`, override `STUDIO_BOARD_FILE`) or
   `STUDIO_BOARD=naive` (`NAIVE_API_KEY` + `STUDIO_BOARD_REF` = the Studio Head agent's `brd_`/`agt_` id).
-- Honest close (T29): ticket-work agents (gameplay-engineer[-b], tech-lead, level-content-designer, art-director,
+- Honest close (T29): ticket-work agents (gameplay-engineer-a, gameplay-engineer-b, tech-lead, level-content-designer, art-director,
   sprite-artist, env-ui-artist, qa-lead, playtester, build-release) must submit `complete: true|false`. A run
   that ends `done` with `complete: false` closes its card as `blocked`, with a note starting "not complete:"
   and the agent's own summary, so downstream cards keep waiting. Budget/max-turns ends still block. Unblock

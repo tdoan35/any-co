@@ -53,7 +53,7 @@ Steam can't release a new game this weekend. The store page review takes days, t
 | Art | **Environment & UI Artist** | Tilesets, UI, capsule art | Mid |
 | Audio | **Audio** | Procedural sound effects, music | Fast |
 | Eng | **Tech Lead** | Skeleton plus test hooks in hour one; **only one who merges** | Strong |
-| Eng | **Gameplay Engineer ×2** | Feature tickets that don't touch the same scenes | Mid / fast |
+| Eng | **Gameplay Engineer A** and **Gameplay Engineer B** | Feature tickets that don't touch the same scenes | Mid / fast |
 | Eng | **Build & Release** | Web and Windows exports, itch upload via butler, Steam upload via steamcmd | Fast |
 | QA | **QA Lead** | Triage, severity, release gate | Mid |
 | QA | **Playtester** | Autoplay runs, visual checks, exploratory play | Mid + vision |

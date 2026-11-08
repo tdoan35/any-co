@@ -1,16 +1,16 @@
 import { z } from "zod";
 import { COMPLETE, defineAgent } from "../../runner/spec.ts";
 
-// One ticket per task, own clone + branch, never merges. Self-test evidence is copied from
-// game_exec output; QA re-runs it. (Roster runs two instances of this spec.)
+// Gameplay Engineer A. One ticket per task, own clone + branch, never merges. Self-test evidence
+// is copied from game_exec output; QA re-runs it. Engineer B is agents/gameplay-engineer-b.
 export default defineAgent({
-  name: "gameplay-engineer",
-  description: "Eng: implements one gameplay ticket per task in its own clone and branch; self-tests against the contracts and hands the branch to the Tech Lead.",
+  name: "gameplay-engineer-a",
+  description: "Eng: Gameplay Engineer A. Implements one gameplay ticket per task in its own clone and branch; self-tests against the contracts and hands the branch to the Tech Lead.",
   dept: "eng",
   runner: "local",
   model: "anthropic/claude-opus-5.5", // Naïve catalogue id, used if this agent is ever hosted
   // Nov 7 6 PM: Neon credits ran out ($0.99 left), so local runs go through Naïve's proxy (real money, billed per call). Ty via EA B.
-  budget: { cap_usd: 80, max_task_usd: 15, period: "day" }, // Opus via Neon; one feature ticket per run; both engineer runs share this day cap
+  budget: { cap_usd: 80, max_task_usd: 15, period: "day" }, // Opus via Neon; one feature ticket per run; Engineer B has its own day cap
   tools: { game_repo: "allow", qa_harness: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow" },
   output_schema: z
     .object({

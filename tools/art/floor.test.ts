@@ -62,7 +62,7 @@ async function fakes(state: { generations: number; perCall: number; comfy: boole
       }
       if (url === "/v2/background-jobs/j1") return send(res, 200, { status: "completed", last_response: { images: [{ type: "base64", base64: Buffer.from(PNG).toString("base64") }] } });
       if (!state.comfy) return send(res, 503, {});
-      if (url === "/system_stats") return send(res, 200, {});
+      if (url === "/system_stats" || url === "/queue") return send(res, 200, {});
       if (url === "/upload/image") return send(res, 200, { name: "ref.png", subfolder: "" });
       if (url === "/prompt") {
         prompts++;

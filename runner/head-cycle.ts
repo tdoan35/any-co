@@ -7,11 +7,11 @@ import { read as ledgerRead, LEDGER_FILE } from "../tools/ledger/ledger.ts";
 // nobody asked for") and left every department idle while two art runs were in flight; this one drives the plan.
 const PIPELINE = `Pipeline (docs/plan.md): each stage starts when its input exists, and stages run in parallel.
 - design (game-design-director, level-content-designer): design doc, content data. The pitch-writer's three pitches are already done by the time the Chair has picked.
-- engineering (tech-lead merges agent branches into the game's main and keeps the build green; gameplay-engineer builds features from the tech lead's tickets).
+- engineering (tech-lead merges agent branches into the game's main and keeps the build green; gameplay-engineer-a and gameplay-engineer-b build features from the tech lead's tickets, one ticket each, never the same scenes).
 - art (art-director: anchors, gate verdicts, fallback ladder; sprite-artist, env-ui-artist: batch assets from the anchors). Artists share one generation budget: at most one card per artist at a time.
 - integration: when an agent branch (art, content, gameplay) has finished work, the tech-lead merges it into main and wires it into the build.
 - QA, the release gate (qa-lead: contract smoke, determinism and invariants on the main build; playtester: an exploratory play report). This runs again after every merge batch, and its findings become engineering cards.
-- balance and content breadth: gameplay-engineer or level-content-designer, working against the design doc's targets and QA's numbers.
+- balance and content breadth: gameplay-engineer-a, gameplay-engineer-b, or level-content-designer, working against the design doc's targets and QA's numbers.
 - release (build-release): web build to the studio site, itch page and build, later the Windows build and the Steam page. Pushes and deploys are approval-gated, and a human decides them.
 - marketing (marketing-lead, community-outreach): positioning, devlog, store copy, posts and outreach drafts. Sends are approval-gated.
 - compliance (finance-compliance): signs off on every external page and post. Trailer and media come from autoplay captures.
