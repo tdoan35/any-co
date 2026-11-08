@@ -80,12 +80,12 @@ test("art_view: image block + size, content-addressed copy, escape and cap refus
   assert.equal(capped.is_error, true);
   assert.match(capped.content, /too large/);
 
-  // A2: a huge but small-in-bytes PNG is capped by dimensions too, unless upscaling.
+  // A2 (T49): a huge but small-in-bytes PNG is DOWNSCALED to the cap, not refused.
   const huge = encodePng({ width: 2000, height: 2000, data: new Uint8Array(2000 * 2000 * 4) });
   writeFileSync(path.join(workspace, "huge.png"), huge);
   const noScale = await artView.run({ path: "huge.png" }, { workspace, naive: null, runsDir, run_id: "r-img" });
-  assert.equal(noScale.is_error, true);
-  assert.match(noScale.content, /1024px per-side cap/);
+  assert.equal(noScale.is_error, undefined, noScale.content);
+  assert.match(noScale.content, /1000×1000 .*shown at 1\/2/);
   const withScale = await artView.run({ path: "huge.png", upscale: 1 }, { workspace, naive: null, runsDir, run_id: "r-img" });
   assert.equal(withScale.is_error, undefined, withScale.content);
 });
@@ -216,4 +216,45 @@ test("Naïve provider: image blocks (top level and inside tool_result) are sent 
   assert.doesNotMatch(json, /"type":"image"/);
   assert.equal(json.split(IMAGE_OMITTED.slice(0, 20)).length - 1, 2);
   assert.match(json, /64x64 sha abc/);
+});
+
+// ----- T49: over-cap images are downscaled, not refused -----
+
+test("T49 art_view: 1280x720 downscales to 640x360 at 1/2 with the scale note; odd sizes fit 1024", async () => {
+  const artView = IMPLS.image_view.art_view;
+  const workspace = tmp();
+  const run = (w: number, h: number, extra: Record<string, unknown> = {}) =>
+    artView.run({ path: "shot.png", ...extra }, { workspace, naive: null, runsDir: tmp(), run_id: `r-t49-${w}x${h}` });
+
+  const even = encodePng({ width: 1280, height: 720, data: new Uint8Array(1280 * 720 * 4).fill(9) });
+  writeFileSync(path.join(workspace, "shot.png"), even);
+  const half = await run(1280, 720);
+  assert.equal(half.is_error, undefined, half.content);
+  assert.match(half.content, /^640×360 \(1280x720 shown at 1\/2[^)]*\) PNG/);
+  assert.match(half.content, /1280x720 shown at 1\/2: multiply rect sizes by 2/);
+  const halfImg = decodePng(new Uint8Array(readFileSync(path.join((half.image?.source as { path: string }).path))));
+  assert.equal(halfImg.width, 640);
+  assert.equal(halfImg.height, 360);
+
+  // 1537x864: the half (768x432) fits too -- use an odd height so halving is not clean? half always fits
+  // for anything <= 2048; the fit path takes over above 2048 or on odd halves. 3001x2001: half=1500>1024? no.
+  // The fit branch triggers when half would still exceed the cap: e.g. 4096x2 -> 2048x2? half 2048>1024 -> fit.
+  const tall = encodePng({ width: 4096, height: 2, data: new Uint8Array(4096 * 2 * 4).fill(3) });
+  writeFileSync(path.join(workspace, "wide2.png"), tall);
+  const fit = await artView.run({ path: "wide2.png" }, { workspace, naive: null, runsDir: tmp(), run_id: "r-t49-fit" });
+  assert.match(fit.content, /^1024×\d+ \([^)]*shown at 1\/[^)]*\) PNG/);
+  assert.match(fit.content, /shown at 1\//);
+  // 1152x648 halves cleanly to 576x324 (ticket's 1024x576 is the fit path for non-halvable sizes)
+  const mid = encodePng({ width: 1152, height: 648, data: new Uint8Array(1152 * 648 * 4).fill(3) });
+  writeFileSync(path.join(workspace, "mid.png"), mid);
+  const midOut = await artView.run({ path: "mid.png" }, { workspace, naive: null, runsDir: tmp(), run_id: "r-t49-mid" });
+  assert.match(midOut.content, /^576×324 \([^)]*1\/2[^)]*\) PNG/);
+  assert.match(midOut.content, /shown at 1\/2/);
+
+  // an upscale that would exceed the cap is clamped, not refused (pre-existing behaviour, now
+  // composed with the downscale: a small source still upscales after a big one is reduced)
+  const tiny = encodePng({ width: 300, height: 200, data: new Uint8Array(300 * 200 * 4).fill(5) });
+  writeFileSync(path.join(workspace, "tiny.png"), tiny);
+  const up = await artView.run({ path: "tiny.png", upscale: 8 }, { workspace, naive: null, runsDir: tmp(), run_id: "r-t49-up" });
+  assert.match(up.content, /900×600 \(300x200, x3 nearest-neighbour\) PNG/); // k clamped so the long side <= 1024
 });

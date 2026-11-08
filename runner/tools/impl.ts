@@ -14,7 +14,7 @@ import { MAX_RESULT_CHARS, clip, errText, lstatOk, realOrNull, resolveInWorkspac
 import type { NaiveClient } from "../providers.ts";
 import { studioStatusTools } from "./studio-status.ts";
 import { decodePng, encodePng, type RgbaImage } from "../../tools/art/png.ts";
-import { addOutline, contactSheet, lockPalette, snapToGrid, splitStrip, upscaleNearest } from "../../tools/art/ops.ts";
+import { addOutline, contactSheet, downscaleNearest, lockPalette, scaleToFit, snapToGrid, splitStrip, upscaleNearest } from "../../tools/art/ops.ts";
 import { runGate } from "../../tools/art/gate.ts";
 import { ChargedFailure, DEFAULT_CANDIDATES, MAX_CANDIDATES, OPENAI_IMAGE_MODELS, ProviderExhausted, ProviderUnavailable, balance as providerBalance, generate, type Balance, isAnimation, quote as providerQuote, type GenerateResult, type ProviderName } from "../../tools/art/generate.ts";
 import {
@@ -454,9 +454,25 @@ const artView: ToolImpl = {
       let bytes: Uint8Array = new Uint8Array(await readFile(p));
       let img: RgbaImage = decodePng(bytes);
       const src = `${img.width}x${img.height}`;
-      if (Math.max(img.width, img.height) > MAX_IMAGE_SIDE && !upscale)
-        return { content: `image is ${img.width}x${img.height}: over the ${MAX_IMAGE_SIDE}px per-side cap. Make a smaller sheet (or pass \`upscale\` only on a small source).`, is_error: true };
       let scaleNote = "";
+      // T49: over-cap sources are DOWNSCALED, not refused. Prefer a whole-number divisor
+      // (pixel art: clean blocks); otherwise nearest-neighbour to fit on the long side.
+      if (Math.max(img.width, img.height) > MAX_IMAGE_SIDE) {
+        // T49: prefer a clean 1/2 (pixel-art blocks) when it fits the cap; else nearest-neighbour fit.
+        const halfFits = Math.floor(img.width / 2) <= MAX_IMAGE_SIDE && Math.floor(img.height / 2) >= 1;
+        if (halfFits) {
+          const down = downscaleNearest(img, 2);
+          scaleNote = ` (${src} shown at 1/2: multiply rect sizes by 2)`;
+          img = down;
+          bytes = encodePng(img);
+        } else {
+          const down = scaleToFit(img, MAX_IMAGE_SIDE);
+          const factor = (img.width / down.width).toFixed(3).replace(/\.?0+$/, "");
+          scaleNote = ` (${src} shown at 1/${factor}: multiply rect sizes by ${factor})`;
+          img = down;
+          bytes = encodePng(img);
+        }
+      }
       if (upscale) {
         const k = Math.min(upscale, Math.floor(MAX_IMAGE_SIDE / Math.max(img.width, img.height)));
         if (k > 1) {
@@ -2094,6 +2110,7 @@ export function mediaLaunch(clone: string, launch: string[]): string[] {
   }
   const out: string[] = [];
   let scene: string | null = null;
+  let mainPack: string | null = null; // the accepted --main-pack arg (dup-check); the resolved path rides in out
   for (let k = 0; k < rest.length; k++) {
     const a = rest[k];
     if (LAUNCH_FLAGS.has(a)) out.push(a);
@@ -2102,6 +2119,29 @@ export function mediaLaunch(clone: string, launch: string[]): string[] {
       const target = rest[++k] ?? "";
       if (resolveInWorkspace(clone, target) !== clone) throw new Error(`--path must be the game clone itself (".") , got "${target}"`);
       out.push(a, clone);
+    } else if (isEngine && a === "--main-pack") {
+      if (mainPack !== null) throw new Error("only one --main-pack per launch");
+      // T49: run the EXPORTED pack (build.md dist/<target>/*.pck) instead of the project dir. The
+      // pack must be a real .pck inside the clone (realpath-checked), exactly one per launch.
+      const pck = rest[++k] ?? "";
+      if (!/\.pck$/i.test(pck)) throw new Error(`--main-pack wants a .pck inside the clone, got "${pck}"`);
+      const resolved = resolveInWorkspace(clone, pck);
+      let real = resolved;
+      try {
+        real = realpathSync(resolved);
+      } catch {
+        throw new Error(`--main-pack ${pck} does not exist in the game clone`);
+      }
+      let cloneReal = clone;
+      try {
+        cloneReal = realpathSync(clone);
+      } catch {
+        /* clone missing: the existsSync above already failed for --path users */
+      }
+      if (!real.startsWith(cloneReal + path.sep) && real !== cloneReal) throw new Error(`--main-pack ${pck} escapes the game clone`);
+      if (out.some((x, i2) => out[i2 - 1] === "--main-pack")) throw new Error("only one --main-pack per launch");
+      mainPack = pck;
+      out.push(a, resolved);
     } else if (isEngine && !scene && /^res:\/\/[A-Za-z0-9_./-]+\.t?scn$/.test(a)) {
       // T43: the scene that implements the qa/ protocol, when it isn't the main scene (e.g. res://qa/driver.tscn).
       // It must be a scene file inside the clone; the engine still runs only this project.
@@ -2109,8 +2149,12 @@ export function mediaLaunch(clone: string, launch: string[]): string[] {
       if (!existsSync(file)) throw new Error(`launch scene ${a} does not exist in the game clone`);
       scene = a;
       out.push(a);
-    } else throw new Error(`launch argument "${a}" is not allowed (allowed: ${[...LAUNCH_FLAGS, ...LAUNCH_VALUE_FLAGS].join(", ")}${isEngine ? ", --path ., one res://<scene>.tscn in the clone" : ""})`);
+    } else
+      throw new Error(
+        `launch argument "${a}" is not allowed (allowed: ${[...LAUNCH_FLAGS, ...LAUNCH_VALUE_FLAGS].join(", ")}${isEngine ? ", --path ., --main-pack <clone>.pck, one res://<scene>.tscn in the clone" : ""})`,
+      );
   }
+  if (mainPack !== null && out.includes("--path")) throw new Error("--main-pack and --path are mutually exclusive: one project source per launch");
   return [exe, ...out];
 }
 

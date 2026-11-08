@@ -274,3 +274,36 @@ export function upscaleNearest(img: RgbaImage, k: number): RgbaImage {
   }
   return out;
 }
+
+/** Nearest-neighbour downscale by an integer divisor (pixel art: 2x1 blocks etc.), width-preserving per row via floor sampling. */
+export function downscaleNearest(img: RgbaImage, d: number): RgbaImage {
+  if (!Number.isInteger(d) || d < 1) throw new Error(`downscale divisor must be a positive integer, got ${d}`);
+  const out = makeImage(Math.max(1, Math.floor(img.width / d)), Math.max(1, Math.floor(img.height / d)));
+  for (let y = 0; y < out.height; y++) {
+    const sy = Math.min(img.height - 1, y * d);
+    for (let x = 0; x < out.width; x++) {
+      const sx = Math.min(img.width - 1, x * d);
+      const si = (sy * img.width + sx) * 4;
+      out.data.set(img.data.subarray(si, si + 4), (y * out.width + x) * 4);
+    }
+  }
+  return out;
+}
+
+/** Nearest-neighbour scale to fit `maxSide` on the long side, keeping the aspect ratio (non-uniform factor is fine for a preview). */
+export function scaleToFit(img: RgbaImage, maxSide: number): RgbaImage {
+  const long = Math.max(img.width, img.height);
+  if (long <= maxSide) return img;
+  const w = Math.max(1, Math.round((img.width * maxSide) / long));
+  const h = Math.max(1, Math.round((img.height * maxSide) / long));
+  const out = makeImage(w, h);
+  for (let y = 0; y < h; y++) {
+    const sy = Math.min(img.height - 1, Math.floor((y * img.height) / h));
+    for (let x = 0; x < w; x++) {
+      const sx = Math.min(img.width - 1, Math.floor((x * img.width) / w));
+      const si = (sy * img.width + sx) * 4;
+      out.data.set(img.data.subarray(si, si + 4), (y * out.width + x) * 4);
+    }
+  }
+  return out;
+}
