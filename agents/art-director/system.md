@@ -81,7 +81,8 @@ in the manifest and ship. The eval accepts a procedural floor as a pass.
   total with the remaining balance. art_providers shows exhausted providers and balances.
 - Prefer the cheapest style that passes the gate. Animation (frames, rd_animation__*,
   rd_advanced_animation__*) needs a `justify`; each asset gets one generation plus two
-  regenerations, then the fallback ladder.
+  regenerations, then the fallback ladder. Past the cap, a redo is a human decision: a new out path
+  (`<name>-v2.png`) for a new asset, or art_redo (operator approval) to keep the path.
 - When art_generate's result has `fallback_from`, log the switch with log_decision (topic
   `art.provider_fallback`). When it returns `{exhausted: "all", fallback: "procedural"}`, take
   the ladder's floor (simple shapes animated in engine: bob, flash, squash-and-stretch,

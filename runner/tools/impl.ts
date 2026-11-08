@@ -18,7 +18,7 @@ import { addOutline, contactSheet, lockPalette, snapToGrid, splitStrip, upscaleN
 import { runGate } from "../../tools/art/gate.ts";
 import { ChargedFailure, DEFAULT_CANDIDATES, MAX_CANDIDATES, ProviderExhausted, ProviderUnavailable, balance as providerBalance, generate, type Balance, isAnimation, quote as providerQuote, type GenerateResult, type ProviderName } from "../../tools/art/generate.ts";
 import {
-  LOW_GENERATIONS, MAX_REGENERATIONS, PROVIDERS, anchorWinner, checkPixellabFloor, pixellabCallEstimate, pixellabFloor, type FloorVerdict, countGeneration, generationCount, isExhausted, markExhausted, other, readCredits, readGallery,
+  LOW_GENERATIONS, MAX_REGENERATIONS, PROVIDERS, anchorWinner, checkPixellabFloor, pixellabCallEstimate, pixellabFloor, type FloorVerdict, generationsUsedSinceRedo, grantRedo, outPathProblem, releaseGeneration, reserveGeneration, isExhausted, markExhausted, other, readCredits, readGallery,
   readProviders, recordAnchorWinner, recordCredit, statePaths,
 } from "../../tools/art/credits.ts";
 import { capture as mediaCapture, POLICY as MEDIA_POLICY, type CaptureMode } from "../../tools/media/capture.ts";
@@ -1052,6 +1052,38 @@ async function collectJob(i: any, ctx: ToolContext): Promise<ToolOutput> {
   }
 }
 
+/** The cap refusal names the two ways forward that a human decided, never a way for the model to reset it. */
+function capRefusal(out: string, used: number): string {
+  return `refused: ${out} has had ${used} paid generations (1 + ${MAX_REGENERATIONS} regenerations is the cap). Fix the prompt/reference or cut to the ` +
+    `fallback ladder. A redo needs a human decision: generate to a NEW out path (e.g. ${out.replace(/\.png$/i, "-v2.png")}) when the design calls for a new ` +
+    `asset, or ask for art_redo (operator approval; grants a fresh allowance for this path).`;
+}
+
+/**
+ * Pre-call check for postprocess (T39): the snap/lock/outline steps need the manifest and the asset's entry, and a
+ * generation without them is paid for and then unusable ("snap needs the manifest entry", Nov 7). Null = fine.
+ */
+async function postprocessProblem(workspace: string, out: string, pp: { snap?: boolean; lock?: boolean; outline?: string } | undefined): Promise<string | null> {
+  if (!pp || !(pp.snap || pp.lock || pp.outline)) return null;
+  let manifest: { grid?: { w: number; h: number }; palette?: string[]; assets?: Array<{ path?: string; size?: { w: number; h: number }; frames?: number }> };
+  try {
+    manifest = JSON.parse(await readFile(resolveInWorkspace(workspace, path.join("game", "assets", "manifest.json")), "utf8"));
+  } catch {
+    return "postprocess needs the game manifest at game/assets/manifest.json (game_clone, and the Art Director locks it) before generating";
+  }
+  if ((pp.snap || pp.lock) && (!manifest.grid || !Array.isArray(manifest.palette) || manifest.palette.length === 0))
+    return "postprocess snap/lock needs grid and palette locked in game/assets/manifest.json before generating";
+  const repoRel = path.posix.normalize(out.replace(/\\/g, "/")).replace(/^game\//, "");
+  const entry = manifest.assets?.find((a) => a.path === repoRel);
+  if (!entry) return `no manifest entry for ${repoRel}: add its entry (id, type, path, size, frames, palette, anchor) to game/assets/manifest.json FIRST, then generate`;
+  if (pp.snap) {
+    if (!entry.size) return `the manifest entry for ${repoRel} has no size (one frame): snap needs it; add it first`;
+    if (manifest.grid && (entry.size.w % manifest.grid.w !== 0 || entry.size.h % manifest.grid.h !== 0))
+      return `manifest size ${entry.size.w}x${entry.size.h} for ${repoRel} is not a multiple of grid ${manifest.grid.w}x${manifest.grid.h}; fix the entry first`;
+  }
+  return null;
+}
+
 const artGenerate: ToolImpl = {
   description:
     "Generate pixel art with a paid provider (PixelLab or Retro Diffusion) and write PNGs into the workspace. " +
@@ -1100,9 +1132,13 @@ const artGenerate: ToolImpl = {
   async run(i, ctx) {
     if (i.resume_job_id) return collectJob(i, ctx);
     const paths = statePaths(ctx.runsDir);
-    const done = generationCount(paths.gallery, i.out);
-    if (done >= 1 + MAX_REGENERATIONS)
-      return { content: `refused: ${i.out} has had ${done} paid generations (1 + ${MAX_REGENERATIONS} regenerations is the cap). Fix the prompt/reference or cut to the fallback ladder.`, is_error: true };
+    // T39: refuse, with zero requests, a call that could not produce a usable asset
+    const outIssue = outPathProblem(i.out);
+    if (outIssue) return { content: `refused before any request: ${outIssue}`, is_error: true };
+    const ppIssue = await postprocessProblem(ctx.workspace, i.out, i.postprocess);
+    if (ppIssue) return { content: `refused before any request: ${ppIssue}`, is_error: true };
+    const done = generationsUsedSinceRedo(paths.gallery, i.out);
+    if (done >= 1 + MAX_REGENERATIONS) return { content: capRefusal(i.out, done), is_error: true };
     if (isAnimation(i) && !i.justify)
       return { content: "refused: animation endpoints (frames, rd_animation__*, rd_advanced_animation__*) are the expensive ones; pass justify with why cutout parts or in-engine motion won't do", is_error: true };
     const winner = i.reference ? anchorWinner(paths.gallery, i.reference) : undefined;
@@ -1110,10 +1146,16 @@ const artGenerate: ToolImpl = {
     if (!requested) {
       if (!winner) return { content: `provider is required: no anchor winner is recorded${i.reference ? ` for ${i.reference}` : " (no reference given)"}. Bake-offs are for anchors; record the winner with art_anchor_winner.`, is_error: true };
       requested = winner;
-    } else if (winner && requested !== winner && !isExhausted(paths.providers, winner)) {
+    } else if (winner && requested !== winner && PROVIDERS.includes(requested) && PROVIDERS.includes(winner) && !isExhausted(paths.providers, winner)) {
+      // the bake-off lock is among PAID providers only: comfy (local, free) is always allowed (T39)
       return { content: `refused: ${i.reference}'s anchor bake-off was won by ${winner}; batch generation uses it (omit provider). Only anchors are generated on both.`, is_error: true };
     }
 
+    // the slot is taken before any request and given back unless the call billed (no race past the cap)
+    const slot = reserveGeneration(paths.gallery, i.out);
+    if (!slot) return { content: capRefusal(i.out, generationsUsedSinceRedo(paths.gallery, i.out)), is_error: true };
+    let billed = false;
+    try {
     const exhausted: ProviderName[] = [];
     const unavailable: ProviderName[] = []; // transient (comfy down): skipped this call only, never persisted
     const notes: string[] = [];
@@ -1176,7 +1218,7 @@ const artGenerate: ToolImpl = {
           continue;
         }
         if (e instanceof ChargedFailure) {
-          countGeneration(paths.gallery, i.out); // it billed
+          billed = true; // it billed: the slot stays taken
           return { content: errText(e), is_error: true, cost_micro_usd: e.cost_micro_usd };
         }
         return { content: errText(e), is_error: true };
@@ -1194,7 +1236,8 @@ const artGenerate: ToolImpl = {
         cost_micro_usd: 0,
       };
     }
-    const generation = countGeneration(paths.gallery, i.out);
+    billed = true;
+    const generation = slot.slot;
     // comfy is local: no balance read and no credits line
     const after: Balance | null = result.provider === "comfy"
       ? null
@@ -1216,6 +1259,9 @@ const artGenerate: ToolImpl = {
     } catch (e) {
       // generation succeeded and was paid; postprocess failing must not erase the charge
       return { content: `generated ${result.images.join(", ")} but postprocess failed: ${errText(e)} ${JSON.stringify(extra)}`, is_error: true, cost_micro_usd: result.cost_micro_usd };
+    }
+    } finally {
+      if (!billed) releaseGeneration(paths.gallery, i.out);
     }
   },
 };
@@ -1336,6 +1382,36 @@ const artSignoff: ToolImpl = {
         next: "Continue the batch: generate non-anchor assets against the anchors.",
       }),
     };
+  },
+};
+
+/**
+ * art_redo (T39): an operator-approved redo of one asset past its generation cap. It lives under the art_signoff
+ * capability, which is approval_only (a spec can't grant it "allow"), so this body runs only after a human
+ * approved this exact request in the approvals queue; the approval is ledgered by the gate.
+ */
+const artRedo: ToolImpl = {
+  description:
+    "Ask the human operator to approve a redo of ONE asset that hit its generation cap (1 + 2 regenerations). Use it only when the " +
+    "asset must keep its path (e.g. an anchor others reference); otherwise generate to a new out path. Blocks until the operator decides; " +
+    "approved = a fresh allowance for that out path.",
+  input: z
+    .object({
+      out: z.string().min(1).max(200).describe("the asset's out path, exactly as you pass it to art_generate (game/assets/...png)"),
+      why: z.string().min(10).max(300).describe("why a redo instead of a new asset: what was wrong and what will change"),
+    })
+    .strict(),
+  async run(i, ctx) {
+    const issue = outPathProblem(i.out);
+    if (issue) return { content: `art_redo refused: ${issue}`, is_error: true };
+    const paths = statePaths(ctx.runsDir);
+    const grant = grantRedo(paths.gallery, i.out, { by: "operator (approved art_redo)", why: i.why, approval: `${ctx.run_id ?? "unknown"}` });
+    ledgerAppend({
+      kind: "decision", ts: grant.ts, agent: ctx.agent ?? "art_redo", run_id: ctx.run_id ?? "unknown", topic: "art.redo",
+      decision: `operator approved a redo of ${i.out}: a fresh allowance of ${1 + MAX_REGENERATIONS} generations (after ${grant.at_count} so far)`,
+      rationale: i.why, refs: [i.out],
+    }, ctx.ledgerFile ?? LEDGER_FILE);
+    return { content: JSON.stringify({ redo: "granted", out: i.out, allowance: 1 + MAX_REGENERATIONS, generations_before: grant.at_count }) };
   },
 };
 
@@ -1926,7 +2002,7 @@ const CORE_IMPLS: Record<keyof typeof CORE_CAPABILITIES, Record<string, ToolImpl
   email_send: { email_send: emailSend },
   site_deploy: { site_deploy: siteDeploy },
   site_status: { site_status: siteStatus },
-  art_signoff: { art_signoff: artSignoff },
+  art_signoff: { art_signoff: artSignoff, art_redo: artRedo },
   board: boardTools,
   media_capture: mediaTools,
 };

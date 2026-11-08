@@ -8,7 +8,8 @@ import { parseArgs } from "node:util";
 import { decodePng, encodePng, type RgbaImage } from "./png.ts";
 import { addOutline, contactSheet, lockPalette, snapToGrid, splitStrip } from "./ops.ts";
 import { runGate, type GateReport } from "./gate.ts";
-import { PROVIDERS, clearProvider, readCredits, readProviders, statePaths } from "./credits.ts";
+import { PROVIDERS, clearProvider, grantRedo, outPathProblem, readCredits, readProviders, statePaths } from "./credits.ts";
+import { append as ledgerAppend } from "../ledger/ledger.ts";
 import type { ProviderName } from "./generate.ts";
 
 function readPng(file: string): RgbaImage {
@@ -31,6 +32,7 @@ const USAGE = `usage: art.ts <command> ...
   strip   <in.png> --frames N [--out-dir DIR]     (default DIR: <in>-frames/)
   sheet   <out.png> --frames "a.png,b.png,..." [--anchor N] [--scale N] [--gap N]
   gate    <game-repo-dir> [--schema <asset.schema.json>]
+  redo    <out> --why "..."                         (operator only: fresh generation allowance for one asset, ledgered)
   providers [--clear <pixellab|retrodiffusion>]     (credit state: exhausted flags, balances; clearing is human-only)`;
 
 function num(name: string, value: unknown): number {
@@ -124,6 +126,17 @@ export function runCommand(argv: string[]): CommandResult {
         const credits = readCredits(paths.credits);
         const latest = Object.fromEntries(PROVIDERS.map((p) => [p, credits.filter((c) => c.provider === p).at(-1) ?? null]));
         return { kind: "ok", json: { file: paths.providers, ...(values.clear ? { cleared: values.clear } : {}), providers: readProviders(paths.providers), latest_balance: latest }, exitCode: 0 };
+      }
+      case "redo": {
+        // Operator-only (agents have no shell to this CLI): a fresh generation allowance for one asset, ledgered as an intervention.
+        const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { why: { type: "string" } } });
+        const [out] = positionals;
+        if (!out || !values.why || values.why.trim().length < 10) throw new Error('usage: redo <out e.g. game/assets/anchors/x.png> --why "<at least 10 chars: the human decision>"');
+        const issue = outPathProblem(out);
+        if (issue) throw new Error(issue);
+        const grant = grantRedo(statePaths().gallery, out, { by: "operator (npm run art -- redo)", why: values.why });
+        ledgerAppend({ kind: "intervention", ts: grant.ts, who: "operator", action: `art redo granted for ${out}`, reason: values.why }, ...(process.env.STUDIO_LEDGER_FILE ? [process.env.STUDIO_LEDGER_FILE] : []));
+        return { kind: "ok", json: { redo: "granted", out, grant }, exitCode: 0 };
       }
       default:
         return { kind: "error", json: { error: command ? `unknown command "${command}"` : `missing command\n${USAGE}` }, exitCode: 2 };

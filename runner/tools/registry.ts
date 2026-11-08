@@ -13,6 +13,9 @@ export interface Capability {
   /** Sends or spends outside the studio: spec validation refuses "allow", so every grant is "ask"
    *  (approval gate + ledger, AGENTS.md rule 4). */
   outward?: boolean;
+  /** A human decision by construction (e.g. art_signoff, art_redo): like outward, spec validation refuses "allow",
+   *  so the tool only ever runs after the approval gate (T39). */
+  approval_only?: boolean;
 }
 
 /** The core capabilities. Lane capabilities (runner/tools/lanes/) are merged in below. */
@@ -135,7 +138,8 @@ export const CORE_CAPABILITIES = {
     summary: "Human checkpoint before batch art: the operator approves or denies the anchor set (style bible + contact sheet) via the approval queue",
     naive: [],
     local: true,
-    note: "Ask-gated: blocks in the approvals queue (T1). Grant art_signoff: 'ask' to art-director only. A denial returns its note as a normal result so the anchors get revised.",
+    note: "Ask-gated: blocks in the approvals queue (T1). Grant art_signoff: 'ask' to art-director only. A denial returns its note as a normal result so the anchors get revised. Also art_redo (T39): an approved request grants one asset a fresh generation allowance.",
+    approval_only: true,
   },
 } as const satisfies Record<string, Capability>;
 
