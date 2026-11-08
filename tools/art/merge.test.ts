@@ -136,3 +136,30 @@ test("T46: the operator CLI merges, and refuses a process an agent started", asy
     }
   }
 });
+
+test("T46 security: the game repo comes from the clone's origin only when it is a real repo directly under the games root", async () => {
+  const { gameRepoOfClone } = await import("./merge.ts");
+  const { makeGameRepo: mk, agentClone: ac } = await import("./testdata/game-repo.ts");
+  const { realpathSync: rp, writeFileSync: wf, mkdtempSync: mt, mkdirSync: md, symlinkSync } = await import("node:fs");
+  const { tmpdir: td } = await import("node:os");
+  const p = await import("node:path");
+  const game = mk();
+  const clone = ac(game, "sprite-artist");
+  assert.equal(gameRepoOfClone(clone, p.dirname(game)), rp(game));
+  // another root: refused
+  assert.equal(gameRepoOfClone(clone, mt(p.join(td(), "other-root-"))), null);
+  // origin re-pointed at a repo outside the games root (e.g. the harness): refused
+  const outside = mk();
+  const cfg = p.join(clone, ".git", "config");
+  const orig = (await import("node:fs")).readFileSync(cfg, "utf8");
+  wf(cfg, orig.replace(/url = .*/, `url = ${outside}`));
+  assert.equal(gameRepoOfClone(clone, p.dirname(game)), null);
+  // a symlink under the games root pointing elsewhere: refused (realpath leaves the root)
+  const link = p.join(p.dirname(game), "linked");
+  symlinkSync(p.dirname(outside) + "/caravan", link);
+  wf(cfg, orig.replace(/url = .*/, `url = ${link}`));
+  assert.equal(gameRepoOfClone(clone, p.dirname(game)), null);
+  // relative url / no origin: refused
+  wf(cfg, orig.replace(/url = .*/, "url = ../x"));
+  assert.equal(gameRepoOfClone(clone, p.dirname(game)), null);
+});

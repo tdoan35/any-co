@@ -865,7 +865,7 @@ async function artistRig(files: Record<string, string | null>, complete = true) 
     },
   ]);
   const logs: string[] = [];
-  const d = new Dispatcher({ board, specs: new Map([["sprite-artist", spec]]), provider: () => provider, runsDir, ledgerFile: path.join(runsDir, "ledger.jsonl"), log: (l) => logs.push(l) });
+  const d = new Dispatcher({ board, specs: new Map([["sprite-artist", spec]]), provider: () => provider, runsDir, ledgerFile: path.join(runsDir, "ledger.jsonl"), gamesRoot: path.dirname(game), log: (l) => logs.push(l) });
   const { card } = await board.create({ title: "Draw the slime", assignee: "sprite-artist" });
   await d.pass();
   await d.wait();

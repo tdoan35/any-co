@@ -35,6 +35,8 @@ export interface DispatchOptions {
   artMerge?: (gameDir: string, branch: string, opts: ArtMergeOptions) => Promise<ArtMergeResult>;
   /** Where art.merge ledger decisions go (default: the studio ledger). */
   ledgerFile?: string;
+  /** T46: the only directory whose direct children may be merged into (default STUDIO_GAMES_DIR, else games/). */
+  gamesRoot?: string;
 }
 
 /** Agents whose finished branches are art-only by role: their done cards trigger the mechanical merge (T46). */
@@ -389,7 +391,7 @@ export class Dispatcher {
     const board = this.opts.board;
     const branch = `agent/${spec.name}`;
     try {
-      const gameDir = gameRepoOfClone(path.join(runsDir, runId, "workspace", "game"));
+      const gameDir = gameRepoOfClone(path.join(runsDir, runId, "workspace", "game"), this.opts.gamesRoot);
       if (!gameDir) {
         await board.comment(card.id, `art-merge: skipped — run ${runId} has no game clone with a local origin; card a tech-lead merge if ${branch} needs landing`, "dispatcher");
         return;

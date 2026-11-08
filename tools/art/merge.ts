@@ -4,10 +4,11 @@
 // untouched. The push passes the repo's single-merger pre-receive hook with the operator override ANYCO_ALLOW_MAIN=1 — the
 // harness's logged path (one ledger decision per merge); agents still cannot move main (game_exec refuses ANYCO_* env).
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { GAMES_DIR as DEFAULT_GAMES_DIR } from "../../runner/tools/exec-scope.ts";
 import { runGate } from "./gate.ts";
 import { append as ledgerAppend, LEDGER_FILE } from "../ledger/ledger.ts";
 
@@ -178,10 +179,19 @@ function attemptMerge(gameDir: string, branch: string, opts: ArtMergeOptions, at
 }
 
 /** The game repo a run's clone was cloned from (its origin), or null. */
-export function gameRepoOfClone(clone: string): string | null {
+export function gameRepoOfClone(clone: string, gamesRoot: string = process.env.STUDIO_GAMES_DIR ?? DEFAULT_GAMES_DIR): string | null {
+  // The clone belongs to an agent run, so its origin is untrusted: read it as DATA from the config file (never run git
+  // inside the clone, whose config could run hooks or helpers), and accept only a real repo directly under the games root.
+  // Otherwise an agent could point origin at another repo and have the harness push there with ANYCO_ALLOW_MAIN.
   try {
-    const url = execFileSync("git", ["-C", clone, "remote", "get-url", "origin"], { encoding: "utf8" }).trim();
-    return url && existsSync(path.join(url, ".git")) ? url : null;
+    const cfg = readFileSync(path.join(clone, ".git", "config"), "utf8");
+    const m = /\[remote "origin"\][^[]*?\burl\s*=\s*(.+)/.exec(cfg);
+    const url = m?.[1].trim();
+    if (!url || !path.isAbsolute(url)) return null;
+    const real = realpathSync(url);
+    const root = realpathSync(gamesRoot);
+    if (path.dirname(real) !== root || !existsSync(path.join(real, ".git"))) return null;
+    return real;
   } catch {
     return null;
   }
