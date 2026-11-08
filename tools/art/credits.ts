@@ -12,8 +12,10 @@ import { fileURLToPath } from "node:url";
 import type { ProviderName } from "./generate.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+/** The paid (credit-tracked) providers; comfy is local and never exhausted. */
 export const PROVIDERS: ProviderName[] = ["retrodiffusion", "pixellab"];
-export const other = (p: ProviderName): ProviderName => (p === "retrodiffusion" ? "pixellab" : "retrodiffusion");
+/** The one fallback for a provider that is exhausted or unavailable: comfy and retrodiffusion → pixellab, pixellab → retrodiffusion. */
+export const other = (p: ProviderName): ProviderName => (p === "pixellab" ? "retrodiffusion" : "pixellab");
 
 /** Regenerations allowed per asset after its first generation (a 4th paid call is refused). */
 export const MAX_REGENERATIONS = 2;

@@ -116,9 +116,37 @@ PixelLab OpenAPI `https://api.pixellab.ai/v2/openapi.json` + `llms.txt`, and Ret
 | --- | --- |
 | `POST /v2/generate-image-v2` | $0.02 per request (the API's own usage examples show $0.02) |
 
+## Local lab ComfyUI (`provider: "comfy"`, T31)
+
+The isolated character-lab ComfyUI on ty-omarchy, for studio 2. Base URL from `COMFY_BASE_URL`
+(default `http://100.96.19.87:8190`). **Port 8188 is production and is refused** (from the option or
+the env, before any request). The provider never starts or stops servers; the operator starts the lab.
+
+- **Recipe (frozen, from the lab's `HANDOFF.md` / `generate_agent_set.py`, read 2026-11-08):**
+  checkpoint `NovaPixelILV3.safetensors`. With `reference`, IP-Adapter `ip_adapter_Noobtest_800000.bin`
+  (`IPAdapterAdvanced`, weight 0.65, linear, concat, V only) with CLIP vision
+  `CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors`. 768×768, 30 steps, CFG 7, `euler_ancestral` / `normal`,
+  seed 42 unless the call passes one. Use the same seed per character for identity. No pose ControlNet.
+  Without `reference` the graph is text-only (no IP-Adapter). `negative` is the negative prompt (default empty).
+- **Flow:** `GET /system_stats` (5 s health probe) → `POST /upload/image` (the reference, named
+  `anyco-ref-<sha256[:16]>.png`, overwrite) → `POST /prompt` → poll `GET /history/<prompt_id>` →
+  `GET /view?filename&subfolder&type` per output of the SaveImage node. `max_candidates` applies; the
+  graph renders one image.
+- **Output:** always 768×768, **opaque** (the recipe has no background removal). Pass
+  `postprocess` (snap/lock/outline) to reach the manifest size, grid and palette. Stills only: `frames`
+  is refused (animate the still with pixellab).
+- **Cost:** `cost_micro_usd: 0`, `cost_source: "local"`. No balance read, no `art-credits.jsonl`
+  line, no `generations_used`. It still counts toward the per-asset cap (1 + 2 regenerations), the same
+  bounded-reroll rule as the lab's own handoff (original seed + 2 extra).
+- **Down:** an unreachable lab, or a non-2xx probe, is `ProviderUnavailable`. art_generate falls back to
+  pixellab once (`fallback_from: "comfy"`). It is never persisted as exhausted: the next call probes again.
+  A timeout names the `prompt_id` (the job may still finish in the lab's queue; nothing is billed).
+- **License caveat:** Nova Pixels XL's creator requires edits before commercial use. Any game sold
+  with comfy assets needs them edited first (`docs/decisions.md`).
+
 ## Cost policy
 
-Every generation returns `cost_micro_usd` and `cost_source: "reported" | "estimated"`.
+Every generation returns `cost_micro_usd` and `cost_source: "reported" | "estimated"` (`"local"` and 0 for comfy).
 Reported beats estimated; a paid call never reports 0 (an estimate is used instead).
 A failed submit is charged at the estimate unless the provider answered 4xx or the connection
 never carried the request (refused, DNS, unreachable): a reset, abort, timeout, 5xx, or a 2xx with
