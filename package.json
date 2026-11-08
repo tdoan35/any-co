@@ -30,6 +30,7 @@
     "window:live:electron": "node window/scripts/live.mjs electron",
     "ledger": "node --import tsx tools/ledger/ledger.ts",
     "studio": "node --env-file-if-exists=.env --import tsx scripts/studio-loop.ts",
+    "qa": "node --import tsx tools/qa/qa.ts",
     "approvals": "node --import tsx tools/approvals/approvals.ts",
     "eval:greenlight-chair": "node --env-file-if-exists=.env --import tsx scripts/eval-greenlight-chair.ts",
     "eval:game-director-design": "node --env-file-if-exists=.env --import tsx scripts/eval-game-director-design.ts",
