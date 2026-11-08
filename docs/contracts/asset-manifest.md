@@ -33,7 +33,17 @@ all read it — the gate never loads the game.
       "frames": 2,
       "palette": ["#1a1c2c", "#b13e53", "#ef7d57"],
       "anchor": "player",
+      "anchor_mode": "style",
       "anim": {"mode": "cutout", "parts": ["body", "eye"]}
+    },
+    {
+      "id": "player-hurt",
+      "type": "sprite",
+      "path": "assets/sprites/player-hurt.png",
+      "size": {"w": 16, "h": 16},
+      "palette": ["#1a1c2c", "#ffcd75", "#b13e53"],
+      "anchor": "player",
+      "anchor_mode": "same-subject"
     }
   ]
 }
@@ -44,6 +54,18 @@ all read it — the gate never loads the game.
   subset; the gate enforces it in code against the actual pixels, not this list.
 - **`anchor`** names the anchor sheet an asset was generated from (`null` for anchors).
   Every non-anchor sprite must have one — that's how drift is measured.
+- **`anchor_mode`** says how an asset is measured against its anchor:
+  - `"same-subject"`: frames or poses of the anchor's own subject. The gate compares pixels
+    (`anchor_drift`, frame 0 vs anchor frame 0). The default for strips (`frames` > 1).
+  - `"style"`: a different subject in the anchor's style (another item in the same icon set,
+    another character in the same portrait framing, a tile). Pixel drift is skipped; the gate checks the
+    non-outline color mix (`paletteDistance`), contrast span (`lumaRange` vs `anchorLumaRange`) and outline
+    (`outlineShare`) against the anchor, on top of the palette, size, grid and frame checks.
+  - A single-frame asset with an `anchor` must declare one; the gate refuses it otherwise.
+    Anchor sheets (`anchor: null`) take none. Different silhouettes can hang off different anchors.
+- **`outline`** (optional, file-level and per entry): the outline color `#rrggbb`, or `null`
+  for "no outline" (e.g. tiles). In `style` mode the gate uses the entry's, else the file's,
+  else the anchor's own edge color.
 - **`size` is the size of one frame; a strip of N frames is N×size.w wide.** `size.h` is the
   file height. The gate checks `file.w == size.w × frames` and `file.h == size.h`.
   `size` is a multiple of `grid`; frames are laid out as a horizontal strip.

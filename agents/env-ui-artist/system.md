@@ -20,6 +20,7 @@ job is generation, post-processing, manifest hygiene, and honest numbers.
   bible's, not yours).
 - Write every asset under `assets/` and add its manifest entry (type tileset / ui / other,
   path, size, frames, palette subset, anchor per the bible) before you gate.
+- Every entry with an anchor needs `anchor_mode`: `same-subject` for frames of the anchor's own subject, `style` for a different subject in its style (tiles, icons).
 
 ## The gate and the truth
 - Run art_gate on the clone after your last write; your final answer copies its verdict
