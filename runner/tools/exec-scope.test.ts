@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { GIT_CONFIG_ALLOW, HARNESS_ROOT, credentialReadDenies, execEnv, execRefusal, packageRoot, sandboxAvailable, sandboxPrefix, sandboxProfile } from "./exec-scope.ts";
+import { GIT_CONFIG_ALLOW, HARNESS_ROOT, KEYCHAIN_MACH_SERVICES, credentialReadDenies, execEnv, execRefusal, packageRoot, sandboxAvailable, sandboxPrefix, sandboxProfile } from "./exec-scope.ts";
 import { IMPLS, type ToolContext } from "./impl.ts";
 
 /** A workspace whose game/ clone sits inside the harness tree (runs/…), as a real run's does. */
@@ -176,4 +176,63 @@ test("T40 ledger/approvals CLIs refuse operator writes from a process an agent s
   const human = run("tools/ledger/ledger.ts", ["intervention", "real operator action", "real reason"]);
   assert.equal(human.status, 0, human.stderr);
   assert.match(readFileSync(ledger, "utf8"), /real operator action/);
+});
+
+test("T40-fix3: git program overrides, ANYCO_*/GIT_* env routes and git checks inside shell strings are refused; ordinary git still runs", () => {
+  const { clone, cleanup } = harnessWorkspace();
+  try {
+    const refused: Array<[string[], RegExp]> = [
+      // R48b's live single-merger bypasses
+      [["git", "push", "--receive-pack=git -c core.hooksPath=/dev/null receive-pack", "origin", "HEAD:main"], /names a program for git to run/],
+      [["git", "push", "--receive-pack", "git -c core.hooksPath=/dev/null receive-pack", "origin", "HEAD:main"], /names a program for git to run/],
+      [["git", "push", "--exec=sh", "origin"], /names a program for git to run/],
+      [["git", "fetch", "--upload-pack=sh -c id", "origin"], /names a program for git to run/],
+      [["git", "clone", "-u", "sh -c id", "../x", "y"], /names a program for git to run/],
+      [["env", "ANYCO_ALLOW_MAIN=1", "git", "push", "origin", "HEAD:main"], /setting ANYCO_ALLOW_MAIN is not allowed/],
+      [["env", "GIT_SSH_COMMAND=sh -c id", "git", "push"], /setting GIT_SSH_COMMAND is not allowed/],
+      [["env", "GIT_CONFIG_PARAMETERS='core.hooksPath'='/dev/null'", "git", "push"], /setting GIT_CONFIG_PARAMETERS is not allowed/],
+      [["git", "--config-env=core.hooksPath=HP", "push"], /--config-env .* is not allowed/],
+      [["git", "--config-env", "core.hooksPath=HP", "push"], /--config-env .* is not allowed/],
+      // the same routes through a shell string
+      [["sh", "-c", "ANYCO_ALLOW_MAIN=1 git push origin HEAD:main"], /may not set ANYCO_\* or GIT_\*/],
+      [["bash", "-c", "export GIT_SSH_COMMAND='sh -c id'; git push"], /may not set ANYCO_\* or GIT_\*/],
+      [["sh", "-c", "git -c core.hooksPath=/dev/null push origin HEAD:main"], /git -c core\.hooksPath=\/dev\/null is not allowed/],
+      [["sh", "-c", "./build.sh test && git push --receive-pack=x origin HEAD:main"], /names a program for git to run/],
+    ];
+    for (const [argv, why] of refused) {
+      const r = execRefusal(argv, clone);
+      assert.ok(r && why.test(r), `${JSON.stringify(argv)} should be refused (${why}), got: ${r}`);
+    }
+    const allowed: string[][] = [
+      ["git", "push", "-u", "origin", "agent/tech-lead"], // -u is --set-upstream for push, not --upload-pack
+      ["git", "-c", "user.name=tech-lead", "-c", "user.email=t@l", "commit", "-m", "x"],
+      ["git", "status"],
+      ["sh", "-c", "./build.sh test && git add -A && git commit -m wip"],
+      ["env", "LANG=C", "./build.sh", "test"],
+      ["sh", "-c", "echo MY_GIT_NOTE=1"], // not a GIT_* assignment
+    ];
+    for (const argv of allowed) assert.equal(execRefusal(argv, clone), null, `${JSON.stringify(argv)} should be allowed`);
+  } finally {
+    cleanup();
+  }
+});
+
+test("T40-fix3 profile: the keychain Mach services are denied", () => {
+  const prof = sandboxProfile([HARNESS_ROOT]);
+  for (const n of KEYCHAIN_MACH_SERVICES) assert.ok(prof.includes(`(global-name "${n}")`), n);
+  assert.match(prof, /\(deny mach-lookup /);
+});
+
+test("T40-fix3 sandbox (macOS): keychain lookups fail inside the sandbox; godot and https git still work", { skip: !sandboxAvailable() && "sandbox-exec is macOS-only" }, () => {
+  const pre = sandboxPrefix([tmpdir()]);
+  // a keychain read through the Security framework fails (no secret is ever printed: stdout is discarded)
+  const kc = spawnSync(pre[0]!, [...pre.slice(1), "/usr/bin/security", "find-internet-password", "-s", "github.com"], { stdio: ["ignore", "ignore", "pipe"], encoding: "utf8" });
+  assert.notEqual(kc.status, 0, "security find-internet-password must fail in the sandbox");
+  const cred = spawnSync(pre[0]!, [...pre.slice(1), "git", "credential-osxkeychain", "get"], { input: "protocol=https\nhost=github.com\n\n", stdio: ["pipe", "pipe", "pipe"], encoding: "utf8" });
+  assert.equal((cred.stdout ?? "").includes("password="), false, "no keychain password reaches a sandboxed process");
+  const godotBin = process.env.GODOT_BIN || spawnSync("sh", ["-c", "command -v godot"], { encoding: "utf8" }).stdout.trim();
+  if (godotBin) {
+    const g = spawnSync(pre[0]!, [...pre.slice(1), godotBin, "--headless", "--version"], { encoding: "utf8", timeout: 30_000 });
+    assert.equal(g.status, 0, `godot --version must still run sandboxed: ${g.stderr}`);
+  }
 });

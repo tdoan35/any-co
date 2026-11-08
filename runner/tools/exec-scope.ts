@@ -100,6 +100,9 @@ export function execRefusal(argv: string[], clone: string): string | null {
     while (i < args.length && (args[i].startsWith("-") || /^[A-Za-z_][A-Za-z0-9_]*=/.test(args[i]))) {
       if (/^ANYCO_AGENT(=|$)/.test(args[i]) || ((args[i] === "-u" || args[i] === "--unset") && args[i + 1] === "ANYCO_AGENT") || args[i] === "-i" || args[i] === "--ignore-environment")
         return "changing ANYCO_AGENT (or clearing the env) is not allowed: it is how the game repo and operator CLIs tell agent runs apart";
+      // T40-fix3: ANYCO_* (e.g. ANYCO_ALLOW_MAIN, the single-merger hook's operator override) and GIT_* (GIT_SSH_COMMAND,
+      // GIT_CONFIG_PARAMETERS, GIT_EXEC_PATH, ...) can switch off the game repo's guards or run a shell from git.
+      if (GUARDED_ENV.test(args[i])) return `setting ${args[i].split("=")[0]} is not allowed: ANYCO_* and GIT_* variables can bypass the game repo's guards`;
       i += args[i] === "-u" || args[i] === "--unset" || args[i] === "-C" || args[i] === "--chdir" ? 2 : 1;
     }
     if (args.some((a, k) => (a === "-C" || a === "--chdir") && args[k + 1] && !inside(resolveArg(args[k + 1]), root))) return "env -C outside your clone is not allowed";
@@ -118,17 +121,8 @@ export function execRefusal(argv: string[], clone: string): string | null {
   }
 
   if (base === "git") {
-    for (let k = 0; k < args.length; k++) {
-      const flag = args[k];
-      // `git -c key=value` can run a shell (alias.x=!cmd, core.sshCommand, core.pager, core.fsmonitor,
-      // credential.helper) or disable the game repo's single-merger hook (core.hooksPath), so allow only two keys.
-      if (flag === "-c" || flag === "--config-env") {
-        const key = (args[k + 1] ?? "").split("=")[0]!.toLowerCase();
-        if (!GIT_CONFIG_ALLOW.has(key)) return `git -c ${args[k + 1] ?? ""} is not allowed; only ${[...GIT_CONFIG_ALLOW].join(", ")} may be set on the command line`;
-      }
-      const val = /^--(git-dir|work-tree)=/.test(flag) ? flag.split("=").slice(1).join("=") : ["-C", "--git-dir", "--work-tree"].includes(flag) ? args[k + 1] : null;
-      if (val && !inside(resolveArg(val), root)) return `git ${flag.split("=")[0]} outside your clone is not allowed`;
-    }
+    const why = gitRefusal(args, root, resolveArg);
+    if (why) return why;
   }
 
   if (INTERPRETERS.has(base) || PACKAGE_MANAGERS.has(base)) {
@@ -154,6 +148,32 @@ export function execRefusal(argv: string[], clone: string): string | null {
   return null;
 }
 
+/** Variables an agent may not set through `env` or a shell string (T40-fix3): ANYCO_* guard switches and GIT_* hooks. */
+const GUARDED_ENV = /^(ANYCO_[A-Za-z0-9_]*|GIT_[A-Za-z0-9_]*)=/;
+/** git options that name a program for git to run (on either end of a push/fetch): a shell by another name (T40-fix3). */
+const GIT_PROGRAM_FLAGS = ["--receive-pack", "--upload-pack", "--exec"];
+
+/** Why a git argv (after `git`) may not run from `root`, or null: -c outside the allowlist, -C/--git-dir/--work-tree
+ * outside the clone, or a pack/exec program override (`git push --receive-pack='git -c core.hooksPath=/dev/null …'`). */
+function gitRefusal(args: string[], root: string, resolveArg: (a: string) => string): string | null {
+  const sub = args.find((a, k) => !a.startsWith("-") && !["-c", "-C", "--git-dir", "--work-tree", "--config-env"].includes(args[k - 1] ?? ""));
+  for (let k = 0; k < args.length; k++) {
+    const flag = args[k];
+    // `git -c key=value` can run a shell (alias.x=!cmd, core.sshCommand, core.pager, core.fsmonitor,
+    // credential.helper) or disable the game repo's single-merger hook (core.hooksPath), so allow only two keys.
+    if (flag === "-c" || flag === "--config-env" || flag.startsWith("--config-env=")) {
+      const spec = flag.startsWith("--config-env=") ? flag.slice("--config-env=".length) : (args[k + 1] ?? "");
+      const key = spec.split("=")[0]!.toLowerCase();
+      if (flag !== "-c" || !GIT_CONFIG_ALLOW.has(key)) return `git ${flag.split("=")[0]} ${spec} is not allowed; only ${[...GIT_CONFIG_ALLOW].join(", ")} may be set with git -c`;
+    }
+    const prog = GIT_PROGRAM_FLAGS.find((f) => flag === f || flag.startsWith(f + "="));
+    if (prog || (flag === "-u" && sub === "clone")) return `git ${prog ?? "clone -u"} is not allowed: it names a program for git to run`;
+    const val = /^--(git-dir|work-tree)=/.test(flag) ? flag.split("=").slice(1).join("=") : ["-C", "--git-dir", "--work-tree"].includes(flag) ? args[k + 1] : null;
+    if (val && !inside(resolveArg(val), root)) return `git ${flag.split("=")[0]} outside your clone is not allowed`;
+  }
+  return null;
+}
+
 /** An inline program string that names the harness root, an absolute path outside the clone, or ../ escaping it. */
 function stringTouchesHarness(code: string, root: string): boolean {
   if (code.includes(HARNESS_ROOT)) return true;
@@ -167,6 +187,8 @@ function stringTouchesHarness(code: string, root: string): boolean {
 export function shellRefusal(script: string, root: string): string | null {
   if (/\b(unset|export|readonly|declare|typeset)\s+(-\w+\s+)*ANYCO_AGENT\b|\bANYCO_AGENT\s*=|-u\s*ANYCO_AGENT\b|\benv\s+(-\w+\s+)*-i\b/.test(script))
     return "a shell string may not change or clear ANYCO_AGENT";
+  if (/(^|[\s;&|(`])(export\s+(-\w+\s+)*)?(ANYCO_[A-Za-z0-9_]*|GIT_[A-Za-z0-9_]*)\s*=/.test(script))
+    return "a shell string may not set ANYCO_* or GIT_* variables (they can bypass the game repo's guards)";
   if (stringTouchesHarness(script, root)) return "a shell string that names a path outside your clone (../ or the harness repo) is not allowed";
   for (const seg of script.split(/[;&|\n()`]+/)) {
     const words = seg.trim().split(/\s+/).filter(Boolean);
@@ -179,6 +201,10 @@ export function shellRefusal(script: string, root: string): string | null {
       }
       if ((w === "cd" || w === "pushd") && words[k + 1] === undefined) return "a bare cd (to $HOME) leaves your clone";
       if (PACKAGE_MANAGERS.has(path.basename(w))) return `run ${path.basename(w)} as its own game_exec argv (not inside a shell string), so its project can be checked`;
+      if (path.basename(w) === "git") {
+        const why = gitRefusal(words.slice(k + 1).map((x) => x.replace(/^["']|["']$/g, "")), root, (a) => real(path.resolve(root, a)));
+        if (why) return why;
+      }
     }
   }
   return null;
@@ -189,6 +215,9 @@ export function credentialReadDenies(home = process.env.HOME || homedir()): stri
   const h = real(home);
   return [".ssh", ".config/gh", ".config/git", ".aws", ".netrc", ".git-credentials"].map((p) => path.join(h, p));
 }
+
+/** Mach services the macOS keychain answers on; a sandboxed agent run may not look them up (T40-fix3). */
+export const KEYCHAIN_MACH_SERVICES = ["com.apple.SecurityServer", "com.apple.securityd.xpc"];
 
 const sbQuote = (p: string) => JSON.stringify(p);
 const sbRegex = (literal: string) => literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -210,6 +239,9 @@ export function sandboxProfile(writeRoots: string[]): string {
     `(deny file-write* (regex #"/games/[^/]+/(\\.git/)?hooks(/|$)") (regex #"/games/[^/]+/(\\.git/)?config$"))`,
     `(deny file-read* (regex #"^${sbRegex(HARNESS_ROOT)}/\\.env"))`,
     `(deny file-read* ${credentialReadDenies().map((d) => `(subpath ${sbQuote(d)})`).join(" ")})`,
+    // T40-fix3: the login keychain (Ty's GitHub credential via git credential-osxkeychain) is reached over these
+    // Mach services, not files; denying them leaves Godot, ffmpeg and https git without a stored credential.
+    `(deny mach-lookup ${KEYCHAIN_MACH_SERVICES.map((n) => `(global-name ${sbQuote(n)})`).join(" ")})`,
   ];
   return lines.join("\n");
 }
@@ -225,10 +257,25 @@ export function sandboxAvailable(env: NodeJS.ProcessEnv = process.env): boolean 
  * refusals still apply; see docs/decisions.md for the residual risk). `writeRoots` are the dirs it may write.
  */
 export function scopedArgv(argv: string[], writeRoots: string[], env: NodeJS.ProcessEnv = process.env): string[] {
-  return sandboxAvailable(env) ? ["/usr/bin/sandbox-exec", "-p", sandboxProfile(writeRoots), ...argv] : argv;
+  if (sandboxAvailable(env)) return ["/usr/bin/sandbox-exec", "-p", sandboxProfile(writeRoots), ...argv];
+  warnUnsandboxed(env);
+  return argv;
+}
+
+let warnedUnsandboxed = false;
+/** Once per process: say loudly that agent-run children are NOT OS-sandboxed here (Linux, or ANYCO_EXEC_SANDBOX=off).
+ * A warning, not a refusal (T40-fix3): studio 2 on Linux must keep building; the gap is accepted and documented. */
+export function warnUnsandboxed(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (warnedUnsandboxed || sandboxAvailable(env)) return false;
+  warnedUnsandboxed = true;
+  const why = process.platform !== "darwin" ? `no OS sandbox on ${process.platform}` : "ANYCO_EXEC_SANDBOX=off";
+  console.warn(`[exec-scope] WARNING: agent-run processes are NOT sandboxed (${why}). Only the env scrub and argv refusals apply; a script an agent writes into its clone can read files and call harness CLIs as this OS user. See docs/decisions.md (T40).`);
+  return true;
 }
 
 /** The sandbox-exec prefix to prepend to a launch argv (empty where no sandbox): for spawns the runner builds itself (media_capture). */
 export function sandboxPrefix(writeRoots: string[], env: NodeJS.ProcessEnv = process.env): string[] {
-  return sandboxAvailable(env) ? ["/usr/bin/sandbox-exec", "-p", sandboxProfile(writeRoots)] : [];
+  if (sandboxAvailable(env)) return ["/usr/bin/sandbox-exec", "-p", sandboxProfile(writeRoots)];
+  warnUnsandboxed(env);
+  return [];
 }
