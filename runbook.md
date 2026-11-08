@@ -114,6 +114,13 @@ Declined or timed out (`--approval-timeout-min`, default 30) = no push; every de
 ledger. `itch_status` checks a channel's latest pushes without gating.
 
 ## Publish the studio site
+On Vercel (T52, the default once a game's web build is in the site: the Naïve App caps files at 2 MB and index.wasm is
+~40 MB): build-release calls the ask-gated `vercel_deploy` with the site dir (home at /) and each game's web export
+mounted at /<slug>/ (`mounts`); it merges vercel.json (COOP/COEP on wasm dirs, application/wasm, trailing slashes) and
+waits for READY; `alias` points a domain (e.g. getany.org, added to the project first) at it. Env: `VERCEL_TOKEN`
+(+ `VERCEL_TEAM_ID` for a team project). Approve it like any send; check with `vercel_status`.
+
+Legacy Naïve App path:
 The site is a Naïve App. Create it once (operator, live): `apps.create({ name: "studio-site",
 type: "frontend_only" })` → put its id in env `STUDIO_SITE_APP_ID` (see docs/naive-notes.md, Apps).
 build-release deploys `dist/web` (+ `site/` when marketing wrote one) through the ask-gated

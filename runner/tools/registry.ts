@@ -140,6 +140,19 @@ export const CORE_CAPABILITIES = {
     local: true,
     note: "Needs STUDIO_SITE_APP_ID in env.",
   },
+  vercel_deploy: {
+    outward: true,
+    summary: "Deploy a static site from the workspace to Vercel (the studio site with in-page Godot web builds; no 2 MB file cap): site dir + optional mounts at /<slug>/, merged vercel.json (COOP/COEP on wasm dirs, application/wasm, trailing slashes), production or preview, optional alias",
+    naive: [],
+    local: true,
+    note: "REST (runner/tools/vercel.ts): POST /v2/files by sha1, POST /v13/deployments, poll until READY, POST /v2/deployments/:id/aliases. VERCEL_TOKEN (+ optional VERCEL_TEAM_ID) from env only, redacted from results. No symlinks in the tree; hidden files skipped; per-file/total caps VERCEL_MAX_FILE_MB (100) / VERCEL_MAX_TOTAL_MB (1024).",
+  },
+  vercel_status: {
+    summary: "Read-only: a Vercel project's latest deployments and aliases",
+    naive: [],
+    local: true,
+    note: "Env only: VERCEL_TOKEN (+ optional VERCEL_TEAM_ID).",
+  },
   art_signoff: {
     summary: "Human checkpoint before batch art: the operator approves or denies the anchor set (style bible + contact sheet) via the approval queue",
     naive: [],
