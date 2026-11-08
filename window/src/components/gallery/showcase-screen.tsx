@@ -120,9 +120,13 @@ function GamesTab({ games, repos, entries }: { games: ShowcaseGame[]; repos: str
   );
 }
 
+const PICKS = [{ slug: "caravan-cargo-cult", name: "Caravan Cargo Cult" }, { slug: "soul-shift", name: "SOUL SHIFT" }];
+
 function GapMapTab() {
   const url = `${currentApiBase()}/api/gapmap`;
   const [state, setState] = useState<"checking" | "ready" | "missing">("checking");
+  // A pick only changes the iframe's hash: the map zooms to that game's gap without reloading the ~10 MB page.
+  const [pick, setPick] = useState<string | null>(null);
   useEffect(() => {
     // Read just the status, then drop the ~10 MB body; the iframe loads it for real.
     const ctrl = new AbortController();
@@ -138,6 +142,12 @@ function GapMapTab() {
           Every Steam game with 10+ reviews (about 56.6k), placed by similarity. Highlighted regions are open space next to proven demand;
           Greenlight picked both games from here, with no human choosing.
         </p>
+        {state === "ready" && PICKS.map((p) => (
+          <button key={p.slug} type="button" onClick={() => setPick(p.slug)}
+            className={`inline-flex shrink-0 items-center gap-1 rounded-full border px-2.5 py-1 text-xs ${pick === p.slug ? "border-[#6d5dfc] text-foreground" : "border-foreground/15 text-muted-foreground hover:text-foreground"}`}>
+            <span className="text-[#6d5dfc]" aria-hidden>★</span>{p.name}
+          </button>
+        ))}
         {state === "ready" && (
           <a href={url} target="_blank" rel="noreferrer" className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
             Open full screen<ArrowUpRight className="size-3.5" />
@@ -146,7 +156,7 @@ function GapMapTab() {
       </div>
       <div className="min-h-0 flex-1 overflow-hidden rounded-2xl border border-foreground/10 bg-background/40 shadow-sm">
         {state === "ready"
-          ? <iframe src={url} title="Steam gap map" className="size-full border-0" />
+          ? <iframe src={pick ? `${url}#pick=${pick}` : url} title="Steam gap map" className="size-full border-0" />
           : (
             <div className="grid size-full place-items-center px-6 text-center">
               <div className="max-w-sm space-y-2">

@@ -9,7 +9,7 @@ import { parseArgs } from "node:util";
 import { GAPMAP_DIR } from "./embed.ts";
 import { indieShare, loadMap } from "./query.ts";
 
-const { values } = parseArgs({ options: { run: { type: "string", multiple: true }, out: { type: "string" }, regions: { type: "string", default: "40" } } });
+const { values } = parseArgs({ options: { run: { type: "string", multiple: true }, out: { type: "string" }, regions: { type: "string", default: "40" }, pick: { type: "string", multiple: true } } });
 const { map, games } = loadMap();
 if (!map.games[0]?.xy) throw new Error("map.json has no layout; rebuild without --no-layout");
 
@@ -73,7 +73,24 @@ for (const spec of values.run ?? []) {
   const [dir, tag] = spec.split("=");
   if (!existsSync(path.join(dir, "eval.json"))) continue;
   const ev = JSON.parse(readFileSync(path.join(dir, "eval.json"), "utf8"));
-  pins.push(...(ev.code_ranking ?? []).filter((g: any) => g.map?.xy).map((g: any) => ({ rank: g.rank, label: tag ? `${tag}: ${g.label}` : g.label, xy: g.map.xy })));
+  pins.push(...(ev.code_ranking ?? []).filter((g: any) => g.map?.xy).map((g: any) => ({ rank: g.rank, gap: g.label, label: tag ? `${tag}: ${g.label}` : g.label, xy: g.map.xy })));
+}
+// Picks: --pick <greenlight-chair run>=<slug>=<Display name> (repeatable). The link is the recorded one, never guessed:
+// chair output pick.working_title -> the director run named in the chair's task -> that pitch's gap_label -> the analyst pin with that label.
+for (const spec of values.pick ?? []) {
+  const [dir, slug, name] = spec.split("=");
+  if (!dir || !slug || !name) throw new Error(`--pick wants <chair run>=<slug>=<name>, got "${spec}"`);
+  const chair = JSON.parse(readFileSync(path.join(dir, "output.json"), "utf8"));
+  const title = String(chair.pick?.working_title ?? "").toLowerCase();
+  const task = String(JSON.parse(readFileSync(path.join(dir, "run.json"), "utf8")).task ?? "");
+  const dirId = /director run (\S+?)[,.\s]/.exec(task)?.[1];
+  if (!title || !dirId) throw new Error(`${dir}: no pick or no director run in the task`);
+  const director = JSON.parse(readFileSync(path.join(path.dirname(dir), dirId, "output.json"), "utf8"));
+  const pitch = (director.pitches ?? []).find((p: any) => String(p.working_title ?? p.title ?? "").toLowerCase() === title);
+  const pin = pitch && pins.find((p) => p.gap === pitch.gap_label && !p.pick);
+  if (!pin) throw new Error(`${dir}: no analyst pin for "${title}" (gap ${pitch?.gap_label ?? "?"})`);
+  pin.pick = { slug, name };
+  console.log(`pick ${slug}: "${chair.pick.working_title}" <- director ${dirId} gap "${pitch.gap_label}" -> pin ${pin.label}`);
 }
 
 const data = { X, Y, T, V, R, N, YR, top, pins, KN, KS, EK: hasEdges ? map.games[0].knn!.length : 0, regs, openEdges, built: map.meta.built_at.slice(0, 10), window: map.meta.window, games: games.length };
@@ -163,8 +180,10 @@ canvas.dragging{cursor:grabbing}
     <span><i class="sw" style="background:var(--dot)"></i>game</span>
     <span><i class="sw" style="background:var(--hit)"></i>50+ reviews</span>
     <span><i class="ring"></i>open region</span>
-    <span id="pinLegend" style="display:none"><i class="sw" style="background:var(--pin)"></i>analyst gap</span>
+    <span id="pinLegend" style="display:none"><i class="sw" style="background:var(--pin);opacity:.5"></i>analyst gap</span>
+    <span id="pickLegend" style="display:none"><i class="sw" style="background:#6d5dfc"></i>picked → shipped game</span>
   </div>
+  <div id="picks" style="display:none;margin-top:10px"><b style="font-size:12px">Picked games</b><div id="pickList" style="display:flex;flex-direction:column;gap:6px;margin-top:6px"></div></div>
   <label class="toggle"><input type="checkbox" id="links" checked> Show links between open regions</label>
   <div id="search"><input id="q" type="search" placeholder="Find a game…" autocomplete="off" aria-label="Find a game"><div id="results" role="listbox"></div></div>
 </div>
@@ -207,7 +226,10 @@ const sx=x=>(x-cx)*scale*base+W/2-(W>760?176:0), sy=y=>(y-cy)*scale*base+H/2;
 const dx=X=>(X-W/2+(W>760?176:0))/(scale*base)+cx, dy=Y=>(Y-H/2)/(scale*base)+cy;
 function reset(){cx=(x0+x1)/2;cy=(y0+y1)/2;scale=1;draw()}
 
-let sel=null, hover=-1, pinned=-1, frame=0, showLinks=true;
+let sel=null, hover=-1, pinned=-1, frame=0, showLinks=true, hoverPin=null;
+const PICK='#6d5dfc', picks=D.pins.filter(p=>p.pick);
+function star(X,Y,ro,ri){ctx.beginPath();for(let k=0;k<10;k++){const r=k%2?ri:ro,a=-Math.PI/2+k*Math.PI/5;ctx.lineTo(X+r*Math.cos(a),Y+r*Math.sin(a))}ctx.closePath();
+  ctx.fillStyle=PICK;ctx.fill();ctx.strokeStyle='#ffffff';ctx.lineWidth=2;ctx.stroke()}
 document.getElementById('links').addEventListener('change',e=>{showLinks=e.target.checked;draw()});
 function draw(){if(frame)return;frame=requestAnimationFrame(()=>{frame=0;render()})}
 function render(){
@@ -230,8 +252,13 @@ function render(){
     const on=sel&&sel.id===r.id, rad=labels?10:6.5;
     ctx.strokeStyle=on?C.sel:C.ring;ctx.beginPath();ctx.arc(X,Y,rad,0,7);ctx.stroke();
     if(labels){ctx.fillStyle=on?C.sel:C.ring;ctx.fillText(r.n,X,Y+0.5)}}
-  for(const p of D.pins){const X=sx(p.xy[0]),Y=sy(p.xy[1]);ctx.fillStyle=C.pin;ctx.beginPath();ctx.arc(X,Y,5.5,0,7);ctx.fill();
-    ctx.textAlign='left';ctx.fillText(p.rank+'. '+p.label,X+9,Y);ctx.textAlign='center'}
+  for(const p of D.pins){if(p.pick)continue;const X=sx(p.xy[0]),Y=sy(p.xy[1]),on=p===hoverPin;ctx.globalAlpha=on?1:0.5;ctx.fillStyle=C.pin;ctx.beginPath();ctx.arc(X,Y,on?5:3.5,0,7);ctx.fill();
+    if(on){ctx.font='600 11px ui-sans-serif,system-ui,sans-serif';ctx.textAlign='left';ctx.fillText(p.rank+'. '+p.label,X+9,Y);ctx.textAlign='center'}}
+  ctx.globalAlpha=1;
+  for(const p of D.pins){if(!p.pick)continue;const X=sx(p.xy[0]),Y=sy(p.xy[1]);star(X,Y,10,4.2);
+    ctx.font='700 13px ui-sans-serif,system-ui,sans-serif';const t=p.pick.name+' · picked',w=ctx.measureText(t).width+18,h=24,bx=X+14,by=Y-h/2;
+    ctx.fillStyle='#ffffff';ctx.strokeStyle=PICK;ctx.lineWidth=1.5;ctx.beginPath();ctx.roundRect(bx,by,w,h,12);ctx.fill();ctx.stroke();
+    ctx.fillStyle='#1d2128';ctx.textAlign='left';ctx.textBaseline='middle';ctx.fillText(t,bx+9,Y+0.5);ctx.textAlign='center'}
   if(hover>=0){ctx.strokeStyle=C.fg;ctx.lineWidth=1.5;ctx.beginPath();ctx.arc(sx(D.X[hover]),sy(D.Y[hover]),5,0,7);ctx.stroke()}
   if(pinned>=0){ctx.strokeStyle=C.sel;ctx.lineWidth=2;ctx.beginPath();ctx.arc(sx(D.X[pinned]),sy(D.Y[pinned]),6,0,7);ctx.stroke()}
 }
@@ -291,7 +318,10 @@ const pct=v=>Math.round(v*100)+'%';
 function showTip(html,X,Y){tip.innerHTML=html;tip.style.display='block';const w=tip.offsetWidth,h=tip.offsetHeight;
   tip.style.left=Math.min(X+14,W-w-8)+'px';tip.style.top=Math.min(Y+14,H-h-8)+'px'}
 function hideTip(){tip.style.display='none'}
-function hoverAt(X,Y){const r=nearestRegion(X,Y);
+function nearestPin(X,Y){let best=null,bd=10*10;for(const p of D.pins){const d=(sx(p.xy[0])-X)**2+(sy(p.xy[1])-Y)**2;if(d<bd){bd=d;best=p}}return best}
+function hoverAt(X,Y){const pp=nearestPin(X,Y);if(pp!==hoverPin){hoverPin=pp;draw()}
+  if(pp){hover=-1;showTip('<b>'+(pp.pick?esc(pp.pick.name)+' · picked':'Analyst gap '+pp.rank)+'</b><br><span class="k">'+esc(pp.label)+'</span>',X,Y);return}
+  const r=nearestRegion(X,Y);
   if(r){hover=-1;showTip('<b>'+r.n+'. '+esc(r.tags.slice(0,3).join(' · '))+'</b><br><span class="k">opportunity</span> '+r.score+' · '+r.supply+' releases · '+pct(r.traction)+' traction<br><span class="k">'+esc(r.examples.slice(0,3).join(', '))+'</span>',X,Y);draw();return}
   const g=nearestGame(X,Y,8);if(g!==hover){hover=g;draw()}
   if(g>=0)showTip('<b>'+esc(D.N[g])+'</b><br><span class="k">'+(D.YR[g]||'?')+' · '+D.V[g].toLocaleString()+' reviews · region '+D.R[g]+'</span>',X,Y);else hideTip()}
@@ -348,6 +378,15 @@ function goGame(i){res.style.display='none';q.value=D.N[i];pinGame(i);flyTo(D.X[
   setTimeout(()=>showTip('<b>'+esc(D.N[i])+'</b><br><span class="k">'+(D.YR[i]||'?')+' · '+D.V[i].toLocaleString()+' reviews · region '+D.R[i]+'</span>',sx(D.X[i]),sy(D.Y[i])),600)}
 
 addEventListener('resize',()=>{fit();draw()});fit();render();
+// Picked games: in-panel list + #pick=<slug> deep link (zooms to the pick).
+function goPick(slug){const p=picks.find(p=>p.pick.slug===slug);if(!p)return;flyTo(p.xy[0],p.xy[1],6)}
+if(picks.length){document.getElementById('picks').style.display='';document.getElementById('pickLegend').style.display='';
+  const pl=document.getElementById('pickList');
+  for(const p of picks){const b=document.createElement('button');b.className='btn';b.style.cssText='text-align:left;display:flex;gap:8px;align-items:center';
+    b.innerHTML='<span style="color:'+PICK+'">★</span><span><b>'+esc(p.pick.name)+'</b><br><small>'+esc(p.gap)+'</small></span>';
+    b.onclick=()=>{if(location.hash==='#pick='+p.pick.slug)goPick(p.pick.slug);else location.hash='pick='+p.pick.slug};pl.appendChild(b)}}
+const fromHash=()=>{const m=/^#pick=([a-z0-9-]+)$/.exec(location.hash);if(m)goPick(m[1])};
+addEventListener('hashchange',fromHash);setTimeout(fromHash,50);
 setTimeout(()=>{const h=document.getElementById('hint');h.style.transition='opacity .6s';h.style.opacity='0'},6000);
 </script></body></html>`;
 

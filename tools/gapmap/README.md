@@ -7,6 +7,8 @@ tags, genres, and description, then searched for open space next to proven deman
 node --env-file=.env --import tsx tools/gapmap/embed.ts     # ~$0.25, resumable; data/gapmap/{games.jsonl,vectors.f32}
 node --import tsx tools/gapmap/build.ts                     # kNN + regions + 2D layout → data/gapmap/map.json
 node --import tsx tools/gapmap/render.ts [--run runs/<id>]  # → data/gapmap/map.html (overlay a run's gaps; eval it first)
+#   --run <dir>=<Label> is repeatable; --pick <greenlight-chair run>=<slug>=<Name> stars the gap that game came from
+#   (chair pick -> director pitch gap_label -> analyst pin; errors if the link is missing). #pick=<slug> zooms to it.
 node --env-file=.env --import tsx tools/gapmap/query.ts regions | region --id N | probe --text "..." | game --appid N
 ```
 
