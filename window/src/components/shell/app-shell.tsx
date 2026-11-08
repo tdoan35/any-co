@@ -24,7 +24,7 @@ import type { ChatAgent } from "@/lib/mock/assistant";
 import { SESSION_PARAM, sessionHref } from "@/lib/chat/session";
 import { httpMode } from "@/lib/api";
 import { TabsProvider } from "./tabs";
-import { StudioSwitcher } from "./studio-switcher";
+import { StudioBrand } from "./studio-switcher";
 import { TitleBar } from "./title-bar";
 
 const nav = [
@@ -75,7 +75,7 @@ function SidebarTop() {
         <span className={cn(layer, collapsed && toggleInHeader && "group-hover:opacity-0")}><BrandIcon /></span>
         {toggleInHeader && <span className={cn(layer, "opacity-0", collapsed && "group-hover:opacity-100")}><PanelLeftOpen className="size-4" /></span>}
       </button>
-      <span className="ml-2 whitespace-nowrap text-[15px] font-semibold tracking-tight transition-opacity duration-150 group-data-[collapsible=icon]:opacity-0">any-co</span>
+      <StudioBrand />
       {/* Anchored to the expanded width (not the animating edge) so they fade in place instead of sliding. */}
       {toggleInHeader && <>
         <Button
@@ -346,7 +346,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     >
       <TitleBar onOpenSettings={() => setSettingsOpen(true)} />
       <Sidebar collapsible="icon" className="top-(--titlebar-height) h-auto border-r border-white/40 dark:border-white/10 [&_[data-sidebar=sidebar]]:bg-sidebar/25 [&_[data-sidebar=sidebar]]:backdrop-blur-xl">
-        <SidebarHeader className="px-2 pt-3 pb-1"><SidebarTop /><StudioSwitcher /></SidebarHeader>
+        <SidebarHeader className="px-2 pt-3 pb-1"><SidebarTop /></SidebarHeader>
         <SidebarContent className="overflow-hidden">
           <SidebarGroup>
             <SidebarMenu>
