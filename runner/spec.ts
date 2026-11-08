@@ -49,6 +49,8 @@ export function grantIssues(rec: Record<string, string>, caps: Record<string, Ca
     if (!(k in caps)) issues.push({ path: k, message: `unknown capability "${k}"; known: ${known.join(", ")}` });
     else if (caps[k].outward && perm === "allow")
       issues.push({ path: k, message: `capability "${k}" sends or spends outside the studio: grant it "ask" (approval gate + ledger), never "allow"` });
+    else if (caps[k].approval_only && perm === "allow")
+      issues.push({ path: k, message: `capability "${k}" is a human decision: grant it "ask" (it runs only after the operator approves), never "allow"` });
   }
   return issues;
 }

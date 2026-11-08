@@ -167,7 +167,13 @@ called. The `art_generate` capability (runner/tools/impl.ts over tools/art/credi
   `{exhausted: "all", fallback: "procedural"}` at zero cost: the Art Director's ladder floor.
 - **Conserve**: bake-offs are for anchors; `art_anchor_winner` records the winner in
   `runs/art-gallery.json` and calls that reference the anchor default to it (the loser is
-  refused). One generation + 2 regenerations per asset (counted in the gallery). Animation
+  refused). One generation + 2 regenerations per asset (counted in the gallery by the normalized out path, slot
+  reserved before the paid call and released if it billed nothing, so concurrent calls can't overshoot; T39). A redo past
+  the cap needs a human: a NEW out path (`<name>-v2.png`) is the default; keeping the path takes an operator-approved
+  `art_redo` (approval-only capability) or `npm run art -- redo <out> --why …`, which grants one fresh allowance (ledgered).
+  Before any paid call art_generate refuses an `out` with no real file name or outside `game/assets/`, and a postprocess
+  whose manifest or manifest entry (size for snap, grid+palette for snap/lock) is missing, with zero requests. comfy is
+  never refused by an anchor's bake-off winner (the lock is among paid providers). Animation
   (frames, `rd_animation__*`, `rd_advanced_animation__*`) needs `justify`. `art_quote` returns
   RD's free check_cost quote (PixelLab: price table) × count against the remaining balance.
 - **PixelLab floor (T35, `PIXELLAB_MIN_REMAINING`)**: PixelLab is ONE generations balance shared by every
