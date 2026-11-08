@@ -27,6 +27,7 @@ export function headTask(now = new Date()): string {
 1. Look: board_list (board_get on every doing and blocked card), studio_runs (read the outputs of runs finished since your last cycle), studio_spend, ledger_recent, and studio_agents for the roster.
 2. Triage:
    - A blocked card: read its note. If the next step is clear and within the studio's scope, comment it and, if the card is too big, create a smaller one blocked on nothing. If it needs a human, say so in a comment and leave it.
+   - Replacing a blocked card (or one that ran out of turns) with a new card: pass supersedes: "<old card id>" to board_create, so the cards waiting on the old one wait on the new one and the old card closes.
    - A done card: its note is a report. Create the follow-up it calls for, and the next pipeline stage it unblocks (finished art or content → a tech-lead integration card; a merge → a QA card).
 3. Drive the plan. Compare the pipeline and milestones below with what is done (the run outputs, done cards, the ledger). For every stage whose input exists, that is not done, and that has no todo or doing card, create ONE card for its agent. Aim at the next milestone first. Keep every department with ready work busy: the dispatcher starts cards as agents free up, so queueing ready work is right; use blocked_by for order.
    - A card says what done looks like and where the inputs are (branches, run ids, card ids). It never contains game content: the agents decide the content.

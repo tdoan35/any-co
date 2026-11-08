@@ -781,3 +781,65 @@ test("T37: on the Naïve board the runner's comments carry their local author; o
   const untagged = decodeComment(cmt("key_123", "old comment", "t"));
   assert.equal(untagged.author, "key_123");
 });
+
+// ---- T38: a superseded card does not strand its dependents ----
+
+import { supersede, supersedesBody } from "./board/supersede.ts";
+
+test("T38: supersede re-points dependents and closes the old card; dependents run after the new card, with its note", async () => {
+  const { d, board, providers } = await rig({ maxParallel: 4 });
+  const old = (await board.create({ title: "Build the shop", assignee: "alpha-agent" })).card;
+  await board.update(old.id, { status: "blocked", note: "ran out of turns" });
+  const dep = (await board.create({ title: "Test the shop", assignee: "beta-agent", blocked_by: [old.id] })).card;
+  const repl = (await board.create({ title: "Build the shop (smaller)", body: supersedesBody(old.id, "Just the buy button."), assignee: "alpha-agent" })).card;
+  const r = await supersede(board, old.id, repl.id);
+  assert.deepEqual(r, { old: old.id, by: repl.id, repointed: [dep.id], closed: true });
+  const closed = await board.get(old.id);
+  assert.deepEqual([closed.status, closed.note], ["done", `superseded by ${repl.id}`]);
+  const waiting = await board.get(dep.id);
+  assert.deepEqual([waiting.status, waiting.blocked_by, waiting.upstream], ["blocked", [repl.id], [repl.id]], "still waits, now on the replacement");
+
+  let res = await d.pass();
+  assert.equal(res.started, 1, "only the replacement starts");
+  await d.wait();
+  res = await d.pass();
+  assert.equal(res.started, 1, "then the dependent");
+  await d.wait();
+  const task = taskOf(providers[1]);
+  assert.match(task, /## Build the shop \(smaller\)/);
+  assert.doesNotMatch(task, /superseded by/, "the dependent gets the replacement's done note, not the old card's");
+  assert.equal((await board.get(dep.id)).status, "done");
+});
+
+test("T38: without supersede, a card blocked on a blocked card stays put (unchanged behaviour)", async () => {
+  const { d, board } = await rig();
+  const old = (await board.create({ title: "A", assignee: "alpha-agent" })).card;
+  await board.update(old.id, { status: "blocked", note: "stuck" });
+  const dep = (await board.create({ title: "B", assignee: "beta-agent", blocked_by: [old.id] })).card;
+  await board.create({ title: "A again, no supersedes", assignee: "alpha-agent" });
+  await d.pass();
+  await d.wait();
+  await d.pass();
+  assert.deepEqual([(await board.get(dep.id)).status, (await board.get(dep.id)).blocked_by], ["blocked", [old.id]]);
+  assert.equal((await board.get(old.id)).status, "blocked");
+});
+
+test("T38 safety net: a replacement whose supersede never finished is completed by the dispatcher's next pass", async () => {
+  const logs: string[] = [];
+  const { board, runsDir } = await rig();
+  const specs = new Map([["alpha-agent", await loadAgent("alpha-agent", FIX)], ["beta-agent", await loadAgent("beta-agent", FIX)]]);
+  const d = new Dispatcher({ board, specs, provider: () => scripted(), runsDir, log: (m) => logs.push(m) });
+  const old = (await board.create({ title: "A", assignee: "alpha-agent" })).card;
+  await board.update(old.id, { status: "blocked", note: "stuck" });
+  const dep = (await board.create({ title: "B", assignee: "beta-agent", blocked_by: [old.id] })).card;
+  // crash after create, before the re-point: only the body marker exists
+  const repl = (await board.create({ title: "A, take two", body: supersedesBody(old.id), assignee: "alpha-agent" })).card;
+  await d.pass();
+  assert.equal((await board.get(old.id)).note, `superseded by ${repl.id}`);
+  assert.deepEqual((await board.get(dep.id)).blocked_by, [repl.id]);
+  assert.ok(logs.some((l) => l.includes(`supersede ${old.id} → ${repl.id}: re-pointed 1 card(s), closed the old card`)), logs.join("\n"));
+  await d.wait();
+  logs.length = 0;
+  await d.pass(); // idempotent: nothing left to do
+  assert.ok(!logs.some((l) => l.startsWith("supersede")), logs.join("\n"));
+});
