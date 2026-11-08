@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, appendFileSync, closeSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { Worker } from "node:worker_threads";
 import { tmpdir } from "node:os";
@@ -424,33 +424,50 @@ test("N4: two lock takers at once — exactly one wins, including over a stale l
     const script = `import { writeFileSync } from "node:fs";
       import { acquireStudioLock } from ${JSON.stringify(path.join(path.dirname(fileURLToPath(import.meta.url)), "dispatch.ts"))};
       const runs = process.argv[1];
+      writeFileSync(runs + "/born-" + process.pid, "");
+      process.on("uncaughtException", (e) => { writeFileSync(runs + "/uncaught-" + process.pid, String(e && e.stack || e)); process.exit(1); });
       try {
-        acquireStudioLock(runs);
+        const lock = acquireStudioLock(runs);
         writeFileSync(runs + "/verdict-" + process.pid, "WON");
         setInterval(() => {}, 1000); // hold the lock; the parent SIGTERMs us when done
-      } catch {
-        writeFileSync(runs + "/verdict-" + process.pid, "LOST");
+      } catch (e) {
+        writeFileSync(runs + "/verdict-" + process.pid, "LOST " + String(e && e.message || e).slice(0, 200));
       }`;
     const N = 6;
-    const children = Array.from({ length: N }, () =>
-      spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, runsDir], { stdio: "ignore", timeout: 20_000 }),
-    );
+    const errFds: number[] = [];
+    const children = Array.from({ length: N }, (_, i) => {
+      const err = openSync(path.join(runsDir, `stderr-${i}`), "w");
+      errFds.push(err);
+      return spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, runsDir], { stdio: ["ignore", "ignore", err], timeout: 20_000 });
+    });
     const verdictFile = (pid: number) => path.join(runsDir, `verdict-${pid}`);
     const deadline = Date.now() + 15_000;
     let verdicts: string[] = [];
     while (Date.now() < deadline) {
       verdicts = children.filter((c) => c.pid && existsSync(verdictFile(c.pid))).map((c) => readFileSync(verdictFile(c.pid!), "utf8"));
-      if (verdicts.length === N) break;
+      if (verdicts.length === N && verdicts.every((v) => v.trim().length > 0)) break;
       await new Promise((r) => setImmediate(r));
     }
-    assert.equal(verdicts.length, N, `stale=${stale}: every contender reported, got ${verdicts.length}: [${verdicts.join(",")}]`);
+    const stderrTail = (i: number) => {
+      try {
+        return readFileSync(path.join(runsDir, `stderr-${i}`), "utf8").slice(-300);
+      } catch {
+        return "(none)";
+      }
+    };
+    assert.equal(
+      verdicts.length,
+      N,
+      `stale=${stale}: every contender reported, got ${verdicts.length}: [${verdicts.join(",")}] stderr: ${children.map((c, i) => `${i}:${stderrTail(i)}`).join(" | ")}`,
+    );
     assert.equal(verdicts.filter((v) => v === "WON").length, 1, `stale=${stale}: exactly one winner, got [${verdicts.join(",")}]`);
-    assert.equal(verdicts.filter((v) => v === "LOST").length, N - 1, `stale=${stale}: losers report, got [${verdicts.join(",")}]`);
+    assert.equal(verdicts.filter((v) => v.startsWith("LOST")).length, N - 1, `stale=${stale}: losers report, got [${verdicts.join(",")}]`);
     // release: kill the survivors (winner holds the lock via its interval)
     for (const c of children) c.kill("SIGKILL");
     // no wait: killed children release the lock file via the OS; the assert below polls instead
     await new Promise((r) => setImmediate(r));
     for (const c of children) if (c.pid) rmSync(verdictFile(c.pid), { force: true });
+    for (const fd of errFds) closeSync(fd);
     // The winner was SIGKILLed, so its lock file remains as a stale entry: the invariant is
     // that the next taker can take over (stale recovery), not that the file vanished.
     const takeover = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, runsDir], { stdio: "ignore", timeout: 10_000 });
@@ -484,15 +501,18 @@ test("T20b: three-plus takers over a stale lock — exactly one winner, no lost 
       } catch {
         writeFileSync(runs + "/verdict-" + process.pid, "LOST");
       }`;
-    const children = Array.from({ length: N }, () =>
-      spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, runsDir], { stdio: "ignore", timeout: 20_000 }),
-    );
+    const errFds: number[] = [];
+    const children = Array.from({ length: N }, (_, i) => {
+      const err = openSync(path.join(runsDir, `stderr-${i}`), "w");
+      errFds.push(err);
+      return spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, runsDir], { stdio: ["ignore", "ignore", err], timeout: 20_000 });
+    });
     const verdictFile = (pid: number) => path.join(runsDir, `verdict-${pid}`);
     const deadline = Date.now() + 15_000;
     let verdicts: string[] = [];
     while (Date.now() < deadline) {
       verdicts = children.filter((c) => c.pid && existsSync(verdictFile(c.pid))).map((c) => readFileSync(verdictFile(c.pid!), "utf8"));
-      if (verdicts.length === N) break;
+      if (verdicts.length === N && verdicts.every((v) => v.trim().length > 0)) break;
       await new Promise((r) => setImmediate(r));
     }
     assert.equal(verdicts.length, N, `N=${N}: every contender reported, got ${verdicts.length}: [${verdicts.join(",")}]`);
@@ -500,6 +520,7 @@ test("T20b: three-plus takers over a stale lock — exactly one winner, no lost 
     for (const c of children) c.kill("SIGKILL");
     await new Promise((r) => setImmediate(r));
     for (const c of children) if (c.pid) rmSync(verdictFile(c.pid), { force: true });
+    for (const fd of errFds) closeSync(fd);
     // A live-holder lock must never have been lost: the winner's lock content is intact and
     // a subsequent taker takes over the (now killed) winner's stale entry cleanly.
     const after = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, runsDir], { stdio: "ignore", timeout: 10_000 });
