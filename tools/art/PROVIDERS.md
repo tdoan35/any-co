@@ -130,8 +130,15 @@ the env, before any request). The provider never starts or stops servers; the op
   Without `reference` the graph is text-only (no IP-Adapter). `negative` is the negative prompt (default empty).
 - **Flow:** `GET /system_stats` (5 s health probe) → `POST /upload/image` (the reference, named
   `anyco-ref-<sha256[:16]>.png`, overwrite) → `POST /prompt` → poll `GET /history/<prompt_id>` →
-  `GET /view?filename&subfolder&type` per output of the SaveImage node. `max_candidates` applies; the
-  graph renders one image.
+  `GET /view?filename&subfolder&type` per output of the SaveImage node.
+- **Batch (T41):** `max_candidates` (art_generate default 4) becomes the latent `batch_size`, capped by `COMFY_MAX_BATCH`
+  (default **2**, max 8). Every image of the batch is written as a candidate (`<out>-0.png`, `<out>-1.png`, …), and postprocess
+  snaps each to the manifest entry of `out`; keep one at the manifest path and move the rest to the gallery. One seed per
+  call: the sampler's noise differs per batch index, so candidates vary while the seed still pins identity (same seed and
+  batch give the same images). Operator benchmark on the lab (RTX 4060 8 GB, frozen recipe 768², 30 steps): 1 image
+  43.4 s (~1.4 img/min); batch 2 53.8 s for 2 (27 s/img, ~2.2 img/min) with ~4 GB VRAM still free; two concurrent prompts
+  serialize in ComfyUI's queue (86 s wall, no speedup). Batch 4 at 768² is not verified on 8 GB, so the default cap is 2.
+  One call is one generation for the per-asset cap, whatever the batch.
 - **Output:** always 768×768, **opaque** (the recipe has no background removal). Pass
   `postprocess` (snap/lock/outline) to reach the manifest size, grid and palette. Stills only: `frames`
   is refused (animate the still with pixellab).

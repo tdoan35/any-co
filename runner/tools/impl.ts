@@ -952,6 +952,7 @@ async function applyArtPostprocess(
   workspace: string,
   opts: { snap?: boolean; lock?: boolean; outline?: string },
   images: string[],
+  out?: string,
 ): Promise<Record<string, unknown>> {
   const manifestFile = resolveInWorkspace(workspace, path.join("game", "assets", "manifest.json"));
   let manifest: { grid?: { w: number; h: number }; palette?: string[]; assets?: Array<{ path?: string; size?: { w: number; h: number }; frames?: number }> };
@@ -972,7 +973,9 @@ async function applyArtPostprocess(
     if (opts.snap) {
       // Snap to the whole asset (size is ONE frame × frames), never to a single grid cell.
       const repoRel = rel.replace(/^game\//, "");
-      const entry = manifest.assets?.find((a) => a.path === repoRel);
+      // candidates of one call (<out>-<i>.png, e.g. a comfy batch, T41) snap to the entry of the out they were asked for
+      const outRel = out ? path.posix.normalize(out.replace(/\\/g, "/")).replace(/^(\.\/)?game\//, "") : undefined;
+      const entry = manifest.assets?.find((a) => a.path === repoRel) ?? (outRel ? manifest.assets?.find((a) => a.path === outRel) : undefined);
       if (!entry?.size)
         throw new Error(`snap needs the manifest entry for "${repoRel}" with its size (one frame) declared first`);
       if (entry.size.w % manifest.grid.w !== 0 || entry.size.h % manifest.grid.h !== 0)
@@ -1058,7 +1061,7 @@ async function collectJob(i: any, ctx: ToolContext): Promise<ToolOutput> {
   try {
     let postprocess: Record<string, unknown> | null = null;
     if (i.postprocess && (i.postprocess.snap || i.postprocess.lock || i.postprocess.outline))
-      postprocess = await applyArtPostprocess(ctx.workspace, i.postprocess, result.images);
+      postprocess = await applyArtPostprocess(ctx.workspace, i.postprocess, result.images, i.out);
     return { content: JSON.stringify({ ...result, postprocess, collected: resume_job_id, generation: "not counted (collected an earlier job)" }), cost_micro_usd: 0 };
   } catch (e) {
     return { content: `collected ${result.images.join(", ")} but postprocess failed: ${errText(e)}`, is_error: true, cost_micro_usd: 0 };
@@ -1267,7 +1270,7 @@ const artGenerate: ToolImpl = {
     try {
       let postprocess: Record<string, unknown> | null = null;
       if (i.postprocess && (i.postprocess.snap || i.postprocess.lock || i.postprocess.outline))
-        postprocess = await applyArtPostprocess(ctx.workspace, i.postprocess, result.images);
+        postprocess = await applyArtPostprocess(ctx.workspace, i.postprocess, result.images, i.out);
       return { content: JSON.stringify({ ...result, postprocess, ...extra }), cost_micro_usd: result.cost_micro_usd };
     } catch (e) {
       // generation succeeded and was paid; postprocess failing must not erase the charge

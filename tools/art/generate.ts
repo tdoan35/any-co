@@ -706,13 +706,31 @@ export function comfyBaseUrl(opts: Pick<GenerateOptions, "baseUrl">, env: Record
 }
 
 /** The recipe as a ComfyUI API graph; with `reference` (an uploaded image name) the model goes through IP-Adapter. */
-export function comfyGraph(o: { prompt: string; negative: string; seed: number; reference?: string; prefix: string }): Record<string, { class_type: string; inputs: Record<string, unknown> }> {
+/**
+ * Images per comfy call (T41): max_candidates becomes the latent batch, capped by COMFY_MAX_BATCH (default 2). Lab benchmark
+ * (RTX 4060 8 GB, 768², 30 steps): 1 image 43.4 s; a batch of 2 53.8 s (27 s/img) with ~4 GB VRAM still free; concurrent
+ * prompts serialize. Batch 4 at 768² is not verified on 8 GB, so the default stays 2; set COMFY_MAX_BATCH (≤ 8) to go higher.
+ */
+export const COMFY_DEFAULT_MAX_BATCH = 2;
+export function comfyMaxBatch(env: Record<string, string | undefined> = process.env): number {
+  const raw = env.COMFY_MAX_BATCH?.trim();
+  if (!raw) return COMFY_DEFAULT_MAX_BATCH;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > MAX_CANDIDATES) throw new Error(`COMFY_MAX_BATCH must be an integer from 1 to ${MAX_CANDIDATES}, got "${raw}"`);
+  return n;
+}
+/** The batch for one call: max_candidates (default DEFAULT_CANDIDATES), at most the cap. */
+export const comfyBatch = (maxCandidates: number | undefined, cap: number) => Math.max(1, Math.min(cap, Math.floor(maxCandidates ?? DEFAULT_CANDIDATES)));
+
+export function comfyGraph(o: { prompt: string; negative: string; seed: number; reference?: string; prefix: string; batch?: number }): Record<string, { class_type: string; inputs: Record<string, unknown> }> {
   const r = COMFY_RECIPE;
   const graph: Record<string, { class_type: string; inputs: Record<string, unknown> }> = {
     "1": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: r.checkpoint } },
     "2": { class_type: "CLIPTextEncode", inputs: { clip: ["1", 1], text: o.prompt } },
     "3": { class_type: "CLIPTextEncode", inputs: { clip: ["1", 1], text: o.negative } },
-    "4": { class_type: "EmptyLatentImage", inputs: { width: r.size, height: r.size, batch_size: 1 } },
+    // batch: one seed, N latents. The sampler's noise differs per batch index, so the N candidates vary while the
+    // seed still pins identity across calls (the same seed + batch reproduces the same N images).
+    "4": { class_type: "EmptyLatentImage", inputs: { width: r.size, height: r.size, batch_size: o.batch ?? 1 } },
     "5": {
       class_type: "KSampler",
       inputs: { model: ["1", 0], positive: ["2", 0], negative: ["3", 0], latent_image: ["4", 0], seed: o.seed, steps: r.steps, cfg: r.cfg, sampler_name: r.sampler, scheduler: r.scheduler, denoise: 1 },
@@ -763,6 +781,7 @@ async function comfy(
 ): Promise<GenerateResult> {
   if (input.frames !== undefined) throw new Error("comfy makes stills only (frozen recipe); animate the still with pixellab (frames + reference)");
   const base = comfyBaseUrl(opts, env);
+  const maxBatch = comfyMaxBatch(env); // a malformed cap fails before any request
   const ref = input.reference ? await readReference(opts.workspace, input.reference) : null; // path safety before any request
 
   // Health probe, short: an unreachable or unready lab moves the call elsewhere instead of hanging.
@@ -789,7 +808,8 @@ async function comfy(
   }
 
   const seed = input.seed ?? COMFY_RECIPE.seed;
-  const graph = comfyGraph({ prompt: input.prompt, negative: input.negative ?? "", seed, reference: uploaded, prefix: `anyco/${randomUUID()}` });
+  const batch = comfyBatch(input.maxCandidates, maxBatch);
+  const graph = comfyGraph({ prompt: input.prompt, negative: input.negative ?? "", seed, reference: uploaded, prefix: `anyco/${randomUUID()}`, batch });
   const sub = await comfyCall(fetchImpl, base, "/prompt", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: graph, client_id: "anyco-art" }) }, deadline);
   const nodeErrors = sub.body?.node_errors && Object.keys(sub.body.node_errors).length > 0 ? sub.body.node_errors : null;
   if (sub.status >= 400 || nodeErrors || sub.body?.error)
@@ -843,7 +863,7 @@ async function comfy(
     cost_source: "local",
     metadata: {
       prompt_id: promptId, base_url: base, method: uploaded ? "ipa" : "text", seed, reference_uploaded: uploaded ?? null,
-      recipe: COMFY_RECIPE, size: { w: first.width, h: first.height }, requested_size: { w: input.width, h: input.height },
+      recipe: COMFY_RECIPE, batch, max_batch: maxBatch, size: { w: first.width, h: first.height }, requested_size: { w: input.width, h: input.height },
       candidates_discarded: cap.discarded,
       notes: ["comfy renders an opaque 768x768 image (the recipe has no background removal); use postprocess snap/lock/outline to reach the manifest size and palette"],
     },

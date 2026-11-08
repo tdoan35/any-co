@@ -344,3 +344,83 @@ test("T31 art_generate comfy: a refused 8188 URL is an error, not a fallback; th
   assert.doesNotThrow(() => IMPLS.art_generate.art_generate.input.parse({ provider: "comfy", prompt: "x", width: 16, height: 16, out: "a.png", negative: "blurry" }));
   assert.match(IMPLS.art_generate.art_generate.description, /comfy/);
 });
+
+// ---- T41: max_candidates → batch_size (capped by COMFY_MAX_BATCH, default 2) ----
+
+import { COMFY_DEFAULT_MAX_BATCH, comfyBatch, comfyMaxBatch } from "./generate.ts";
+
+/** A lab that renders as many images as the submitted latent batch. */
+function batchLab(): Handler {
+  let batch = 1;
+  return (r, res, n) => {
+    if (r.method === "POST" && r.url === "/prompt") {
+      batch = r.json.prompt["4"].inputs.batch_size;
+      return send(res, 200, { prompt_id: "p-1", number: 1, node_errors: {} });
+    }
+    if (r.method === "GET" && r.url === "/history/p-1")
+      return send(res, 200, { "p-1": { status: { completed: true }, outputs: { "7": { images: Array.from({ length: batch }, (_, i) => ({ filename: `anyco_${i}.png`, subfolder: "anyco", type: "output" })) } } } });
+    return happyLab()(r, res, n);
+  };
+}
+
+test("T41 comfy: max_candidates 1/2/4 becomes the latent batch (cap applied), every image is written as a candidate, one seed", async () => {
+  const lab = await startLab(batchLab());
+  try {
+    for (const [max, env, want] of [[1, {}, 1], [2, {}, 2], [4, {}, 2], [4, { COMFY_MAX_BATCH: "4" }, 4], [undefined, {}, 2]] as const) {
+      const ws = mkdtempSync(path.join(tmpdir(), "comfy-batch-"));
+      const before = lab.requests.length;
+      const r = await generate(
+        { provider: "comfy", prompt: "x", width: 16, height: 16, out: "game/assets/a.png", seed: 9, ...(max !== undefined ? { maxCandidates: max } : {}) },
+        { workspace: ws, baseUrl: { comfy: lab.base }, env: { ...env }, ...FAST },
+      );
+      const g = lab.requests.slice(before).find((q) => q.url === "/prompt")!.json.prompt;
+      assert.equal(g["4"].inputs.batch_size, want, `max ${max} env ${JSON.stringify(env)}`);
+      assert.equal(g["5"].inputs.seed, 9, "one seed for the batch");
+      assert.equal(r.images.length, want);
+      assert.deepEqual(r.images, want === 1 ? ["game/assets/a.png"] : Array.from({ length: want }, (_, i) => `game/assets/a-${i}.png`));
+      for (const img of r.images) assert.ok(existsSync(path.join(ws, img)));
+      assert.equal(r.metadata.batch, want);
+      assert.equal(lab.requests.slice(before).filter((q) => q.url.startsWith("/view?")).length, want);
+    }
+  } finally {
+    await lab.close();
+  }
+});
+
+test("T41 comfy: the batch cap is enforced and validated before any request", async () => {
+  assert.equal(COMFY_DEFAULT_MAX_BATCH, 2);
+  assert.equal(comfyMaxBatch({}), 2);
+  assert.equal(comfyMaxBatch({ COMFY_MAX_BATCH: "4" }), 4);
+  for (const bad of ["0", "9", "two", "1.5"]) assert.throws(() => comfyMaxBatch({ COMFY_MAX_BATCH: bad }), /COMFY_MAX_BATCH must be an integer from 1 to 8/);
+  assert.equal(comfyBatch(8, 2), 2);
+  assert.equal(comfyBatch(0, 4), 1);
+  let calls = 0;
+  const fetchImpl = (async () => { calls++; throw new Error("must not be called"); }) as unknown as typeof fetch;
+  const err = await generate({ provider: "comfy", prompt: "x", width: 16, height: 16, out: "a.png", maxCandidates: 4 }, { workspace: mkdtempSync(path.join(tmpdir(), "comfy-")), fetchImpl, baseUrl: { comfy: "http://127.0.0.1:9" }, env: { COMFY_MAX_BATCH: "16" }, ...FAST }).catch((e: unknown) => e);
+  assert.match(String(err), /COMFY_MAX_BATCH must be an integer/);
+  assert.equal(calls, 0);
+});
+
+test("T41 art_generate comfy: the default call returns a batch of 2 candidates, both post-processed with the out's manifest entry", async () => {
+  const lab = await startLab(batchLab());
+  const { ws, ctx } = capabilityWorkspace();
+  try {
+    await withEnv({ COMFY_BASE_URL: lab.base }, async () => {
+      const r = await IMPLS.art_generate.art_generate.run(
+        { provider: "comfy", prompt: "a merchant", width: 16, height: 16, out: "game/assets/merchant.png", reference: "game/assets/hero-anchor.png", postprocess: { snap: true, lock: true, outline: "#1a1c2c" } },
+        ctx,
+      );
+      assert.equal(r.is_error, undefined, r.content);
+      const out = JSON.parse(r.content);
+      assert.deepEqual(out.images, ["game/assets/merchant-0.png", "game/assets/merchant-1.png"]);
+      assert.equal(out.metadata.batch, 2);
+      assert.equal(out.generation, "1 of 3", "one call, one generation, however many candidates");
+      for (const f of out.images) {
+        const img = decodePng(new Uint8Array(readFileSync(path.join(ws, f))));
+        assert.deepEqual([img.width, img.height], [16, 16], `${f} snapped to the merchant entry`);
+      }
+    });
+  } finally {
+    await lab.close();
+  }
+});
