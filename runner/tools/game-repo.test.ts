@@ -163,3 +163,53 @@ test("game_exec timeout kills the whole process group, including children that i
   try { left = execFileSync("pgrep", ["-f", marker], { encoding: "utf8" }).trim(); } catch { /* exit 1 = no match */ }
   assert.equal(left, "", "no child survives");
 });
+
+// ---- T28: agent branches continue from origin ----
+
+const gitIn = (dir: string, ...args: string[]) =>
+  execFileSync("git", ["-C", dir, "-c", "user.email=t@t", "-c", "user.name=t", ...args], { encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" } }).trim();
+const commitIn = async (ctx: ToolContext, file: string, text: string) => {
+  await IMPLS.game_repo.game_write.run({ path: file, content: text }, ctx);
+  await IMPLS.game_repo.game_exec.run({ command: ["git", "add", "-A"] }, ctx);
+  return IMPLS.game_repo.game_exec.run({ command: ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", `work ${file}`] }, ctx);
+};
+
+test("T28: a reused agent branch: the clone continues from origin's branch, merges main, and the push fast-forwards", async () => {
+  const { root } = makeGamesRoot();
+  const origin = path.join(root, "testgame");
+  // run 1: works and pushes its agent branch
+  const run1 = ctxFor(root);
+  assert.match(JSON.parse((await IMPLS.game_repo.game_clone.run({}, run1)).content).base, /^main/);
+  await commitIn(run1, "src/one.gd", "extends Node # run 1\n");
+  assert.equal((await IMPLS.game_repo.game_exec.run({ command: ["git", "push", "-q", "origin", "HEAD"] }, run1)).is_error, false);
+  // meanwhile the Tech Lead moves main
+  writeFileSync(path.join(origin, "MAIN.md"), "main moved\n");
+  gitIn(origin, "add", "-A");
+  gitIn(origin, "commit", "-q", "-m", "main moved");
+  // run 2: same agent, fresh workspace
+  const run2 = ctxFor(root);
+  const info = JSON.parse((await IMPLS.game_repo.game_clone.run({}, run2)).content);
+  assert.match(info.base, /^origin\/agent\/gameplay-engineer \+ origin\/main merged in/);
+  assert.ok(existsSync(path.join(run2.workspace, "game", "src", "one.gd")), "run 1's work is there");
+  assert.ok(existsSync(path.join(run2.workspace, "game", "MAIN.md")), "main's latest is there");
+  await commitIn(run2, "src/two.gd", "extends Node # run 2\n");
+  const push = await IMPLS.game_repo.game_exec.run({ command: ["git", "push", "-q", "origin", "HEAD"] }, run2);
+  assert.equal(push.is_error, false, push.content); // fast-forward, no pull needed
+  assert.match(gitIn(origin, "log", "--oneline", "agent/gameplay-engineer"), /work src\/two\.gd[\s\S]*work src\/one\.gd/);
+});
+
+test("T28: a main merge that conflicts is aborted; the clone stays on origin's branch and says so", async () => {
+  const { root } = makeGamesRoot();
+  const origin = path.join(root, "testgame");
+  const run1 = ctxFor(root);
+  await IMPLS.game_repo.game_clone.run({}, run1);
+  await commitIn(run1, "README.md", "# agent version\n");
+  await IMPLS.game_repo.game_exec.run({ command: ["git", "push", "-q", "origin", "HEAD"] }, run1);
+  writeFileSync(path.join(origin, "README.md"), "# main version\n");
+  gitIn(origin, "commit", "-q", "-am", "main edits README");
+  const run2 = ctxFor(root);
+  const info = JSON.parse((await IMPLS.game_repo.game_clone.run({}, run2)).content);
+  assert.match(info.base, /conflicted and was aborted/);
+  assert.equal(gitIn(path.join(run2.workspace, "game"), "status", "--porcelain"), "", "no half-merged state left behind");
+  assert.equal(gitIn(path.join(run2.workspace, "game"), "rev-parse", "HEAD"), gitIn(origin, "rev-parse", "agent/gameplay-engineer"));
+});

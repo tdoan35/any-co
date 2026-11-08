@@ -51,3 +51,24 @@ test("checkpoint: no clone is a no-op; a clean branch with unpushed commits is p
   assert.ok(r && !r.checkpointed && r.pushed, JSON.stringify(r));
   assert.match(g(repo, "log", "--oneline", "-1", "agent/clean"), /agent commit/);
 });
+
+test("T28: a checkpoint whose branch diverged on origin lands on wip/<agent>-<run>; nothing is lost or forced", async () => {
+  const { repo, ws, clone } = setup("agent/probe");
+  // an earlier run pushed agent/probe with its own commit
+  const other = mkdtempSync(path.join(tmpdir(), "cp-other-"));
+  execFileSync("git", ["clone", "-q", repo, path.join(other, "game")]);
+  g(path.join(other, "game"), "checkout", "-q", "-b", "agent/probe");
+  writeFileSync(path.join(other, "game", "earlier.gd"), "extends Node\n");
+  g(path.join(other, "game"), "add", "-A");
+  g(path.join(other, "game"), "commit", "-q", "-m", "earlier run");
+  g(path.join(other, "game"), "push", "-q", "origin", "HEAD:refs/heads/agent/probe");
+  const before = g(repo, "rev-parse", "agent/probe");
+  // this run (branched from main) has leftover work: its push to agent/probe is non-fast-forward
+  writeFileSync(path.join(clone, "leftover.gd"), "extends Node\n");
+  const r = await checkpointGameClone(ws, "probe", "run2", "max_turns");
+  assert.ok(r && r.checkpointed && r.pushed, JSON.stringify(r));
+  assert.equal(r!.branch, "wip/probe-run2");
+  assert.match(r!.note, /pushed to wip\/probe-run2: origin's agent\/probe was non-fast-forward/);
+  assert.equal(g(repo, "rev-parse", "agent/probe"), before, "origin's agent branch untouched (never forced)");
+  assert.match(g(repo, "show", "--stat", "--oneline", "wip/probe-run2"), /leftover\.gd/);
+});
