@@ -2,6 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, waitFor, within } from "storybook/test";
 import { AgentAvatar, InitialAvatar } from "./agent-avatar";
 import { dana, jonah } from "@/lib/mock/assistant";
+import { CAST, greetingStill } from "@/lib/cast";
 
 const meta = {
   title: "Components/AgentAvatar",
@@ -96,5 +97,55 @@ export const InitialsFallback: Story = {
     expect(initial!.classList.contains("text-[2.6em]")).toBe(true);
     expect(avatar.classList.contains("bg-ok-soft")).toBe(true);
     expect(avatar.classList.contains("text-ok")).toBe(true);
+  },
+};
+
+/** Presence on a still: a pulsing run-colour ring and a gentle breathe. No faked frames. */
+export const WorkingStill: Story = {
+  name: "Working still",
+  render: () => (
+    <div className="flex items-end gap-6">
+      <AgentAvatar avatar={jonah.avatar!} name="Idle" />
+      <AgentAvatar avatar={jonah.avatar!} name="Busy" working />
+      <InitialAvatar initial="P" name="Initial busy" tone="bg-warn-soft text-warn" working className="text-4xl" />
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const idle = canvas.getByRole("img", { name: "Idle" });
+    const busy = canvas.getByRole("img", { name: "Busy, working" });
+    expect(idle.classList.contains("avatar-working")).toBe(false);
+    expect(busy.classList.contains("avatar-working")).toBe(true);
+    // The still breathes only because it has no working loop of its own.
+    expect(busy.querySelector("img")!.classList.contains("avatar-breathe")).toBe(true);
+    // Initials get the ring too, so staff presence reads the same way.
+    expect(canvas.getByRole("img", { name: "Initial busy, working" }).classList.contains("avatar-working")).toBe(true);
+    // Dana keeps her real working loop instead of breathing.
+    const { container } = { container: canvasElement };
+    expect(container.querySelectorAll(".avatar-breathe")).toHaveLength(1);
+  },
+};
+
+/** The studio cast (lib/cast.ts): every mapped agent's portrait resolves; Dana's greeting pose too. */
+export const StudioCast: Story = {
+  name: "Studio cast",
+  render: () => (
+    <div className="grid grid-cols-5 gap-4">
+      {Object.entries(CAST).map(([id, avatar]) => (
+        <div key={id} className="flex flex-col items-center gap-1.5">
+          <AgentAvatar avatar={avatar} name={id} className="size-16" />
+          <span className="text-[11px] text-muted-foreground">{id}</span>
+        </div>
+      ))}
+      <div className="flex flex-col items-center gap-1.5">
+        <AgentAvatar avatar={{ still: greetingStill("studio-head")! }} name="studio-head greeting" className="size-16" />
+        <span className="text-[11px] text-muted-foreground">greeting</span>
+      </div>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const stills = [...canvasElement.querySelectorAll<HTMLImageElement>('[role="img"] > img:first-child')];
+    expect(stills).toHaveLength(Object.keys(CAST).length + 1);
+    await waitFor(() => { for (const img of stills) expect(img.naturalWidth).toBeGreaterThan(0); });
   },
 };

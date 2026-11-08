@@ -165,7 +165,7 @@ function ProfileCard({ profile: { agent, tagline }, isDefault, onOpen }: { profi
     >
       {isDefault && <span className="absolute left-3 top-3 rounded-full bg-foreground/5 px-1.5 py-px text-[10px] font-medium text-muted-foreground">Default</span>}
       <motion.div layoutId={portraitId(agent.id)} transition={EASE} className="rounded-full transition-shadow group-hover:shadow-[0_0_0_4px_color-mix(in_oklab,var(--foreground)_6%,transparent)]">
-        <Portrait agent={agent} className={cn("size-20", ring)} />
+        <Portrait agent={agent} live className={cn("size-20", ring)} />
       </motion.div>
       <div className="mt-3 text-sm font-semibold">{agent.name}</div>
       <div className="text-xs text-muted-foreground">{agent.role}</div>
@@ -181,7 +181,7 @@ function CommunityCard({ profile: { agent, tagline, author, installs }, onOpen, 
     <motion.div layoutId={cardId(agent.id)} transition={EASE} style={{ borderRadius: 16 }} className={cn("group relative transition-colors hover:border-foreground/20 hover:bg-background/80", surface)}>
       <button type="button" onClick={onOpen} className="flex w-full items-start gap-3 rounded-2xl p-3 pr-11 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring">
         <motion.div layoutId={portraitId(agent.id)} transition={EASE} className="shrink-0 rounded-full">
-          <Portrait agent={agent} className="size-12 border-2 border-foreground/25" />
+          <Portrait agent={agent} live className="size-12 border-2 border-foreground/25" />
         </motion.div>
         <div className="min-w-0">
           <div className="truncate text-sm font-medium">{agent.name} <span className="font-normal text-muted-foreground">{agent.role}</span></div>
@@ -211,7 +211,7 @@ function ExpandedCard({ profile, isDefault, onClose, onAdd }: { profile: StudioP
     <motion.div layoutId={cardId(agent.id)} transition={EASE} style={{ borderRadius: 16 }} className={cn("overflow-hidden", surface, "bg-background/60")}>
       <div className="flex items-start gap-5 p-6 pb-5">
         <motion.div layoutId={portraitId(agent.id)} transition={EASE} className="shrink-0 rounded-full">
-          <Portrait agent={agent} className={cn("size-24", ring)} />
+          <Portrait agent={agent} live className={cn("size-24", ring)} />
         </motion.div>
         <motion.div className="min-w-0 flex-1 pt-1" initial={{ opacity: 0 }} animate={{ opacity: 1, transition: { delay: 0.12, duration: 0.3 } }}>
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">

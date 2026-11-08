@@ -68,7 +68,7 @@ function DanaBrief({ state, onSelectItem }: { state: WeaveState; onSelectItem: (
     <section className={cn(card, "p-4")}>
       <div className="flex items-center gap-3">
         {head
-          ? <Face id={head.id} size="size-10" />
+          ? <Face id={head.id} size="size-10" live />
           : <span className="flex size-10 shrink-0 items-center justify-center rounded-full border border-dashed border-foreground/25 text-muted-foreground"><Crown className="size-4" /></span>}
         <div className="min-w-0 flex-1 text-xs">
           {head ? <NameRole id={head.id} className="block text-sm" /> : <span className="block text-sm font-medium">Studio Head</span>}

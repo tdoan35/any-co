@@ -19,13 +19,14 @@ export const KIND: Record<ItemKind, { label: string; icon: ComponentType<{ class
 export const agentOf = (id: string) => profileById(id).agent;
 
 /** A persona portrait, or Ty's initial for "you". The kind glyph sits on the bottom-right edge. */
-export function Face({ id, size = "size-8", kind, className }: { id: string; size?: string; kind?: ItemKind; className?: string }) {
+/** `live`: the portrait follows presence (see Portrait); leave it off where a face repeats down a list. */
+export function Face({ id, size = "size-8", kind, live, className }: { id: string; size?: string; kind?: ItemKind; live?: boolean; className?: string }) {
   const glyph = kind && KIND[kind];
   return (
     <span className={cn("relative inline-flex h-fit shrink-0 self-start", className)}>
       {id === "you"
         ? <span className={cn(size, "flex items-center justify-center rounded-full bg-foreground/10 text-[10px] font-semibold")} role="img" aria-label="You">T</span>
-        : <Portrait agent={agentOf(id)} className={cn(size, "border border-foreground/15 text-xs shadow-none")} />}
+        : <Portrait agent={agentOf(id)} live={live} className={cn(size, "border border-foreground/15 text-xs shadow-none")} />}
       {glyph && (
         <span className="absolute -bottom-1 -right-1 flex size-4 items-center justify-center rounded-full bg-background shadow-sm ring-1 ring-foreground/10" title={glyph.label}>
           <glyph.icon className={cn("size-2.5", glyph.tone)} />

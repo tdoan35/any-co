@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { api, httpMode } from "@/lib/api";
+import { withCastAvatars } from "@/lib/cast";
 import type { ChatAgent, Organization, Project, Registry, Run, Session, StudioProfile, Task } from "@fabric/contracts";
 
 const empty: Registry = { agents: [], communityAgents: [], teams: [], communityTeams: [], organizations: [], projects: [], sessions: [], personaPool: [] };
@@ -12,7 +13,8 @@ const notify = () => { version++; for (const listener of listeners) listener(); 
 const subscribe = (listener: () => void) => { listeners.add(listener); return () => listeners.delete(listener); };
 
 export function useRegistry() { useSyncExternalStore(subscribe, () => version); return current; }
-export function setRegistry(value: Registry) { current = value; notify(); }
+/** Agents the API sent without art get their cast portrait (lib/cast.ts). */
+export function setRegistry(value: Registry) { current = withCastAvatars(value); notify(); }
 export function setWorkData(nextTasks: Task[], nextRuns: Run[]) { tasks = nextTasks; runs = nextRuns; notify(); }
 export function setProjects(projects: Project[]) { current = { ...current, projects }; notify(); }
 

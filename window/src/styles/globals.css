@@ -160,6 +160,24 @@
   50% { box-shadow: 0 0 0 4px rgb(31 160 140 / 0.18), 0 0 28px 8px rgb(31 160 140 / 0.5); }
 }
 
+/* Working portrait: a soft ring in the run colour that swells and fades, so presence reads at a
+   glance on any face (stills and initials alike). Stills also breathe; Dana plays her working loop.
+   Reduced motion: a steady ring, no movement. */
+@keyframes avatar-working {
+  0% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--run) 55%, transparent); }
+  70%, 100% { box-shadow: 0 0 0 5px color-mix(in oklab, var(--run) 0%, transparent); }
+}
+@keyframes avatar-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.045) translateY(-1.5%); }
+}
+.avatar-working { animation: avatar-working 2s ease-out infinite; }
+.avatar-breathe { animation: avatar-breathe 3.2s ease-in-out infinite; transform-origin: 50% 70%; }
+@media (prefers-reduced-motion: reduce) {
+  .avatar-working { animation: none; box-shadow: 0 0 0 2px var(--run); }
+  .avatar-breathe { animation: none; }
+}
+
 /* Aurora background (from velocity): drifting gradient layers. */
 @theme {
   --animate-aurora: aurora 6s ease-in-out infinite;
