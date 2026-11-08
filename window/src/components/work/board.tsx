@@ -401,7 +401,7 @@ function TeamsLens({ team, projects, summaries, onTeam }: { team: StudioTeam; pr
         <Segmented value={team.id} options={YOUR_TEAMS} onChange={onTeam} />
         <p className="ml-auto min-w-0 truncate text-xs text-muted-foreground">
           Led by {agentOf(leadOf(team)).name} · rework budget {team.reworkBudget} · {mine.length} {mine.length === 1 ? "task" : "tasks"}, {loops} {loops === 1 ? "loop" : "loops"} ·{" "}
-          <Link to="/agents?view=teams" className="underline decoration-foreground/25 underline-offset-2 hover:text-foreground hover:decoration-foreground">How this team works</Link>
+          <Link to={`/agents?team=${team.id}`} className="underline decoration-foreground/25 underline-offset-2 hover:text-foreground hover:decoration-foreground">How this team works</Link>
         </p>
       </div>
       <div className={panelBody}>

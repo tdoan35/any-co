@@ -89,3 +89,46 @@ test("timeouts are mandatory: absent end_wait gets the 120s default, absurd valu
   assert.equal(bad.is_error, true);
   assert.match(bad.content, /non-negative/);
 });
+
+// ----- T42: qa_ui_lint against a fixture qa dir (the real impl, wrapper flags included) -----
+
+const { qa_ui_lint } = IMPLS.qa_harness;
+
+function cloneWithWs(ui: unknown[] | null): { ws: string; clone: string } {
+  const { ws, clone } = workspace("happy");
+  const base = {
+    schema_version: 1, scene: "run", tick: 12, run: { started: true, over: true, seed: 3, elapsed_ticks: 12 },
+    player: { x: 0, y: 0 }, resources: {}, entities: [], errors: [],
+  };
+  const qa = path.join(clone, "qa");
+  mkdirSync(qa, { recursive: true });
+  writeFileSync(path.join(qa, "state.json"), JSON.stringify(ui === null ? base : { ...base, ui }));
+  return { ws, clone };
+}
+
+const BAD_UI = [
+  { id: "a", rect: [10, 10, 50, 20], z: 1, visible: true, text_px: 12 },
+  { id: "b", rect: [30, 15, 50, 20], z: 2, visible: true, text_px: 4 }, // overlaps a; tiny text
+];
+
+test("T42: qa_ui_lint passes the wrapper flags through and reports findings on a ui[] clone", async () => {
+  const { ws, clone } = cloneWithWs(BAD_UI);
+  // exactly the shape R48 saw: the wrapper's shared run flags ride along
+  const r = await qa_ui_lint.run({ ack_timeout_ms: 5_000, end_wait_ms: 10_000, ready_timeout_ms: 5_000, step_frames: 5, max_entities: 500 }, ctx(ws));
+  assert.equal(r.is_error, undefined, r.content);
+  const out = JSON.parse(r.content) as { exitCode: number; checks: Array<{ name: string; pass: boolean }>; ui?: { status: string; findings: Array<{ check: string }> } };
+  assert.equal(out.exitCode, 1); // findings, not a pass
+  assert.deepEqual(out.checks.map((c) => c.name).sort(), ["ui_overlap", "ui_text_px"]);
+  assert.equal(out.ui!.status, "ok");
+  assert.deepEqual(out.ui!.findings.map((f) => f.check).sort(), ["overlap", "text_px"]);
+});
+
+test("T42: qa_ui_lint on a clone without ui[] => ui_lint_not_implemented, exit 0", async () => {
+  const { ws } = cloneWithWs(null);
+  const r = await qa_ui_lint.run({ ack_timeout_ms: 5_000, end_wait_ms: 10_000 }, ctx(ws));
+  assert.equal(r.is_error, undefined, r.content);
+  const out = JSON.parse(r.content) as { exitCode: number; checks: Array<{ name: string }>; ui?: { status: string } };
+  assert.equal(out.exitCode, 0);
+  assert.deepEqual(out.checks.map((c) => c.name), ["ui_lint_not_implemented"]);
+  assert.equal(out.ui!.status, "not-implemented");
+});

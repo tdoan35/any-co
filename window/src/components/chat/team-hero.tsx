@@ -187,7 +187,7 @@ export function TeamProfile({ team }: { team: StudioTeam }) {
             </div>
           );
         })}
-        <Button variant="outline" size="sm" asChild className="mt-2"><Link to="/agents?view=teams">Open in Teams <ArrowUpRight /></Link></Button>
+        <Button variant="outline" size="sm" asChild className="mt-2"><Link to="/agents">Open in Teams <ArrowUpRight /></Link></Button>
       </TabsContent>
 
       <TabsContent value="workflow" className={cn(scrollArea, "space-y-5")}>

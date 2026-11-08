@@ -141,6 +141,7 @@ test("registry: no invented lead or head; a head spec tops the org and is not dr
   assert.equal(noHead.teams.find((t) => t.id === "team-design")!.name, "Game Design");
   assert.equal(noHead.teams.find((t) => t.id === "team-eng")!.name, "Engineering");
   assert.equal(noHead.agents.find((a) => a.agent.id === "c")!.agent.role, "Engineering");
+  assert.equal(noHead.agents.find((a) => a.agent.id === "a")!.agent.traits[0], "Game Design");
   const withToy = buildRegistry([fakeSpec("a", "design"), fakeSpec("toy", "test")], new Set());
   assert.deepEqual(withToy.organizations[0].slots.map((s) => s.teamId), ["team-design"]);
   assert.ok(withToy.teams.some((t) => t.id === "team-test"));

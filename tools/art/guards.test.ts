@@ -42,7 +42,7 @@ async function fakes(opts: { generations?: number } = {}): Promise<Fakes> {
         return send(res, 202, { background_job_id: "j1", usage: { type: "usd", usd: 0.02 } });
       }
       if (url === "/v2/background-jobs/j1") return send(res, 200, { status: "completed", usage: { type: "usd", usd: 0.02 }, last_response: { images: [{ type: "base64", base64: Buffer.from(PNG).toString("base64") }] } });
-      if (url === "/system_stats") return send(res, 200, {});
+      if (url === "/system_stats" || url === "/queue") return send(res, 200, {});
       if (url === "/upload/image") return send(res, 200, { name: "ref.png", subfolder: "" });
       if (url === "/prompt") return send(res, 200, { prompt_id: "p-1", node_errors: {} });
       if (url === "/history/p-1") return send(res, 200, { "p-1": { status: { completed: true }, outputs: { "7": { images: [{ filename: "o.png", subfolder: "", type: "output" }] } } } });

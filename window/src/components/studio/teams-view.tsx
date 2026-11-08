@@ -11,45 +11,51 @@ import { profileById, useRegistry } from "@/lib/registry";
 import { httpMode } from "@/lib/api";
 import type { Organization, Presence, PresenceState, StudioTeam } from "@fabric/contracts";
 import { TeamLoops } from "@/components/work/team-loops";
-import { lastLoopAt, leadOf, teamLoopCount } from "@/lib/work";
+import { lastLoopAt, leadOf, teamLoopCount, when } from "@/lib/work";
 import { useWeave } from "@/lib/weave-store";
 import { EASE, Group, SectionHead, panel, pill, surface } from "./studio-ui";
 
 type Section = "mine" | "community";
-export type TeamsView = "teams" | "orgs";
 const cardId = (id: string) => `team-card-${id}`;
 const formatInstalls = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k` : String(n));
 
-/** The Teams and Organizations panes of the studio page. The page owns the header and the view switch. */
-export function TeamsStudio({ view, onViewChange }: { view: TeamsView; onViewChange: (v: TeamsView) => void }) {
+/** The studio chart. `teamId` opens that department; the page owns the URL. */
+export function TeamsStudio({ teamId, onOpenTeam, onOpenAgent, onOpenMember, onBack }: {
+  teamId?: string;
+  onOpenTeam: (id: string) => void;
+  onOpenAgent: (id: string) => void;
+  onOpenMember: (id: string) => void;
+  onBack: () => void;
+}) {
+  const registry = useRegistry();
+  const teams = registry.teams;
+  const open = teamId ? teams.find((t) => t.id === teamId) : undefined;
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onBack(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onBack]);
+
+  if (open) return <ExpandedTeam team={open} teams={teams} onClose={onBack} onOpenAgent={onOpenMember} />;
+  return <OrgView orgs={registry.organizations} teams={teams} onOpenTeam={onOpenTeam} onOpenAgent={onOpenAgent} />;
+}
+
+/** The old department catalog. The studio page no longer shows it; stories still mount it. */
+export function TeamsCatalog() {
   const registry = useRegistry();
   const [localAdds, setLocalAdds] = useState<string[]>([]);
   const mine = [...registry.teams, ...registry.communityTeams.filter((t) => localAdds.includes(t.id)).map((t) => ({ ...t, origin: `From ${t.author}` }))];
   const community = registry.communityTeams.filter((t) => !localAdds.includes(t.id));
   const [sel, setSel] = useState<{ id: string; from: Section } | null>(null);
-  const orgs = registry.organizations;
-
   const add = (id: string) => {
     const t = community.find((c) => c.id === id);
     if (!t) return;
     setLocalAdds((ids) => [...ids, t.id]);
     setSel(null);
   };
-
-  return (
-    <AnimatePresence mode="wait" initial={false}>
-      <motion.div key={view} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} transition={{ duration: 0.2 }}>
-        {view === "teams"
-          ? <TeamsView mine={mine} community={community} sel={sel} onSelect={setSel} onAdd={add} />
-          : (
-            <OrgView
-              orgs={orgs} teams={mine}
-              onOpen={(id) => { setSel({ id, from: "mine" }); onViewChange("teams"); }}
-            />
-          )}
-      </motion.div>
-    </AnimatePresence>
-  );
+  return <TeamsView mine={mine} community={community} sel={sel} onSelect={setSel} onAdd={add} />;
 }
 
 /**
@@ -106,16 +112,19 @@ function TeamsView({ mine, community, sel, onSelect, onAdd }: {
   );
 }
 
-function OrgView({ orgs, teams, onOpen }: { orgs: Organization[]; teams: StudioTeam[]; onOpen: (teamId: string) => void }) {
+function OrgView({ orgs, teams, onOpenTeam, onOpenAgent }: {
+  orgs: Organization[]; teams: StudioTeam[]; onOpenTeam: (teamId: string) => void; onOpenAgent: (id: string) => void;
+}) {
+  const departments = orgs.reduce((n, o) => n + o.slots.filter((s) => teams.some((t) => t.id === s.teamId)).length, 0);
   return (
     <section>
       <SectionHead
-        title="Organization"
-        count={orgs.length}
-        hint="The Studio Head sits at the top. Each card is a department, and everyone in it reports to the Head. A green dot means the agent is running a task right now. Click a department to open it."
+        title="Teams"
+        count={departments}
+        hint="Everyone reports to the Studio Head. Open a department for its members and loops, or a person for their profile. A green dot is a task in progress, red is blocked."
       />
       <div className="flex flex-col gap-8">
-        {orgs.map((o) => <OrgFolder key={o.id} org={o} teams={teams} onOpen={onOpen} />)}
+        {orgs.map((o) => <OrgFolder key={o.id} org={o} teams={teams} onOpenTeam={onOpenTeam} onOpenAgent={onOpenAgent} />)}
         {orgs.length === 0 && <p className="rounded-xl border border-dashed border-foreground/15 px-3 py-8 text-center text-sm text-muted-foreground">No agent specs found in agents/.</p>}
       </div>
     </section>
@@ -199,7 +208,10 @@ function CommunityTeamCard({ team, onOpen, onAdd }: { team: StudioTeam; onOpen: 
 
 /* ── Expanded team ────────────────────────────────────────────────── */
 
-function ExpandedTeam({ team, teams, onClose, onAdd }: { team: StudioTeam; teams: StudioTeam[]; onClose: () => void; onAdd?: () => void }) {
+function ExpandedTeam({ team, teams, onClose, onAdd, onOpenAgent }: {
+  team: StudioTeam; teams: StudioTeam[]; onClose: () => void; onAdd?: () => void; onOpenAgent?: (id: string) => void;
+}) {
+  const showWorkflow = !(team.workflow.length === 1 && team.workflow[0]?.label === "Work" && !team.workflow[0]?.note);
   return (
     <motion.div layoutId={cardId(team.id)} transition={EASE} style={{ borderRadius: 16 }} className={cn("overflow-hidden", surface, "bg-background/60")}>
       <div className="flex items-start gap-5 p-6 pb-5">
@@ -213,7 +225,7 @@ function ExpandedTeam({ team, teams, onClose, onAdd }: { team: StudioTeam; teams
         </motion.div>
         <div className="flex shrink-0 items-center gap-1">
           {onAdd && <Button size="sm" className="h-8" onClick={onAdd}><Plus />Add to your teams</Button>}
-          <Button size="icon" variant="ghost" className="size-8 rounded-full" onClick={onClose} aria-label="Close team"><X /></Button>
+          <Button size="icon" variant="ghost" className="size-8 rounded-full" onClick={onClose} aria-label="Back"><X /></Button>
         </div>
       </div>
 
@@ -221,11 +233,11 @@ function ExpandedTeam({ team, teams, onClose, onAdd }: { team: StudioTeam; teams
         <Tabs defaultValue="members" className="gap-4 px-6 pb-6">
           <TabsList className="bg-foreground/5">
             <TabsTrigger value="members"><Users />Members<span className="tabular-nums text-muted-foreground">{team.members.length}</span></TabsTrigger>
-            <TabsTrigger value="workflow"><Workflow />Workflow</TabsTrigger>
+            {showWorkflow && <TabsTrigger value="workflow"><Workflow />Workflow</TabsTrigger>}
             <TabsTrigger value="runs"><Play />Loops<span className="tabular-nums text-muted-foreground">{teamLoopCount(team.id)}</span></TabsTrigger>
           </TabsList>
-          <TabsContent value="members"><MembersTab team={team} teams={teams} /></TabsContent>
-          <TabsContent value="workflow"><WorkflowTab team={team} /></TabsContent>
+          <TabsContent value="members"><MembersTab team={team} teams={teams} onOpenAgent={onOpenAgent} /></TabsContent>
+          {showWorkflow && <TabsContent value="workflow"><WorkflowTab team={team} /></TabsContent>}
           <TabsContent value="runs"><TeamLoops team={team} /></TabsContent>
         </Tabs>
       </motion.div>
@@ -233,28 +245,34 @@ function ExpandedTeam({ team, teams, onClose, onAdd }: { team: StudioTeam; teams
   );
 }
 
-function MembersTab({ team, teams }: { team: StudioTeam; teams: StudioTeam[] }) {
+function MembersTab({ team, teams, onOpenAgent }: { team: StudioTeam; teams: StudioTeam[]; onOpenAgent?: (id: string) => void }) {
   return (
     <ul className={cn(panel, "divide-y divide-foreground/10")}>
       {team.members.map((m) => {
         const { agent, origin } = profileById(m.agentId);
         const also = teams.filter((t) => t.id !== team.id && t.members.some((x) => x.agentId === m.agentId));
+        const className = "group flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors first:rounded-t-xl last:rounded-b-xl hover:bg-foreground/5";
+        const body = (
+          <>
+            <Portrait agent={agent} className="size-10 border-2 border-foreground/25" />
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-sm">
+                <span className="font-medium">{agent.name}</span>
+                <span className="text-muted-foreground">{agent.role}</span>
+                {m.lead && <span className="inline-flex items-center gap-1 rounded-full bg-warn-soft px-1.5 py-px text-[10px] font-medium text-warn"><Crown className="size-2.5" />Lead</span>}
+                {also.map((t) => <span key={t.id} className={pill}>Also on {t.name}</span>)}
+                {origin && <span className={pill}>{origin}</span>}
+              </div>
+              <p className="truncate text-xs text-muted-foreground">{m.duty}</p>
+            </div>
+            <span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100">Profile <ArrowRight className="size-3" /></span>
+          </>
+        );
         return (
           <li key={m.agentId}>
-            <Link to={`/agents?agent=${agent.id}`} className="group flex items-center gap-3 px-3 py-2.5 transition-colors first:rounded-t-xl last:rounded-b-xl hover:bg-foreground/5">
-              <Portrait agent={agent} className="size-10 border-2 border-foreground/25" />
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-sm">
-                  <span className="font-medium">{agent.name}</span>
-                  <span className="text-muted-foreground">{agent.role}</span>
-                  {m.lead && <span className="inline-flex items-center gap-1 rounded-full bg-warn-soft px-1.5 py-px text-[10px] font-medium text-warn"><Crown className="size-2.5" />Lead</span>}
-                  {also.map((t) => <span key={t.id} className={pill}>Also on {t.name}</span>)}
-                  {origin && <span className={pill}>{origin}</span>}
-                </div>
-                <p className="truncate text-xs text-muted-foreground">{m.duty}</p>
-              </div>
-              <span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100">Profile <ArrowRight className="size-3" /></span>
-            </Link>
+            {onOpenAgent
+              ? <button type="button" onClick={() => onOpenAgent(agent.id)} className={className}>{body}</button>
+              : <Link to={`/agents?agent=${agent.id}`} className={className}>{body}</Link>}
           </li>
         );
       })}
@@ -316,7 +334,9 @@ const DOT: Record<PresenceState, string> = { working: "bg-ok", waiting: "bg-warn
 const line = "bg-foreground/20";
 
 /** An org drawn as a file folder: the name on the tab, the org chart inside. Live presence comes from Weave. */
-function OrgFolder({ org, teams, onOpen }: { org: Organization; teams: StudioTeam[]; onOpen: (teamId: string) => void }) {
+function OrgFolder({ org, teams, onOpenTeam, onOpenAgent }: {
+  org: Organization; teams: StudioTeam[]; onOpenTeam: (teamId: string) => void; onOpenAgent: (id: string) => void;
+}) {
   const live: Live = new Map(useWeave().presence.map((p) => [p.agentId, p]));
   const orgTeams = org.slots.flatMap(({ key, teamId }) => {
     const team = teams.find((t) => t.id === teamId);
@@ -340,7 +360,11 @@ function OrgFolder({ org, teams, onOpen }: { org: Organization; teams: StudioTea
       <div style={{ borderRadius: 16, borderTopLeftRadius: 0 }} className={cn("border border-foreground/10 px-6 pb-6 pt-7 shadow-sm", folderBg)}>
         <div className="mx-auto flex max-w-3xl flex-col items-center">
           {head
-            ? <OrgNode agent={head} size="size-16" subtitle={head.role} emphasis state={live.get(head.id)} />
+            ? (
+              <button type="button" onClick={() => onOpenAgent(head.id)} className="rounded-2xl outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                <OrgNode agent={head} size="size-16" subtitle={statusLine(live.get(head.id))} emphasis state={live.get(head.id)} />
+              </button>
+            )
             : <HeadPlaceholder />}
           {head && orgTeams.length > 0 && (
             <p className="mt-2 max-w-sm text-center text-xs text-muted-foreground">Decides scope, budget, and what ships. Every department reports here.</p>
@@ -351,10 +375,12 @@ function OrgFolder({ org, teams, onOpen }: { org: Organization; teams: StudioTea
         <ul className="mx-auto grid w-full max-w-3xl grid-cols-1 gap-3 sm:grid-cols-2">
           {orgTeams.map(({ key, team }) => (
             <li key={key} className="min-w-0">
-              <OrgTeamBox team={team} live={live} sharedIds={sharedIds} onOpen={() => onOpen(team.id)} />
+              <OrgTeamBox team={team} live={live} sharedIds={sharedIds} onOpen={() => onOpenTeam(team.id)} onOpenAgent={onOpenAgent} />
             </li>
           ))}
         </ul>
+
+        <HarnessLine teams={teams} onOpenAgent={onOpenAgent} />
 
         {httpMode && org.handoffs.filter((edge) => orgTeams.some((slot) => slot.team.id === edge.from) && orgTeams.some((slot) => slot.team.id === edge.to)).map((edge) => (
           <div key={`${edge.from}-${edge.to}`} className="mx-auto mt-5 flex max-w-[510px] items-center gap-3 text-xs text-muted-foreground">
@@ -382,39 +408,70 @@ function HeadPlaceholder() {
   );
 }
 
-/** A department. Agents stack downward, lead first, so the card grows taller instead of wider. */
-function OrgTeamBox({ team, live, sharedIds, onOpen }: { team: StudioTeam; live: Live; sharedIds: Set<string>; onOpen: () => void }) {
+/** Working or blocked activity, with when it started. Idle has no second line, and the epoch since is skipped. */
+function statusLine(state?: Presence): string {
+  const s = state?.state;
+  if ((s !== "working" && s !== "blocked") || !state) return "";
+  const year = state.since ? new Date(state.since).getFullYear() : 0;
+  const ago = year >= 2000 ? when(state.since) : "";
+  return ago ? `${state.activity} · ${ago}` : state.activity;
+}
+
+/** The harness toy (team-test) is not a department. One line under the grid opens those profiles. */
+function HarnessLine({ teams, onOpenAgent }: { teams: StudioTeam[]; onOpenAgent: (id: string) => void }) {
+  const members = teams.filter((t) => t.id === "team-test").flatMap((t) => t.members);
+  if (members.length === 0) return null;
+  return (
+    <p className="mx-auto mt-4 max-w-3xl text-xs text-muted-foreground">
+      Not on the chart:{" "}
+      {members.map((m, i) => {
+        const { agent } = profileById(m.agentId);
+        return (
+          <span key={m.agentId}>
+            {i > 0 && ", "}
+            <button type="button" onClick={() => onOpenAgent(agent.id)} className="underline decoration-foreground/25 underline-offset-2 hover:text-foreground">{agent.name}</button>
+          </span>
+        );
+      })}
+    </p>
+  );
+}
+
+/** A department. The name opens the team; each person opens their profile. Agents stack, lead first. */
+function OrgTeamBox({ team, live, sharedIds, onOpen, onOpenAgent }: {
+  team: StudioTeam; live: Live; sharedIds: Set<string>; onOpen: () => void; onOpenAgent: (id: string) => void;
+}) {
   const members = [...team.members].sort((a, b) => Number(b.lead === true) - Number(a.lead === true));
   const active = team.members.some((m) => live.get(m.agentId)?.state === "working");
+  const last = lastLoopAt(team.id);
   return (
-    <button
-      type="button"
-      onClick={onOpen}
-      className={cn(panel, "flex h-full w-full min-w-0 flex-col items-stretch px-3 py-3 text-left outline-none transition-colors hover:border-foreground/20 hover:bg-background/80 focus-visible:ring-2 focus-visible:ring-ring", !active && "border-dashed")}
-    >
-      <div className="mb-2 flex items-center gap-2 text-sm font-medium">
+    <div className={cn(panel, "flex h-full w-full min-w-0 flex-col items-stretch px-3 py-3 text-left", !active && "border-dashed")}>
+      <button type="button" onClick={onOpen} className="mb-0.5 flex items-center gap-2 rounded-md text-left text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring">
         {team.name}
         <StatusPill team={{ ...team, status: active ? "active" : "idle" }} />
-      </div>
-      <ul className="flex flex-col gap-2">
+      </button>
+      <p className="mb-2 text-xs text-muted-foreground">{last ? `last loop ${last}` : "no loops yet"}</p>
+      <ul className="flex flex-col gap-1">
         {members.map((m) => {
           const { agent } = profileById(m.agentId);
           return (
             <li key={m.agentId}>
-              <OrgNode
-                agent={agent}
-                size="size-10"
-                row
-                lead={m.lead}
-                subtitle={m.lead ? `${agent.role} · Lead` : agent.role}
-                state={live.get(m.agentId)}
-                shared={sharedIds.has(m.agentId)}
-              />
+              <button type="button" onClick={() => onOpenAgent(agent.id)} className="w-full rounded-lg px-1 py-1 text-left outline-none hover:bg-foreground/5 focus-visible:ring-2 focus-visible:ring-ring">
+                <OrgNode
+                  agent={agent}
+                  size="size-10"
+                  row
+                  lead={m.lead}
+                  subtitle={statusLine(live.get(m.agentId))}
+                  state={live.get(m.agentId)}
+                  shared={sharedIds.has(m.agentId)}
+                />
+              </button>
             </li>
           );
         })}
       </ul>
-    </button>
+    </div>
   );
 }
 
@@ -430,14 +487,14 @@ function OrgNode({ agent, size, subtitle, emphasis, lead, compact, row, shared, 
     </div>
   );
   const title = state && s !== "idle" ? `${agent.name}: ${state.activity}` : agent.name;
+  const statusClass = s === "blocked" ? "text-destructive" : s === "working" ? "text-ok" : "text-muted-foreground";
   if (row) {
     return (
       <div className="flex min-w-0 items-center gap-2.5 text-left" title={title}>
         {portrait}
         <div className="min-w-0">
-          <div className="truncate text-sm font-medium">{agent.name}</div>
-          <div className="truncate text-xs text-muted-foreground">{subtitle}</div>
-          {s === "working" && state && <div className="truncate text-[11px] text-ok">{state.activity}</div>}
+          <div className="truncate text-sm font-medium">{agent.name}{lead ? " · Lead" : ""}</div>
+          {subtitle && <div className={cn("truncate text-xs", statusClass)}>{subtitle}</div>}
           {shared && <span className={cn(pill, "mt-1")}>shared</span>}
         </div>
       </div>
@@ -447,8 +504,7 @@ function OrgNode({ agent, size, subtitle, emphasis, lead, compact, row, shared, 
     <div className={cn("flex flex-col items-center text-center", compact ? "w-[88px]" : "w-36")} title={title}>
       {portrait}
       <span className={cn("mt-1.5 font-medium", compact ? "text-xs" : "text-sm")}>{agent.name}</span>
-      <span className={cn("max-w-full truncate text-muted-foreground", compact ? "text-[10px]" : "text-xs")}>{subtitle}</span>
-      {s === "working" && !compact && state && <span className="mt-0.5 max-w-full truncate text-[11px] text-ok">{state.activity}</span>}
+      {subtitle && <span className={cn("max-w-full truncate", statusClass, compact ? "text-[10px]" : "text-xs")}>{subtitle}</span>}
       {shared && <span className={cn(pill, "mt-1")}>shared</span>}
     </div>
   );

@@ -22,8 +22,8 @@ export const router = createBrowserRouter([
           { index: true, element: <HomePage /> },
           { path: "weave", element: <WeavePage /> },
           { path: "agents", element: <AgentsPage /> },
-          // Teams and Organizations now live in the Agent Studio page.
-          { path: "teams", loader: () => redirect("/agents?view=teams") },
+          // Old Teams links land on the studio chart.
+          { path: "teams", loader: () => redirect("/agents") },
           { path: "work", element: <WorkPage />, loader: workLoader, shouldRevalidate: workShouldRevalidate },
           { path: "schedule", element: <SchedulePageRoute />, loader: scheduleLoader, shouldRevalidate: scheduleShouldRevalidate },
           { path: "work/:taskId", element: <TaskPage />, loader: taskLoader },

@@ -3,6 +3,7 @@ import { Link } from "react-router";
 import { Check, FileText, Folder, LifeBuoy, MessageCircleQuestion, Play, ShieldCheck, Sparkles, Telescope } from "lucide-react";
 import { Portrait } from "@/components/chat/assistant-hero";
 import { profileById } from "@/lib/registry";
+import type { ChatAgent } from "@fabric/contracts";
 import type { Health, ItemKind } from "@/lib/mock/weave";
 import { cn } from "@/lib/utils";
 
@@ -16,7 +17,27 @@ export const KIND: Record<ItemKind, { label: string; icon: ComponentType<{ class
   result: { label: "Result", icon: FileText, tone: "text-ok" },
 };
 
-export const agentOf = (id: string) => profileById(id).agent;
+/** A retired or not-yet-loaded id (a renamed spec, an old run) still has to render. No portrait: the initial circle. */
+function unknownAgent(id: string): ChatAgent {
+  return {
+    id,
+    name: id,
+    role: "Unknown agent",
+    tone: "bg-foreground/10 text-foreground",
+    summary: "",
+    personality: "",
+    traits: [],
+    model: "",
+    contextTokens: 0,
+    memory: [],
+    tools: [],
+    greeting: "",
+    placeholder: "",
+  };
+}
+
+/** Registry hit, or a stand-in so one missing id cannot take down Weave or Work. */
+export const agentOf = (id: string): ChatAgent => profileById(id)?.agent ?? unknownAgent(id);
 
 /** A persona portrait, or Ty's initial for "you". The kind glyph sits on the bottom-right edge. */
 /** `live`: the portrait follows presence (see Portrait); leave it off where a face repeats down a list. */

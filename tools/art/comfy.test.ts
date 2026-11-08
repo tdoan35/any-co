@@ -68,6 +68,7 @@ async function startLab(handle: Handler): Promise<Lab> {
 function happyLab(opts: { pending?: number; history?: (n: number) => unknown } = {}): Handler {
   return (r, res, n) => {
     if (r.method === "GET" && r.url === "/system_stats") return send(res, 200, { system: { comfyui_version: "fake" }, devices: [] });
+    if (r.method === "GET" && r.url === "/queue") return send(res, 200, { queue_running: [], queue_pending: [] });
     if (r.method === "POST" && r.url === "/upload/image") {
       const name = /filename="([^"]+)"/.exec(r.body.toString("latin1"))?.[1] ?? "x.png";
       return send(res, 200, { name, subfolder: "", type: "input" });
@@ -111,7 +112,7 @@ test("T31 comfy: probe → upload → /prompt with the frozen recipe → poll /h
     assert.equal(r.metadata.seed, 7);
 
     const order = lab.requests.map((q) => `${q.method} ${q.url.split("?")[0]}`);
-    assert.deepEqual(order, ["GET /system_stats", "POST /upload/image", "POST /prompt", "GET /history/p-1", "GET /history/p-1", "GET /history/p-1", "GET /view"]);
+    assert.deepEqual(order, ["GET /queue", "POST /upload/image", "POST /prompt", "GET /history/p-1", "GET /history/p-1", "GET /history/p-1", "GET /view"]);
     const upload = lab.requests[1].body.toString("latin1");
     assert.match(upload, /name="image"; filename="anyco-ref-[0-9a-f]{16}\.png"/);
     assert.ok(lab.requests[1].body.includes(Buffer.from(encodePng(makeImage(16, 16)))), "the reference PNG bytes are uploaded");
@@ -217,7 +218,7 @@ test("T31 comfy: lab unreachable or unready is ProviderUnavailable (typed for fa
   const busy = await startLab((r, res) => send(res, 503, { error: "starting" }));
   try {
     const e = await generate({ provider: "comfy", prompt: "x", width: 16, height: 16, out: "a.png" }, { workspace: ws, baseUrl: { comfy: busy.base }, env: {}, ...FAST }).catch((x: unknown) => x);
-    assert.ok(e instanceof ProviderUnavailable && /system_stats answered 503/.test(e.message), String(e));
+    assert.ok(e instanceof ProviderUnavailable && /queue answered 503/.test(e.message), String(e));
     assert.equal(busy.requests.length, 1, "nothing is submitted to an unready lab");
   } finally {
     await busy.close();
@@ -286,7 +287,10 @@ test("T31 art_generate comfy: written and post-processed to the manifest grid an
       for (let i = 0; i < img.data.length; i += 4)
         if (img.data[i + 3] !== 0) colors.add("#" + [0, 1, 2].map((j) => img.data[i + j].toString(16).padStart(2, "0")).join(""));
       assert.ok([...colors].every((c) => PALETTE.includes(c)), [...colors].join(","));
-      assert.ok(!existsSync(statePaths(ctx.runsDir).credits), "no credits line for the local lab");
+      // T41b: one local line per comfy call (unit local, the lane), never read as a balance
+      const raw = readFileSync(statePaths(ctx.runsDir).credits, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+      assert.equal(raw.length, 1);
+      assert.deepEqual([raw[0].provider, raw[0].unit, raw[0].lane, raw[0].images], ["comfy", "local", lab.base, 1]);
       assert.equal(readGallery(statePaths(ctx.runsDir).gallery).generations["assets/merchant.png"], 1);
     });
   } finally {
@@ -307,7 +311,7 @@ test("T31 art_generate comfy: lab down → falls back to pixellab once, comfy is
       const out = JSON.parse(r.content);
       assert.equal(out.provider, "pixellab");
       assert.equal(out.fallback_from, "comfy");
-      assert.match(out.notes.join(" "), /comfy is unavailable .*system_stats/);
+      assert.match(out.notes.join(" "), /comfy is unavailable \(every lane is down: .*\/queue/);
       assert.match(out.notes.join(" "), /comfy is unavailable; tried pixellab once instead/);
       assert.equal(r.cost_micro_usd, 20_000);
       assert.equal(readProviders(statePaths(ctx.runsDir).providers).comfy, undefined, "a transient outage is never persisted");
@@ -318,7 +322,7 @@ test("T31 art_generate comfy: lab down → falls back to pixellab once, comfy is
         process.env.COMFY_BASE_URL = lab.base;
         const r2 = await IMPLS.art_generate.art_generate.run({ provider: "comfy", prompt: "x", width: 16, height: 16, out: "game/assets/b.png" }, ctx);
         assert.equal(JSON.parse(r2.content).provider, "comfy", r2.content);
-        assert.equal(lab.requests[0].url, "/system_stats");
+        assert.equal(lab.requests[0].url, "/queue");
       } finally {
         await lab.close();
       }
@@ -343,4 +347,84 @@ test("T31 art_generate comfy: a refused 8188 URL is an error, not a fallback; th
   }
   assert.doesNotThrow(() => IMPLS.art_generate.art_generate.input.parse({ provider: "comfy", prompt: "x", width: 16, height: 16, out: "a.png", negative: "blurry" }));
   assert.match(IMPLS.art_generate.art_generate.description, /comfy/);
+});
+
+// ---- T41: max_candidates → batch_size (capped by COMFY_MAX_BATCH, default 2) ----
+
+import { COMFY_DEFAULT_MAX_BATCH, comfyBatch, comfyMaxBatch } from "./generate.ts";
+
+/** A lab that renders as many images as the submitted latent batch. */
+function batchLab(): Handler {
+  let batch = 1;
+  return (r, res, n) => {
+    if (r.method === "POST" && r.url === "/prompt") {
+      batch = r.json.prompt["4"].inputs.batch_size;
+      return send(res, 200, { prompt_id: "p-1", number: 1, node_errors: {} });
+    }
+    if (r.method === "GET" && r.url === "/history/p-1")
+      return send(res, 200, { "p-1": { status: { completed: true }, outputs: { "7": { images: Array.from({ length: batch }, (_, i) => ({ filename: `anyco_${i}.png`, subfolder: "anyco", type: "output" })) } } } });
+    return happyLab()(r, res, n);
+  };
+}
+
+test("T41 comfy: max_candidates 1/2/4 becomes the latent batch (cap applied), every image is written as a candidate, one seed", async () => {
+  const lab = await startLab(batchLab());
+  try {
+    for (const [max, env, want] of [[1, {}, 1], [2, {}, 2], [4, {}, 4], [4, { COMFY_MAX_BATCH: "2" }, 2], [8, {}, 4], [undefined, {}, 4]] as const) {
+      const ws = mkdtempSync(path.join(tmpdir(), "comfy-batch-"));
+      const before = lab.requests.length;
+      const r = await generate(
+        { provider: "comfy", prompt: "x", width: 16, height: 16, out: "game/assets/a.png", seed: 9, ...(max !== undefined ? { maxCandidates: max } : {}) },
+        { workspace: ws, baseUrl: { comfy: lab.base }, env: { ...env }, ...FAST },
+      );
+      const g = lab.requests.slice(before).find((q) => q.url === "/prompt")!.json.prompt;
+      assert.equal(g["4"].inputs.batch_size, want, `max ${max} env ${JSON.stringify(env)}`);
+      assert.equal(g["5"].inputs.seed, 9, "one seed for the batch");
+      assert.equal(r.images.length, want);
+      assert.deepEqual(r.images, want === 1 ? ["game/assets/a.png"] : Array.from({ length: want }, (_, i) => `game/assets/a-${i}.png`));
+      for (const img of r.images) assert.ok(existsSync(path.join(ws, img)));
+      assert.equal(r.metadata.batch, want);
+      assert.equal(lab.requests.slice(before).filter((q) => q.url.startsWith("/view?")).length, want);
+    }
+  } finally {
+    await lab.close();
+  }
+});
+
+test("T41 comfy: the batch cap is enforced and validated before any request", async () => {
+  assert.equal(COMFY_DEFAULT_MAX_BATCH, 4, "T41b: both lanes measured OK at batch 4");
+  assert.equal(comfyMaxBatch({}), 4);
+  assert.equal(comfyMaxBatch({ COMFY_MAX_BATCH: "4" }), 4);
+  for (const bad of ["0", "9", "two", "1.5"]) assert.throws(() => comfyMaxBatch({ COMFY_MAX_BATCH: bad }), /COMFY_MAX_BATCH must be an integer from 1 to 8/);
+  assert.equal(comfyBatch(8, 2), 2);
+  assert.equal(comfyBatch(0, 4), 1);
+  let calls = 0;
+  const fetchImpl = (async () => { calls++; throw new Error("must not be called"); }) as unknown as typeof fetch;
+  const err = await generate({ provider: "comfy", prompt: "x", width: 16, height: 16, out: "a.png", maxCandidates: 4 }, { workspace: mkdtempSync(path.join(tmpdir(), "comfy-")), fetchImpl, baseUrl: { comfy: "http://127.0.0.1:9" }, env: { COMFY_MAX_BATCH: "16" }, ...FAST }).catch((e: unknown) => e);
+  assert.match(String(err), /COMFY_MAX_BATCH must be an integer/);
+  assert.equal(calls, 0);
+});
+
+test("T41 art_generate comfy: the default call (max_candidates 4) returns a batch of 4 candidates, all post-processed with the out's manifest entry", async () => {
+  const lab = await startLab(batchLab());
+  const { ws, ctx } = capabilityWorkspace();
+  try {
+    await withEnv({ COMFY_BASE_URL: lab.base }, async () => {
+      const r = await IMPLS.art_generate.art_generate.run(
+        { provider: "comfy", prompt: "a merchant", width: 16, height: 16, out: "game/assets/merchant.png", reference: "game/assets/hero-anchor.png", postprocess: { snap: true, lock: true, outline: "#1a1c2c" } },
+        ctx,
+      );
+      assert.equal(r.is_error, undefined, r.content);
+      const out = JSON.parse(r.content);
+      assert.deepEqual(out.images, [0, 1, 2, 3].map((i) => `game/assets/merchant-${i}.png`));
+      assert.equal(out.metadata.batch, 4);
+      assert.equal(out.generation, "1 of 3", "one call, one generation, however many candidates");
+      for (const f of out.images) {
+        const img = decodePng(new Uint8Array(readFileSync(path.join(ws, f))));
+        assert.deepEqual([img.width, img.height], [16, 16], `${f} snapped to the merchant entry`);
+      }
+    });
+  } finally {
+    await lab.close();
+  }
 });
