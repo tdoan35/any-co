@@ -2017,6 +2017,7 @@ export function mediaLaunch(clone: string, launch: string[]): string[] {
     if (!existsSync(exe)) throw new Error(`launch[0] ${bin} does not exist in the clone (run build.sh first)`);
   }
   const out: string[] = [];
+  let scene: string | null = null;
   for (let k = 0; k < rest.length; k++) {
     const a = rest[k];
     if (LAUNCH_FLAGS.has(a)) out.push(a);
@@ -2025,7 +2026,14 @@ export function mediaLaunch(clone: string, launch: string[]): string[] {
       const target = rest[++k] ?? "";
       if (resolveInWorkspace(clone, target) !== clone) throw new Error(`--path must be the game clone itself (".") , got "${target}"`);
       out.push(a, clone);
-    } else throw new Error(`launch argument "${a}" is not allowed (allowed: ${[...LAUNCH_FLAGS, ...LAUNCH_VALUE_FLAGS].join(", ")}${isEngine ? ", --path ." : ""})`);
+    } else if (isEngine && !scene && /^res:\/\/[A-Za-z0-9_./-]+\.t?scn$/.test(a)) {
+      // T43: the scene that implements the qa/ protocol, when it isn't the main scene (e.g. res://qa/driver.tscn).
+      // It must be a scene file inside the clone; the engine still runs only this project.
+      const file = resolveInWorkspace(clone, a.slice("res://".length));
+      if (!existsSync(file)) throw new Error(`launch scene ${a} does not exist in the game clone`);
+      scene = a;
+      out.push(a);
+    } else throw new Error(`launch argument "${a}" is not allowed (allowed: ${[...LAUNCH_FLAGS, ...LAUNCH_VALUE_FLAGS].join(", ")}${isEngine ? ", --path ., one res://<scene>.tscn in the clone" : ""})`);
   }
   return [exe, ...out];
 }
