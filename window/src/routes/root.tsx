@@ -2,12 +2,18 @@ import { Outlet, useRevalidator } from "react-router";
 import { useEffect, useRef } from "react";
 import { AppShell } from "@/components/shell/app-shell";
 import { api, httpMode, streamUrl } from "@/lib/api";
-import { setRegistry, setWorkData } from "@/lib/registry";
+import { useStudio } from "@/lib/studio";
+import { resetRegistryStore, setRegistry, setWorkData } from "@/lib/registry";
 import { setWeaveSnapshot } from "@/lib/weave-store";
 import { AppEventSchema } from "@fabric/contracts";
 import { publishSessionDesktop, publishSessionMessage, publishStreamConnected } from "@/lib/chat/events";
 
 export async function rootLoader() {
+  // Studio switch: drop the previous studio's module stores before the awaits. Loaders
+  // block the first paint of the fresh router, so the new studio starts empty instead
+  // of flashing the old one's agents, threads and pulse.
+  resetRegistryStore();
+  setWeaveSnapshot({ items: [], pulse: [], presence: [], calendar: [] });
   const [registry, tasks, runs, weave] = await Promise.all([
     api.getRegistry(), api.listTasks(), api.listRuns(), api.getWeave(),
   ]);
@@ -20,6 +26,7 @@ export async function rootLoader() {
 export function RootLayout() {
   const revalidator = useRevalidator();
   const revalidateRef = useRef(revalidator.revalidate);
+  const { studio } = useStudio();
   useEffect(() => { revalidateRef.current = revalidator.revalidate; }, [revalidator.revalidate]);
   useEffect(() => {
     if (!httpMode) return;
@@ -58,6 +65,6 @@ export function RootLayout() {
     };
     connect();
     return () => { stopped = true; source?.close(); if (retry) clearTimeout(retry); };
-  }, []);
+  }, [studio?.id]); // studio switch: close the old studio's stream, connect to the new base
   return <AppShell><Outlet /></AppShell>;
 }

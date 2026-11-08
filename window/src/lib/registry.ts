@@ -19,8 +19,9 @@ export function setWorkData(nextTasks: Task[], nextRuns: Run[]) { tasks = nextTa
 export function setProjects(projects: Project[]) { current = { ...current, projects }; notify(); }
 
 /**
- * Test seam (storybook harness only): restore the module-level store to its empty initial
- * state, so each story run starts from the same world. Production code never calls this.
+ * Restore the module-level store to its empty initial state: storybook harnesses do it so
+ * every story run starts from the same world, and the studio switcher does it (via
+ * rootLoader) so one studio's data never paints under another's label.
  */
 export function resetRegistryStore() {
   current = empty;
