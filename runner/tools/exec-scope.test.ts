@@ -122,6 +122,9 @@ test("T40 profile: writes under the harness are denied except the write roots; g
 test("T40 sandbox (macOS): a clone script launched through QA, media, or game_exec cannot write the harness tree or forge a ledger", { skip: !sandboxAvailable() && "sandbox-exec is macOS-only" }, async () => {
   const { ws, clone, cleanup } = harnessWorkspace();
   const marker = path.join(HARNESS_ROOT, "runs", `t40-probe-${process.pid}.marker`);
+  // A live checkout has a real runs/ledger.jsonl (the studio writes it), so compare content, not existence.
+  const ledgerPath = path.join(HARNESS_ROOT, "runs", "ledger.jsonl");
+  const ledgerBefore = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : null;
   // one clone script that attempts a single harness write; every launch path must have the sandbox deny it
   writeFileSync(path.join(clone, "probe.sh"), `#!/bin/sh\necho x > "${marker}" 2>/dev/null && echo HARNESS-WRITTEN || echo harness-write-denied\necho ok > inside.txt && echo clone-write-ok\nexit 0\n`);
   chmodSync(path.join(clone, "probe.sh"), 0o755);
@@ -137,7 +140,8 @@ test("T40 sandbox (macOS): a clone script launched through QA, media, or game_ex
     const qa = await IMPLS.qa_harness.qa_smoke.run({ cmd: ["./probe.sh"], seed: 1, ticks: 1, ack_timeout_ms: 1500, end_wait_ms: 1500 }, ctxFor(ws));
     assert.match(qa.content, /Operation not permitted|ready ack/, qa.content); // the script died denied; the QA run reports it
     assert.equal(existsSync(marker), false, "qa_smoke launch: no harness write");
-    assert.equal(existsSync(path.join(HARNESS_ROOT, "runs", "ledger.jsonl")), false, "no forged ledger at the harness root");
+    assert.equal(existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8").includes("t40-probe") : false, false, "no forged ledger line at the harness root");
+    if (ledgerBefore === null) assert.equal(existsSync(ledgerPath), false, "no ledger created at the harness root");
   } finally {
     rmSync(marker, { force: true });
     cleanup();
