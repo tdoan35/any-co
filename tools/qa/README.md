@@ -13,7 +13,9 @@ implements the contracts; knows nothing about the game itself.
 
 - `smoke` — clears stale `qa/` outputs, launches `--cmd` (argv array, never a shell string) in
   `--dir` with the contract flags (`--qa --seed --autoplay --policy? --exit-after-ticks`), waits
-  for the ready ack `{id:0,ready:true}` (controls.md), then drives `pause` → (`step N` +
+  for the ready ack `{id:0,ready:true}` (controls.md), then drives `pause` → anchor
+  `dump_state` → first `step (stepFrames - tick % stepFrames)` so every later boundary is a
+  multiple of the step grid regardless of when the pause landed (R8b F1) → (`step` +
   `dump_state`)* → `resume`, and waits bounded (`--end-wait-ms`, default ack×2+60s) for the
   natural end; on timeout `quit`, then SIGTERM→SIGKILL. A command that loses the race to a
   natural end (the game exits right after `run_end` + `run_summary`) is a clean end, not an
@@ -39,7 +41,8 @@ their required `data` keys · no `error` events / empty `errors[]` / not `crashe
 running, ticks strictly increase between dumps and the tick-less state repeats ≤
 `--identical-dumps` times · `peaks.entities` ≤ limit · no negative resource ·
 `run_summary.counts` equals per-name event tallies; non-standard keys in `counts` are flagged
-(`telemetry_counts_standard_only`) · `elapsed_s` ≈ `run_ticks / --tick-rate` · final tick ==
+(`telemetry_counts_standard_only`) · `elapsed_s` ≈ `run_ticks / --tick-rate` (per game — the
+contract fixes only the shape; the stub runs 60 Hz, caravan-cargo-cult's sim 4 Hz) · final tick ==
 `run_ticks` · determinism via `firstDifference`.
 
 ## Library

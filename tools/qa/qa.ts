@@ -108,6 +108,12 @@ function isRunOver(state: unknown): boolean {
   return !!run && typeof run === "object" && "over" in run && run.over === true;
 }
 
+function numField(state: unknown, key: string): number | undefined {
+  if (!state || typeof state !== "object" || !(key in state)) return undefined;
+  const v = (state as Record<string, unknown>)[key];
+  return typeof v === "number" ? v : undefined;
+}
+
 /** True when the game ended its run on its own: run_end event + run_summary on disk (it exits right after). */
 function endedNaturally(driver: Driver): boolean {
   return driver.readRunSummary() !== null && driver.events().some((e) => "event" in e && e.event === "run_end");
@@ -146,8 +152,17 @@ export async function driveRun(cli: Cli): Promise<RunResult> {
     };
 
     if (await send({ cmd: "pause" })) {
+      // Anchor the step grid to the tick count (R8b F1): --autoplay starts ticking at launch, so
+      // the pause lands at an arbitrary tick; a first partial step puts every later boundary on a
+      // multiple of stepFrames, making dumps and verdicts independent of wall-clock pause timing.
+      let firstFrames = 0;
+      if (await send({ cmd: "dump_state" })) {
+        const startTick = numField(driver.readState(), "tick") ?? 0;
+        firstFrames = cli.stepFrames - (startTick % cli.stepFrames);
+      }
       for (let stepped = 0; stepped < cli.ticks; stepped += cli.stepFrames) {
-        if (!(await send({ cmd: "step", frames: cli.stepFrames }))) break;
+        const frames = stepped === 0 ? firstFrames : cli.stepFrames;
+        if (!(await send({ cmd: "step", frames }))) break;
         if (!(await send({ cmd: "dump_state" }))) break;
         const s = driver.readState();
         if (s !== null) states.push(s);
@@ -157,8 +172,9 @@ export async function driveRun(cli: Cli): Promise<RunResult> {
     }
   } catch (e) {
     driver.kill();
-    await driver.done();
-    throw e instanceof HarnessError ? e : new HarnessError(e instanceof Error ? e.message : String(e));
+    const end = await driver.done();
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new HarnessError(end?.stderr ? `${msg}; game stderr: ${end.stderr.slice(-300)}` : msg);
   }
 
   const endWaitMs = cli.endWaitMs ?? cli.ackTimeoutMs * 2 + 60_000;

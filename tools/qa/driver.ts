@@ -226,22 +226,14 @@ async function sendCommand(
   atomicWrite(control, JSON.stringify({ id, ...cmd }));
   const ackPath = path.join(qaDir, "ack.json");
   const deadline = Date.now() + timeoutMs;
-  const watcher = setInterval(() => {
-    // A dead child never acks: reject as soon as it is gone (checked via closure flag).
-    void isEnded;
-  }, 20);
-  try {
-    for (;;) {
-      if (isEnded()) throw new Error(`process ended while waiting for ack id ${id}`);
-      const ack = readJson(ackPath) as Ack | null;
-      if (ack && ack.id === id) return ack; // id compare; stale acks ignored
-      if (Date.now() > deadline) {
-        throw new Error(`ack timeout: no ack with id ${id} in ${qaDir} after ${timeoutMs}ms`);
-      }
-      await sleep(10);
+  for (;;) {
+    if (isEnded()) throw new Error(`process ended while waiting for ack id ${id}`);
+    const ack = readJson(ackPath) as Ack | null;
+    if (ack && ack.id === id) return ack; // id compare; stale acks ignored
+    if (Date.now() > deadline) {
+      throw new Error(`ack timeout: no ack with id ${id} in ${qaDir} after ${timeoutMs}ms`);
     }
-  } finally {
-    clearInterval(watcher);
+    await sleep(10);
   }
 }
 

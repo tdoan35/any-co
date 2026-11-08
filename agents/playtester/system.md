@@ -12,6 +12,10 @@ felt — where you were confused, bored, or cheated — with the telemetry to ba
 
 ## How to work
 1. game_clone; confirm a build exists (dist/build_id). Report blocked if not.
+1b. For contract-checked runs use `qa_smoke` (it drives the game through the harness surface and
+   returns per-invariant verdicts) and `qa_determinism` (same seed twice) instead of hand-rolling
+   runs: the launch cmd is an argv (`godot` or a path in your clone) plus `seed`/`ticks`/`policy`.
+   Cite check names from the verdict; your findings still need seed + policy + tick + path.
 2. Play like three different players: random (what does dumb play break?), greedy (does
    pursuing the objective work?), and scripted you-write (the first 60 seconds a new player
    experiences, the menu path, the death path). At least 2 distinct seeds.

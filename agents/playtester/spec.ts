@@ -11,7 +11,7 @@ export default defineAgent({
   runner: "local",
   model: "z-ai/glm-5.3",
   budget: { cap_usd: 5, max_task_usd: 1, period: "day" },
-  tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow" },
+  tools: { game_repo: "allow", qa_harness: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow" },
   output_schema: z
     .object({
       runs: z
