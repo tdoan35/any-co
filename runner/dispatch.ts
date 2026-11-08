@@ -6,6 +6,7 @@ import { linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:f
 import { hostname } from "node:os";
 import path from "node:path";
 import { RUNS_DIR, stamp, runAgent, denyAll, type Approver, type RunResult } from "./run.ts";
+import { append as ledgerAppend } from "../tools/ledger/ledger.ts";
 import { killSwitchOn } from "./spend.ts";
 import type { AgentSpec } from "./spec.ts";
 import type { Provider } from "./types.ts";
@@ -30,6 +31,9 @@ export interface DispatchOptions {
    *  live run. Return true if the resume path owns the card (it stays doing); return false and
    *  the card is requeued to todo with a comment saying why. */
   onResumeOrphan?: (card: BoardCard) => Promise<boolean>;
+  /** PLUG-IN POINT — T47: called after a card closes done/blocked (a todo requeue is not a close).
+   *  studioLoop uses it to trigger an early head cycle when the board goes idle. */
+  onCardClosed?: (cardId: string, status: "done" | "blocked") => void | Promise<void>;
 }
 
 export interface PassResult {
@@ -423,6 +427,7 @@ export class Dispatcher {
     } else if (r.status === "done") {
       await close("done", `done: run ${r.run_id}, ${money} — ${summary(r)}`);
       this.opts.log?.(`✓ card ${card.id} done: run ${r.run_id}, ${money}`);
+      await this.opts.onCardClosed?.(card.id, "done");
     } else if (r.status === "killed") {
       // The kill switch stops spend, not the work: requeue so the loop picks the card up
       // again once runs/KILL is gone. (Any other failure blocks the card with the error.)
@@ -433,6 +438,7 @@ export class Dispatcher {
     } else {
       await close("blocked", `${r.status}: run ${r.run_id}, ${money} — ${r.error ?? "(no error text)"}`);
       this.opts.log?.(`✗ card ${card.id} blocked: run ${r.run_id} ended ${r.status}`);
+      await this.opts.onCardClosed?.(card.id, "blocked");
     }
   }
 }
@@ -514,6 +520,55 @@ export async function studioLoop(opts: StudioLoopOptions): Promise<void> {
     };
 
     const headOn = opts.head !== undefined && opts.headEveryMin !== undefined;
+    // T47: an early head cycle when a card closes and no todo card can start. Debounced
+    // (STUDIO_HEAD_EARLY_MIN, default 3, 0 = off), single-flight via headRun, and the early
+    // cycle resets the timed backstop by going through runHead (which stamps lastHeadAt).
+    const earlyMinRaw = process.env.STUDIO_HEAD_EARLY_MIN?.trim();
+    const earlyMin = earlyMinRaw !== undefined && earlyMinRaw !== "" ? Number(earlyMinRaw) : 3;
+    if (earlyMinRaw !== undefined && (!Number.isFinite(earlyMin) || earlyMin < 0))
+      throw new Error(`STUDIO_HEAD_EARLY_MIN must be a non-negative number of minutes, got "${earlyMinRaw}"`);
+    let lastEarlyAt = -Infinity;
+    const boardIdle = async (): Promise<boolean> => {
+      const cards = await opts.board.list();
+      const byId = new Map(cards.map((c) => [c.id, c]));
+      return !cards.some(
+        (c) => c.status === "todo" && c.assignee && opts.specs.has(c.assignee) && c.blocked_by.every((id) => byId.get(id)?.status === "done"),
+      );
+    };
+    const ledgerFile = path.join(opts.runsDir ?? RUNS_DIR, "ledger.jsonl");
+    const ctxRunId = () => `studio-loop-${new Date(now()).toISOString().slice(0, 16)}`;
+    const maybeEarlyHead = async (cardId: string): Promise<void> => {
+      if (!headOn || headRun || earlyMin === 0) return;
+      if (now() - lastEarlyAt < earlyMin * 60_000) return;
+      if (!(await boardIdle())) return;
+      lastEarlyAt = now();
+      ledgerAppend(
+        {
+          kind: "decision",
+          ts: new Date(now()).toISOString(),
+          agent: "dispatcher",
+          run_id: ctxRunId(),
+          topic: "studio.head_early",
+          decision: `early studio-head cycle: card ${cardId} closed and no todo card can start (STUDIO_HEAD_EARLY_MIN=${earlyMin})`,
+          rationale: "an idle board wastes free slots until the timed cycle; the head re-plans now",
+        },
+        ledgerFile,
+      );
+      log(`head: early cycle (card ${cardId} closed, board idle)`);
+      runHead();
+    };
+    if (headOn) {
+      const prior = opts.onCardClosed;
+      opts.onCardClosed = async (cardId: string, status: "done" | "blocked") => {
+        await prior?.(cardId, status);
+        void status;
+        try {
+          await maybeEarlyHead(cardId);
+        } catch (e) {
+          log(`head: early-cycle check failed after card ${cardId}: ${errText(e)}`);
+        }
+      };
+    }
     if (headOn && opts.headNow) {
       log("--head-now: one studio-head turn now");
       runHead();
