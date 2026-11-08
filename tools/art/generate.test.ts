@@ -264,7 +264,7 @@ test("pixellab cost falls back to the $0.02 estimate and is marked estimated", a
   );
 });
 
-test("pixellab failed jobs throw; frames are unsupported for pixellab in this interface", async () => {
+test("pixellab failed jobs throw; pixellab frames without a reference are refused before any request", async () => {
   const ws = tempWorkspace();
   await withServer(
     (req, _count, res) => {
@@ -282,7 +282,7 @@ test("pixellab failed jobs throw; frames are unsupported for pixellab in this in
   const ws2 = tempWorkspace();
   await assert.rejects(
     generate({ provider: "pixellab", prompt: "x", width: 64, height: 64, out: "a.png", frames: 8 }, { workspace: ws2, baseUrl: { pixellab: "http://127.0.0.1:1" }, env: ENV, ...FAST }),
-    /frames/,
+    /needs `reference`/,
   );
 });
 
@@ -925,4 +925,159 @@ test("T21-3: max_candidates keeps the first N images and discards the rest unwri
     assert.equal(two.images.length, 2);
     assert.equal(two.metadata.candidates_discarded, 4);
   });
+});
+
+// ---- T23: PixelLab animation (animate-with-text-v3) ----
+
+import { PIXELLAB_ANIMATION_ESTIMATE_USD, validatePixellabAnimation } from "./generate.ts";
+
+/** A w×h PNG filled with one colour; frame i of a fake animation gets red = 10·(i+1). */
+const solid = (w: number, h: number, r: number) => {
+  const img = makeImage(w, h);
+  for (let i = 0; i < w * h; i++) img.data.set([r, 20, 30, 255], i * 4);
+  return encodePng(img);
+};
+const b64png = (w: number, h: number, r: number) => Buffer.from(solid(w, h, r)).toString("base64");
+
+/** Fake animate-with-text-v3: 200 + job id, then the job completes with `images(baseUrl)`. */
+function animServer(images: (baseUrl: string) => unknown[], opts: { submitStatus?: number; usage?: unknown; never?: boolean } = {}) {
+  let base = "";
+  return {
+    setBase: (b: string) => (base = b),
+    handle: (req: CapturedRequest, _n: number, res: ServerResponse) => {
+      if (req.method === "POST" && req.url === "/v2/animate-with-text-v3") {
+        if (opts.submitStatus === 402) return json(res, 402, { detail: "Insufficient credits" });
+        return json(res, 200, { background_job_id: "anim-1", status: "processing", usage: opts.usage ?? null });
+      }
+      if (req.url === "/v2/background-jobs/anim-1") {
+        if (opts.never) return json(res, 200, { id: "anim-1", status: "processing", created_at: "t" });
+        return json(res, 200, { id: "anim-1", status: "completed", created_at: "t", usage: opts.usage ?? null, last_response: { images: images(base) } });
+      }
+      const m = req.url?.match(/^\/frames\/(\d+)\.png$/);
+      if (m) return raw(res, 200, solid(16, 16, 10 * (Number(m[1]) + 1)));
+      return json(res, 404, {});
+    },
+  };
+}
+function animWorkspace(w = 16, h = 16): string {
+  const ws = tempWorkspace();
+  mkdirSync(path.join(ws, "game", "assets"), { recursive: true });
+  writeFileSync(path.join(ws, "game", "assets", "hero.png"), solid(w, h, 200));
+  return ws;
+}
+const anim = (extra: Record<string, unknown> = {}) => ({ provider: "pixellab" as const, prompt: "walking", width: 16, height: 16, out: "game/assets/hero-walk.png", reference: "game/assets/hero.png", frames: 6, ...extra });
+const redsOf = (file: string, frameW: number) => {
+  const img = decodePng(new Uint8Array(readFileSync(file)));
+  return { img, reds: Array.from({ length: img.width / frameW }, (_, k) => img.data[(k * frameW) * 4]) };
+};
+
+test("T23: pixellab frames animate the reference via animate-with-text-v3 and write one horizontal strip", async () => {
+  const ws = animWorkspace();
+  const srv = animServer(() => [0, 1, 2, 3, 4, 5].map((i) => ({ type: "base64", base64: b64png(16, 16, 10 * (i + 1)), format: "png" })), { usage: { type: "generations", generations: 2 } });
+  await withServer(srv.handle, async (h) => {
+    srv.setBase(h.baseUrl);
+    const r = await generate(anim(), { workspace: ws, baseUrl: { pixellab: h.baseUrl }, env: ENV, ...FAST });
+    assert.deepEqual(r.images, ["game/assets/hero-walk.png"]);
+    const { img, reds } = redsOf(path.join(ws, "game/assets/hero-walk.png"), 16);
+    assert.deepEqual([img.width, img.height], [96, 16], "6 frames × 16 px, one row");
+    assert.deepEqual(reds, [10, 20, 30, 40, 50, 60], "frame order kept");
+    const sent = h.requests.find((q) => q.url === "/v2/animate-with-text-v3")!;
+    assert.equal(sent.headers.authorization, "Bearer pl-test-token");
+    assert.deepEqual(Object.keys(sent.body).sort(), ["action", "first_frame", "frame_count", "no_background"]);
+    assert.equal(sent.body.action, "walking");
+    assert.equal(sent.body.frame_count, 6);
+    assert.equal(sent.body.first_frame.type, "base64");
+    assert.deepEqual(new Uint8Array(Buffer.from(sent.body.first_frame.base64, "base64")), new Uint8Array(readFileSync(path.join(ws, "game/assets/hero.png"))));
+    assert.equal(r.cost_micro_usd, PIXELLAB_ANIMATION_ESTIMATE_USD * 1e6, "generations usage has no USD value: the animation estimate");
+    assert.equal(r.cost_source, "estimated");
+    assert.deepEqual(r.metadata.usage, { type: "generations", generations: 2 });
+    assert.equal(r.metadata.frames_per_strip, 6);
+  });
+});
+
+test("T23: frames as hosted URLs, an echoed input frame, and several candidates (capped)", async () => {
+  // URLs (strings and {url}) are downloaded in order
+  const ws = animWorkspace();
+  const urls = animServer((base) => [0, 1, 2, 3].map((i) => (i % 2 ? { url: `${base}/frames/${i}.png` } : `${base}/frames/${i}.png`)));
+  await withServer(urls.handle, async (h) => {
+    urls.setBase(h.baseUrl);
+    const r = await generate(anim({ frames: 4 }), { workspace: ws, baseUrl: { pixellab: h.baseUrl }, env: ENV, ...FAST });
+    assert.deepEqual(redsOf(path.join(ws, r.images[0]), 16).reds, [10, 20, 30, 40]);
+  });
+  // frame_count + 1 frames: index 0 is taken as the echoed input and dropped (undocumented for v3)
+  const echo = animServer(() => [200, 10, 20, 30, 40].map((red) => ({ type: "base64", base64: `data:image/png;base64,${b64png(16, 16, red)}` })));
+  await withServer(echo.handle, async (h) => {
+    const r = await generate(anim({ frames: 4 }), { workspace: ws, baseUrl: { pixellab: h.baseUrl }, env: ENV, ...FAST });
+    assert.deepEqual(redsOf(path.join(ws, r.images[0]), 16).reds, [10, 20, 30, 40]);
+    assert.match(String((r.metadata.notes as string[])[0]), /dropped index 0/);
+  });
+  // two animations' worth of frames → two candidate strips, capped by maxCandidates
+  const two = animServer(() => Array.from({ length: 8 }, (_, i) => ({ type: "base64", base64: b64png(16, 16, 10 * (i + 1)) })));
+  await withServer(two.handle, async (h) => {
+    const both = await generate(anim({ frames: 4, out: "game/assets/c.png" }), { workspace: ws, baseUrl: { pixellab: h.baseUrl }, env: ENV, ...FAST });
+    assert.deepEqual(both.images, ["game/assets/c-0.png", "game/assets/c-1.png"]);
+    assert.deepEqual(redsOf(path.join(ws, both.images[1]), 16).reds, [50, 60, 70, 80]);
+    const one = await generate(anim({ frames: 4, out: "game/assets/d.png", maxCandidates: 1 }), { workspace: ws, baseUrl: { pixellab: h.baseUrl }, env: ENV, ...FAST });
+    assert.deepEqual(one.images, ["game/assets/d.png"]);
+    assert.equal(one.metadata.candidates_discarded, 1);
+  });
+});
+
+test("T23: invalid animation requests fail before any request, naming the allowed values", async () => {
+  const ws = animWorkspace();
+  const big = animWorkspace(256, 256);
+  const tooBig = animWorkspace(300, 16);
+  await withServer(() => assert.fail("no request may be sent"), async ({ baseUrl }) => {
+    const go = (w: string, extra: Record<string, unknown>) => generate(anim(extra), { workspace: w, baseUrl: { pixellab: baseUrl }, env: ENV, ...FAST });
+    await assert.rejects(go(ws, { reference: undefined }), /needs `reference`/);
+    for (const frames of [3, 5, 2, 18, 15]) await assert.rejects(go(ws, { frames }), /even number from 4 to 16 \(4, 6, 8, 10, 12, 14, 16\)/, `frames ${frames}`);
+    await assert.rejects(go(big, { width: 256, height: 256, frames: 10 }), /over 524288; at this size use at most 8 frames/);
+    await assert.rejects(go(tooBig, { width: 300, height: 16 }), /at most 256 px/);
+    await assert.rejects(go(ws, { width: 32, height: 32 }), /pass width 16 and height 16/);
+  });
+  assert.doesNotThrow(() => validatePixellabAnimation(8, { width: 256, height: 256 }));
+});
+
+test("T23: an animation that times out is charged; a 402 is exhausted", async () => {
+  const ws = animWorkspace();
+  const slow = animServer(() => [], { never: true });
+  await withServer(slow.handle, async ({ baseUrl }) => {
+    const err = await generate(anim(), { workspace: ws, baseUrl: { pixellab: baseUrl }, env: ENV, pollIntervalMs: 1, timeoutMs: 400 }).catch((e: unknown) => e);
+    assert.ok(err instanceof ChargedFailure, String(err));
+    assert.equal((err as ChargedFailure).cost_micro_usd, PIXELLAB_ANIMATION_ESTIMATE_USD * 1e6);
+    // the deadline either trips between polls ("timed out") or aborts the poll in flight; both are charged
+    assert.match((err as Error).message, /timed out|aborted due to timeout/);
+  });
+  const broke = animServer(() => [], { submitStatus: 402 });
+  await withServer(broke.handle, async ({ baseUrl }) => {
+    const err = await generate(anim(), { workspace: ws, baseUrl: { pixellab: baseUrl }, env: ENV, ...FAST }).catch((e: unknown) => e);
+    assert.ok(err instanceof ProviderExhausted && !(err instanceof ChargedFailure), String(err));
+  });
+});
+
+test("T23: art_generate capability — animation needs justify, counts toward the regen cap, reports generations_used from usage", async () => {
+  const ws = animWorkspace();
+  const ctx = capabilityCtx(ws);
+  const srv = animServer(() => [0, 1, 2, 3].map((i) => ({ type: "base64", base64: b64png(16, 16, 10 * (i + 1)) })), { usage: { type: "generations", generations: 3 } });
+  const prev = { ...process.env };
+  process.env.PIXELLAB_API_KEY = "pl-t23";
+  try {
+    await withServer(srv.handle, async (h) => {
+      process.env.PIXELLAB_BASE_URL = h.baseUrl;
+      const call = (extra: Record<string, unknown> = {}) => IMPLS.art_generate.art_generate.run({ ...anim({ frames: 4 }), ...extra }, ctx);
+      assert.match((await call()).content, /justify/);
+      const ok = await call({ justify: "walk cycle for the hero" });
+      assert.equal(ok.is_error, undefined, ok.content);
+      const out = JSON.parse(ok.content);
+      assert.equal(out.generations_used, 3, "no balance endpoint here: the job's usage counts");
+      assert.equal(out.generation, "1 of 3");
+      assert.deepEqual(out.images, ["game/assets/hero-walk.png"]);
+      assert.equal(readGallery(statePaths(ctx.runsDir).gallery).generations["assets/hero-walk.png"], 1);
+    });
+  } finally {
+    for (const k of ["PIXELLAB_API_KEY", "PIXELLAB_BASE_URL"]) {
+      if (prev[k] === undefined) delete process.env[k];
+      else process.env[k] = prev[k];
+    }
+  }
 });

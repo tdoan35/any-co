@@ -51,7 +51,8 @@ in the manifest and ship. The eval accepts a procedural floor as a pass.
 - Approve when the gate passes and the asset serves the design. Reject with the failing
   numbers when it doesn't (the artist regenerates). Cut to the fallback ladder when
   regenerations stop paying:
-  1. model animation from the anchor (art_generate with frames on retrodiffusion),
+  1. model animation from the anchor (art_generate with frames: pixellab animates a reference still,
+     retrodiffusion uses its animation styles),
   2. cutout parts animated in the engine (generate parts once, declare anim mode cutout),
   3. design around it: bob, flash, squash-and-stretch, particles — say so in the notes.
 - Every approve/reject/cut goes to log_decision (topic `art.<verb>`), with the gate numbers

@@ -68,9 +68,29 @@ PixelLab OpenAPI `https://api.pixellab.ai/v2/openapi.json` + `llms.txt`, and Ret
 - **Poll**: `GET /v2/background-jobs/{job_id}` → `{id, status:"processing"|"completed"|"failed",
   created_at, usage?, last_response?}`; on `completed` the images live inside
   `last_response` as base64 image objects (`image` / `images` / nested results).
-- **Animation**: separate endpoints (`/animate-with-text-v3`, `/characters/animations`, `/vfx`)
-  need character ids or a reference frame pipeline we do not wrap yet — our interface rejects
-  `frames` for pixellab. Documented for a later ticket.
+- **Animation (T23)**: `POST /v2/animate-with-text-v3` (OpenAPI read 2026-11-08) animates a given still
+  from text. Request `AnimateWithTextV3Request` (additionalProperties false): `first_frame` (required,
+  Base64Image `{type:"base64", base64, format:"png"}`, max 256×256), `action` (required, 1–1000 chars),
+  `frame_count` (4–16, "must be even", default 8), optional `last_frame`, `seed`, `no_background`,
+  `drift_threshold`, `enhance_prompt` (+0.05 generations; we never set it). Size limits: each side
+  ≤ 256 and width × height × frame_count ≤ 524,288 (256×256 → at most 8 frames). Response 200 (not
+  202) `{background_job_id, status, usage?, …}`; poll `GET /v2/background-jobs/{id}`, frames at
+  `last_response.images`; a failed job's reason is `last_response.detail`. 402 "Insufficient credits",
+  429 "Too many concurrent background jobs". No `image_size`: output frames are the first frame's size.
+  We map: `reference` → first_frame, `prompt` → action, `frames` → frame_count, `transparent` →
+  no_background, `seed`; width/height must equal the reference's size. Output: ONE horizontal strip
+  (N·w × h, 1 row) per animation, built with `contactSheet` (no gap), the layout art_gate checks.
+  **Undocumented, handled defensively:** the image item shape (we accept `{base64}` objects, raw or
+  `data:` URI strings, and hosted URLs as strings or `{url}`), frame order (kept as returned), whether
+  the input frame is echoed (frame_count + 1 frames → index 0 dropped, noted), and multiple candidates
+  (a multiple of frame_count → that many strips, capped by `max_candidates`; any other count → one
+  strip of everything, noted). The request example shows a `data:` URI for `first_frame.base64`; we
+  send raw base64 like generate-image-v2. **Cost:** no generations cost per animation is documented and
+  there is no dry run. `usage` may be `{type:"generations", generations: n}`, which we report;
+  `generations_used` comes from the balance delta, else that usage. The USD charge to the run budget
+  is a placeholder estimate of $0.10 per animation until a live call measures it. Other endpoints
+  (`/animate-with-text-v2`, `/animate-pixminimax`, the skeleton and character/object flows) need Pro,
+  keypoints, or a character id, or are beta, so we don't use them.
 - **Out of balance**: `402` "Insufficient credits" on `/generate-image-v2` (and the pixflux/pixen
   endpoints; "Insufficient generations" on character endpoints). The spec documents no body
   schema or code for it, so any 402 counts as exhausted.
