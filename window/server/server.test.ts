@@ -181,3 +181,18 @@ test("server: /api/art-gallery lists repos and serves a gallery png (the route s
     rmSync(gamesRoot, { recursive: true, force: true });
   }
 });
+
+test("runs carry their game: the clone origin's basename, else a games/<slug> mention, else null", async () => {
+  const { gameOfRun } = await import("./runs.ts");
+  const dir = mkdtempSync(path.join(os.tmpdir(), "window-game-"));
+  try {
+    const clone = path.join(dir, "r1", "workspace", "game", ".git");
+    mkdirSync(clone, { recursive: true });
+    writeFileSync(path.join(clone, "config"), '[core]\n\tbare = false\n[remote "origin"]\n\turl = /mnt/data/anyco-studio2/games/soul-shift\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n');
+    assert.equal(gameOfRun(path.join(dir, "r1"), "anything"), "soul-shift");
+    assert.equal(gameOfRun(path.join(dir, "r2"), "work in games/caravan-cargo-cult on the HUD"), "caravan-cargo-cult");
+    assert.equal(gameOfRun(path.join(dir, "r3"), "Plan the next studio cycle."), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

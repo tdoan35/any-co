@@ -1,6 +1,8 @@
 // Maps the local runner's output (runs/<run_id>/transcript.jsonl) onto the Fabric contracts the UI reads:
 // one runner run = one Task with one Run (loop), and its transcript becomes RunEvents.
 // Pure functions only; reading the disk lives in index.ts. Never writes anything.
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import type { Run, RunEvent, RunSegment, RunStatus, Task } from "@fabric/contracts";
 
 /** The runner has no wall-clock budget; the UI wants one for its time meter. Display allowance only. */
@@ -186,4 +188,22 @@ export function titleOf(objective: string, fallback: string, max = 70): string {
   if (first.length <= max) return first;
   const cut = first.slice(0, max);
   return `${cut.slice(0, Math.max(cut.lastIndexOf(" "), 20))}…`;
+}
+
+
+/**
+ * The game a run worked on: the basename of its game clone's origin (read from .git/config as data, never by running git
+ * in an agent's clone), else a "games/<slug>" mention in the task. Studio-level runs (no clone, no mention) are null.
+ */
+export function gameOfRun(runDir: string, task: string): string | null {
+  try {
+    const cfg = readFileSync(path.join(runDir, "workspace", "game", ".git", "config"), "utf8");
+    const url = /\[remote "origin"\][^[]*?\burl\s*=\s*(.+)/.exec(cfg)?.[1].trim();
+    const base = url ? path.basename(url.replace(/\/+$/, "").replace(/\.git$/, "")) : "";
+    if (/^[a-z0-9][a-z0-9-]{0,63}$/.test(base)) return base;
+  } catch {
+    /* no clone: fall through */
+  }
+  const m = /\bgames\/([a-z0-9][a-z0-9-]{0,63})\b/.exec(task);
+  return m ? m[1] : null;
 }

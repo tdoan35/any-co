@@ -210,6 +210,8 @@ export interface Run {
   brief: Brief;
   /** Derived from step.started / step.finished events by the server (RUN-7). */
   segments: RunSegment[];
+  /** any-co: the game repo this run worked on (its clone's origin basename, e.g. "caravan-cargo-cult"); null for studio-level runs. */
+  game?: string | null;
   /** How a finished loop ended, in a sentence. */
   outcome?: string;
   reportId?: string;
