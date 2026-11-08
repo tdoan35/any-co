@@ -188,6 +188,9 @@ test("board tools: unknown assignee and unknown blockers are refused; a valid cr
   const bad = await TOOL_INDEX.board_create.impl.run({ title: "Nope", assignee: "does-not-exist" }, ctx);
   assert.equal(bad.is_error, true);
   assert.match(bad.content, /unknown assignee "does-not-exist"/);
+  const head = await TOOL_INDEX.board_create.impl.run({ title: "Self-assign", assignee: "studio-head" }, ctx);
+  assert.equal(head.is_error, true); // R20: the head runs by cadence only; a card for it would double the head turn
+  assert.match(head.content, /studio-head/);
   const { card } = await board.create({ title: "Real", assignee: "alpha-agent" });
   const blocked = await TOOL_INDEX.board_create.impl.run(
     { title: "Waits on nothing", assignee: "alpha-agent", blocked_by: ["crd_ghost"] },

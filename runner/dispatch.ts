@@ -270,27 +270,104 @@ export class Dispatcher {
   }
 }
 
-export async function studioLoop(
-  opts: DispatchOptions & { pollS?: number; once?: boolean },
-): Promise<void> {
+/** One Studio Head cycle turn: the spec, a fixed mechanical task, and a provider. */
+export interface HeadCycle {
+  spec: AgentSpec;
+  /** Mechanism only — the CLI's task names no game, genre, or design content. */
+  task: string;
+  provider: (spec: AgentSpec) => Provider;
+}
+
+export interface StudioLoopOptions extends DispatchOptions {
+  pollS?: number;
+  once?: boolean;
+  /** Run one head turn every N minutes (default off; the plan uses 120). */
+  headEveryMin?: number;
+  /** The head cycle config; without it no head turn ever runs. */
+  head?: HeadCycle;
+  /** Auto-start trigger: true when a Greenlight pick exists in the ledger (topic greenlight.pick). */
+  hasGreenlightPick?: () => boolean;
+  /** Run one head turn at startup regardless of the board (operator restart, dry run). */
+  headNow?: boolean;
+  /** Test seams: a fake clock and an instant sleep make the cadence testable without waiting. */
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+  /** Test seam: checked after each sleep; the loop exits (cleanly, waiting for runs) when true. */
+  shouldStop?: () => boolean;
+}
+
+/** The studio loop: requeue orphans, then pass/sleep until killed or (with once) after one pass.
+ *  With a head cycle configured, one Studio Head turn runs per cadence tick (single-flight) and
+ *  once at startup when the board is empty but a Greenlight pick exists — so the studio starts
+ *  work after the pick without a human. */
+export async function studioLoop(opts: StudioLoopOptions): Promise<void> {
   const d = new Dispatcher(opts);
   const log = opts.log ?? (() => {});
+  const now = opts.now ?? Date.now;
+  const sleep =
+    opts.sleep ??
+    ((ms: number) => {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setTimeout(resolve, ms);
+      return promise;
+    });
   const lock = acquireStudioLock(opts.runsDir ?? RUNS_DIR); // one dispatcher per runs dir (R2)
   try {
     const requeued = await d.requeueOrphans();
     if (requeued) log(`startup: requeued ${requeued} orphaned card(s)`);
+
+    // Studio Head cycle — one turn in flight at a time; spend caps apply inside runAgent.
+    let headRun: Promise<void> | null = null;
+    let lastHeadAt = now();
+    const runsDir = opts.runsDir ?? RUNS_DIR;
+    const runHead = () => {
+      if (killSwitchOn(runsDir)) return log("kill switch on: no studio-head turn");
+      const h = opts.head!;
+      lastHeadAt = now();
+      headRun = (async () => {
+        log("▶ studio-head cycle turn");
+        try {
+          const r = await runAgent(h.spec, {
+            task: h.task,
+            provider: h.provider(h.spec),
+            naive: opts.naive ?? null,
+            approver: opts.approver ?? denyAll,
+            runsDir: opts.runsDir ?? RUNS_DIR,
+            board: opts.board,
+            log: (l) => log(`  ${l}`),
+          });
+          log(`studio-head turn ${r.status} in ${r.turns} turns ($${(r.spent_micro_usd / 1e6).toFixed(4)}) → ${r.run_id}`);
+        } catch (e) {
+          log(`studio-head turn failed: ${errText(e)}`);
+        } finally {
+          headRun = null;
+        }
+      })();
+    };
+
+    const headOn = opts.head !== undefined && opts.headEveryMin !== undefined;
+    if (headOn && opts.headNow) {
+      log("--head-now: one studio-head turn now");
+      runHead();
+    } else if (headOn && !(await opts.board.list()).length && opts.hasGreenlightPick?.()) {
+      log("board is empty and a Greenlight pick exists: one studio-head turn now");
+      runHead();
+    }
+
     for (;;) {
       const res = await d.pass();
       if (res.killed) {
         log("kill switch on: not dispatching; waiting for in-flight runs, then exiting");
         break;
       }
+      if (headOn && !headRun && now() - lastHeadAt >= opts.headEveryMin! * 60_000) runHead();
       if (opts.once) break;
-      const { promise: tick, resolve: wake } = Promise.withResolvers<void>();
-      setTimeout(wake, Math.max(1, opts.pollS ?? 10) * 1000);
-      await tick;
+      if (!res.started && !res.skipped.length) log("board idle");
+      await sleep(Math.max(1, opts.pollS ?? 10) * 1000);
+      if (opts.shouldStop?.()) break;
     }
     await d.wait(); // both --once and a kill let started runs finish and close their cards
+    if (headRun) await headRun;
     log("dispatcher exit");
   } finally {
     lock.release();

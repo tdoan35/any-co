@@ -3,14 +3,17 @@
 // terminal (`npm run approvals`), because chat with the Studio Head is the window's only write path.
 // Requests whose run finished or is orphaned are hidden (the window never writes the expiry itself;
 // `approvals list`/`approve`/`deny` and resume do, ledgered as who "run ended").
+// Board cards are read-only here too: a doing card shows its assignee at work (presence), a blocked
+// card is studio news (pulse) and marks its holder blocked when no run already shows them busy.
 import type { EventEntry, Presence, WeaveSnapshot } from "@fabric/contracts";
 import type { MappedRun } from "./runs.ts";
 import { PROJECT } from "./registry.ts";
 import { APPROVALS_FILE, pendingLive } from "../../tools/approvals/approvals.ts";
+import type { BoardCard } from "../../runner/board/types.ts";
 
 const PULSE_LIMIT = 60;
 
-export function buildWeave(runs: MappedRun[], agentIds: string[], approvalsFile = APPROVALS_FILE, runsDir?: string): WeaveSnapshot {
+export function buildWeave(runs: MappedRun[], agentIds: string[], approvalsFile = APPROVALS_FILE, runsDir?: string, boardCards: BoardCard[] = []): WeaveSnapshot {
   const presence = new Map<string, Presence>();
   for (const id of agentIds) presence.set(id, { agentId: id, state: "idle", activity: "Idle", since: new Date(0).toISOString() });
 
@@ -29,6 +32,26 @@ export function buildWeave(runs: MappedRun[], agentIds: string[], approvalsFile 
         state: "working",
         activity: `${run.segments.at(-1)?.label ?? "Starting"}${lastCall ? ` · ${String(lastCall.payload.tool)}` : ""}`,
         since: new Date(lastTs).toISOString(),
+      });
+    }
+  }
+  for (const card of boardCards) {
+    if (card.status !== "doing" && card.status !== "blocked") continue;
+    if (card.assignee && presence.get(card.assignee)?.state === "idle") {
+      presence.set(card.assignee, {
+        agentId: card.assignee,
+        state: card.status === "doing" ? "working" : "blocked",
+        activity: `${card.status === "doing" ? "Board" : "Blocked"} · ${card.title}`,
+        since: card.updated_at,
+      });
+    }
+    if (card.status === "blocked") {
+      pulse.push({
+        id: `board:${card.id}`,
+        kind: "event",
+        at: card.updated_at,
+        actorId: card.assignee ?? "studio-head",
+        text: `Blocked: ${card.title}${card.note ? ` — ${card.note.slice(0, 120)}` : ""}`,
       });
     }
   }

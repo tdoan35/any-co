@@ -12,6 +12,8 @@ import type { AgentSpec } from "../../runner/spec.ts";
 import { naiveClient, providerFor, type NaiveClient } from "../../runner/providers.ts";
 import type { Provider } from "../../runner/types.ts";
 import { ChatEngine, ChatError } from "./chat.ts";
+import { boardFromEnv } from "../../runner/board/index.ts";
+import type { Board } from "../../runner/board/index.ts";
 import { buildRegistry, PROJECT } from "./registry.ts";
 import { galleryRoute } from "./gallery.ts";
 import { mapRun, parseTranscript, type MappedRun } from "./runs.ts";
@@ -26,6 +28,8 @@ export interface ServerOptions {
   ledgerFile?: string; eventStart?: string; now?: () => Date;
   /** Approvals queue read by weave items; defaults to approvals.jsonl inside runsDir (STUDIO_APPROVALS_FILE wins). */
   approvalsFile?: string;
+  /** The studio board shared by chat turns and the weave view; defaults to boardFromEnv (STUDIO_BOARD*). */
+  board?: Board;
 }
 
 const EXTRA_ORIGINS = (process.env.WINDOW_ALLOWED_ORIGINS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -84,12 +88,13 @@ export async function startServer(opts: ServerOptions = {}) {
   const emit = (e: AppEvent) => { for (const c of clients) c.write(`event: app\ndata: ${JSON.stringify(e)}\n\n`); };
 
   let naive: NaiveClient | null = null;
-  try { if (process.env.NAIVE_API_KEY) naive = naiveClient(); } catch (e) { console.warn(`[window] Naïve client unavailable: ${(e as Error).message}`); }
+  const board = opts.board ?? boardFromEnv(naive, runsDir);
   const engine = new ChatEngine({
     chatDir: path.join(runsDir, "chat"),
     runsDir,
     specs: () => specs,
     naive,
+    board,
     providerFor: opts.providerFor ?? ((spec) => {
       if (!naive && spec.provider.kind === "naive") throw new Error("NAIVE_API_KEY is not set (add it to .env and restart the adapter)");
       return providerFor(spec, naive);
@@ -100,7 +105,8 @@ export async function startServer(opts: ServerOptions = {}) {
     onChange: (sessionId, messageId) => emit({ type: "session.message", sessionId, messageId }),
   });
 
-  const route = (p: string): { status: number; body: unknown } => {
+  const route = async (p: string): Promise<{ status: number; body: unknown; png?: Buffer }> => {
+
     const seg = p.split("/").filter(Boolean).map(decodeURIComponent);
     if (seg[0] !== "api") return { status: 404, body: { error: "not found" } };
     const [, a, b, c] = seg;
@@ -110,7 +116,7 @@ export async function startServer(opts: ServerOptions = {}) {
     if (a === "art-gallery") return galleryRoute(seg.slice(1), gamesRoot);
     if (a === "registry" && !b) return ok(buildRegistry(specs, new Set(runs().filter((r) => r.run.status === "running").map((r) => r.agent)), engine.list()));
     if (a === "interventions" && !b) return ok(engine.interventions());
-    if (a === "weave" && !b) return ok(buildWeave(runs(), specs.map((s) => s.name), approvalsFile, runsDir));
+    if (a === "weave" && !b) return ok(buildWeave(runs(), specs.map((s) => s.name), approvalsFile, runsDir, await board.list()));
     if (a === "projects" && !b) return ok([PROJECT]);
     if (a === "tasks") {
       const tasks = runs().map((r) => r.task);
@@ -176,7 +182,7 @@ export async function startServer(opts: ServerOptions = {}) {
         req.on("close", () => { unsubscribe(); clearInterval(ping); });
         return;
       }
-      const r = route(url.pathname);
+      const r = await route(url.pathname);
       if ("png" in r && r.png) {
         res.writeHead(r.status, { "content-type": "image/png", "cache-control": "no-cache" }).end(r.png);
         return;

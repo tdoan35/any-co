@@ -908,6 +908,9 @@ const boardTools: Record<string, ToolImpl> = {
     async run(i, ctx) {
       if (!ctx.board) return { content: "no board configured for this run (STUDIO_BOARD / dispatcher)", is_error: true };
       const names = agentNames(ctx);
+      if (i.assignee === "studio-head") {
+        return { content: "studio-head runs on its own cadence and from the window chat; it cannot be assigned a board card", is_error: true };
+      }
       if (!names.has(i.assignee)) {
         return { content: `unknown assignee "${i.assignee}"; known agents: ${[...names].sort().join(", ")}`, is_error: true };
       }

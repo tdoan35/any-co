@@ -19,6 +19,7 @@ import { projectThread, type Session, type SessionDelta, type SessionEvent, type
 import { denyAll, runAgent } from "../../runner/run.ts";
 import type { AgentSpec } from "../../runner/spec.ts";
 import type { Block, Message, Provider } from "../../runner/types.ts";
+import type { Board } from "../../runner/board/index.ts";
 import type { NaiveClient } from "../../runner/providers.ts";
 import { append as ledgerAppend, LEDGER_FILE, read as ledgerRead, type InterventionEntry } from "../../tools/ledger/ledger.ts";
 
@@ -42,6 +43,8 @@ export interface ChatOptions {
   providerFor: (spec: AgentSpec) => Provider;
   naive: NaiveClient | null;
   ledgerFile?: string;
+  /** The studio board, so chat turns can use board_* tools on the same board as the loop. */
+  board?: Board | null;
   eventStart?: string;
   now?: () => Date;
   /** Called after any session event is appended (the server turns this into an SSE `session.message`). */
@@ -170,7 +173,8 @@ export class ChatEngine {
         provider,
         naive: this.opts.naive,
         runsDir: this.opts.runsDir,
-        approver: denyAll, // the Studio Head's tools are read-only; nothing here may ask a human mid-turn
+        approver: denyAll, // the Studio Head's chat tools are read-only; nothing here may ask a human mid-turn
+        board: this.opts.board ?? undefined,
         onEvent: (type, data) => {
           if (type === "reply") {
             callNo++;

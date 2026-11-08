@@ -6,7 +6,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-export const LEDGER_FILE = process.env.STUDIO_LEDGER_FILE ?? path.join(ROOT, "runs", "ledger.jsonl");
+// Follows STUDIO_RUNS_DIR like runAgent does, so a moved runs dir never splits the ledger (R20).
+export const LEDGER_FILE = process.env.STUDIO_LEDGER_FILE ?? path.join(process.env.STUDIO_RUNS_DIR ? path.resolve(process.env.STUDIO_RUNS_DIR) : path.join(ROOT, "runs"), "ledger.jsonl");
 
 export interface DecisionEntry {
   kind: "decision";
