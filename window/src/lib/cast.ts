@@ -39,10 +39,6 @@ export const CAST: Readonly<Record<string, SpriteAvatar>> = {
   "studio-historian": still("yuki"),
 };
 
-/** Empty-chat greeting pose, shown instead of the idle loop before a thread starts. */
-const GREETING: Readonly<Record<string, string>> = { "studio-head": "/dana/waving.png" };
-export const greetingStill = (agentId: string): string | undefined => GREETING[agentId];
-
 const dress = (profiles: StudioProfile[]) => profiles.map((p) => {
   const avatar = p.agent.avatar ?? CAST[p.agent.id];
   return avatar === p.agent.avatar ? p : { ...p, agent: { ...p.agent, avatar } };

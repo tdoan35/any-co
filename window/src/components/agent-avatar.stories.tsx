@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, waitFor, within } from "storybook/test";
 import { AgentAvatar, InitialAvatar } from "./agent-avatar";
 import { dana, jonah } from "@/lib/mock/assistant";
-import { CAST, greetingStill } from "@/lib/cast";
+import { CAST } from "@/lib/cast";
 
 const meta = {
   title: "Components/AgentAvatar",
@@ -126,7 +126,7 @@ export const WorkingStill: Story = {
   },
 };
 
-/** The studio cast (lib/cast.ts): every mapped agent's portrait resolves; Dana's greeting pose too. */
+/** The studio cast (lib/cast.ts): every mapped agent's portrait resolves. */
 export const StudioCast: Story = {
   name: "Studio cast",
   render: () => (
@@ -137,15 +137,11 @@ export const StudioCast: Story = {
           <span className="text-[11px] text-muted-foreground">{id}</span>
         </div>
       ))}
-      <div className="flex flex-col items-center gap-1.5">
-        <AgentAvatar avatar={{ still: greetingStill("studio-head")! }} name="studio-head greeting" className="size-16" />
-        <span className="text-[11px] text-muted-foreground">greeting</span>
-      </div>
     </div>
   ),
   play: async ({ canvasElement }) => {
     const stills = [...canvasElement.querySelectorAll<HTMLImageElement>('[role="img"] > img:first-child')];
-    expect(stills).toHaveLength(Object.keys(CAST).length + 1);
+    expect(stills).toHaveLength(Object.keys(CAST).length);
     await waitFor(() => { for (const img of stills) expect(img.naturalWidth).toBeGreaterThan(0); });
   },
 };

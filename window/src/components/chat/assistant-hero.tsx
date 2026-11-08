@@ -9,7 +9,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Group, panel } from "@/components/studio/studio-ui";
 import { forgetMemory, myProfiles } from "@/lib/registry";
 import { useWorking } from "@/lib/presence";
-import { greetingStill } from "@/lib/cast";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import type { ChatAgent } from "@/lib/mock/assistant";
 import { cn } from "@/lib/utils";
@@ -25,16 +24,9 @@ export const policyStyle = {
  * `live` follows Weave presence (working while the agent has a run in flight); `working` forces it on.
  * Opt-in, so lists that repeat a face (Pulse rows, run timelines) stay still.
  */
-export function Portrait({ agent, working, live, greeting, className }: {
-  agent: ChatAgent; working?: boolean; live?: boolean;
-  /** Empty-chat hero: the agent's greeting pose (lib/cast.ts) while idle, if it has one. */
-  greeting?: boolean;
-  className?: string;
-}) {
+export function Portrait({ agent, working, live, className }: { agent: ChatAgent; working?: boolean; live?: boolean; className?: string }) {
   const present = useWorking(agent.id);
   const busy = !!working || (!!live && present);
-  const greet = greeting && !busy ? greetingStill(agent.id) : undefined;
-  if (greet) return <AgentAvatar avatar={{ still: greet }} name={agent.name} className={className} />;
   return agent.avatar
     ? <AgentAvatar avatar={agent.avatar} name={agent.name} working={busy} className={className} />
     : <InitialAvatar initial={agent.name[0]} name={agent.name} tone={agent.tone} working={busy} className={cn("text-4xl", className)} />;
@@ -114,7 +106,6 @@ export function AgentHero({ agents, index, onIndexChange, onProfileToggle, switc
             <Portrait
               agent={agent}
               live
-              greeting={!incognito}
               className={cn("relative size-28 cursor-pointer transition-[transform,filter] duration-300 group-hover:scale-105 group-hover:animate-[avatar-glow_1.8s_ease-in-out_infinite] group-focus-visible:animate-[avatar-glow_1.8s_ease-in-out_infinite] group-focus-visible:border-foreground/60", ring, incognito && veil)}
             />
           </motion.div>

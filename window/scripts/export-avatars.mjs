@@ -24,7 +24,6 @@ const ASSETS = [
   ["dana/happy-idle-still.webp", { w: 384, h: 384 }, { copy: "apps/web/public/dana/happy-idle-still.webp" }],
   ["dana/happy-idle-strip.webp", STRIP, { copy: "apps/web/public/dana/happy-idle-strip.webp" }],
   ["dana/working-strip.webp", STRIP, { copy: "apps/web/public/dana/working-strip.webp" }],
-  ["dana/waving.png", { w: 384, h: 384 }, { resize: "assets/dana/dana_waving.png" }],
 ];
 
 const sizeOf = (file) => {
