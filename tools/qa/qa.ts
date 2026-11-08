@@ -1,9 +1,10 @@
-// QA CLI: npm run qa -- <smoke|check|determinism> ... (see tools/qa/README.md).
+// QA CLI: npm run qa -- <smoke|check|determinism|export-check> ... (see tools/qa/README.md).
 // Exit codes: 0 pass, 1 invariant failure (incl. an unclean process end), 2 harness/usage error.
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { launch, resetIds, waitReady, type Driver, type RunEnd } from "./driver.ts";
 import { firstDifference, runInvariants, type Check, type InvariantOptions, type RunFiles } from "./invariants.ts";
+import { exportCheck, type ExportCheckOptions } from "./export.ts";
 
 export interface Cli {
   sub: "smoke" | "check" | "determinism";
@@ -40,6 +41,7 @@ function usage(): never {
       "                [--max-entities N] [--identical-dumps N] [--tick-rate N] [--ack-timeout-ms N] [--ready-timeout-ms N] [--end-wait-ms N]",
       "       qa check --dir <qa dir> [--max-entities N] [--identical-dumps N] [--tick-rate N]",
       "       qa determinism --cmd '<json argv>' --dir <game dir> --seed N --ticks N [same options as smoke]",
+      "       qa export-check --dir <game dir> [--dist <dist dir, default <dir>/dist>] [--frames N] [--timeout-ms N] [--run true|false]",
     ].join("\n"),
   );
   process.exit(2);
@@ -310,7 +312,30 @@ function summarizeEnd(end: RunEnd, forced?: "quit" | "kill"): QaResult["end"] {
   return { ...rest, stderrTail: stderr.slice(-2000), ...(forced ? { forced } : {}) };
 }
 
+/** `export-check`: the release gate on the exported packs (tools/qa/export.ts). */
+export function parseExportArgv(argv: string[]): ExportCheckOptions {
+  const o: ExportCheckOptions = { gameDir: "." };
+  for (let i = 1; i < argv.length; i += 2) {
+    const [k, v] = [argv[i], argv[i + 1]];
+    if (v === undefined) usage();
+    switch (k) {
+      case "--dir": o.gameDir = v; break;
+      case "--dist": o.distDir = v; break;
+      case "--frames": o.frames = num(v); break;
+      case "--timeout-ms": o.timeoutMs = num(v); break;
+      case "--run": if (v !== "true" && v !== "false") usage(); o.run = v === "true"; break;
+      default: usage();
+    }
+  }
+  return { ...o, gameDir: path.resolve(o.gameDir), ...(o.distDir ? { distDir: path.resolve(o.distDir) } : {}) };
+}
+
 async function main(): Promise<void> {
+  if (process.argv[2] === "export-check") {
+    const result = await exportCheck(parseExportArgv(process.argv.slice(2)));
+    console.log(JSON.stringify(result, null, 2));
+    process.exit(result.exitCode);
+  }
   const cli = parseArgv(process.argv.slice(2));
   const result = cli.sub === "smoke" ? await smoke(cli) : cli.sub === "determinism" ? await determinism(cli) : check(cli);
   console.log(JSON.stringify(result, null, 2));

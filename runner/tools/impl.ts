@@ -1516,13 +1516,26 @@ export function validateLaunchArgv(argv: unknown, clone: string): string[] {
   return argv;
 }
 
-type QaMode = "smoke" | "check" | "determinism";
+type QaMode = "smoke" | "check" | "determinism" | "export-check";
 
 async function runQa(mode: QaMode, input: Record<string, unknown>, ctx: ToolContext): Promise<{ content: string; is_error?: boolean }> {
   try {
     const clone = path.join(ctx.workspace, "game");
     if (!existsSync(path.join(clone, "project.godot")) && mode !== "check") {
       throw new Error(`no game clone at ${path.relative(ctx.workspace, clone)}; call game_clone first`);
+    }
+    if (mode === "export-check") {
+      const args = ["--dir", clone, "--dist", resolveInWorkspace(clone, typeof input["dist_dir"] === "string" ? input["dist_dir"] : "dist")];
+      if (input["frames"] !== undefined) args.push("--frames", String(input["frames"]));
+      args.push("--timeout-ms", String(input["timeout_ms"] ?? 180_000));
+      if (input["run"] === false) args.push("--run", "false");
+      const tsxLoader = fileURLToPath(import.meta.resolve("tsx"));
+      const proc = await execText(process.execPath, ["--import", `file://${tsxLoader}`, path.join(ROOT, "tools", "qa", "qa.ts"), "export-check", ...args], 15 * 60_000);
+      try {
+        return { content: clip(JSON.stringify(JSON.parse(proc.out)), MAX_RESULT_CHARS) };
+      } catch {
+        throw new Error(`qa export-check produced no JSON (exit ${proc.code}): ${proc.err.slice(-400)}`);
+      }
     }
     const cli: Record<string, unknown> = {};
     const numArg = (k: string, v: unknown): number => {
@@ -1620,7 +1633,25 @@ const qaDeterminism: ToolImpl = {
   },
 };
 
-const qaHarnessTools = { qa_smoke: qaSmoke, qa_check: qaCheck, qa_determinism: qaDeterminism };
+const qaExportCheck: ToolImpl = {
+  description:
+    "Release gate on the EXPORTED build (run build.sh build-web first): for dist/web/index.pck (and dist/windows/*.pck), checks every project.godot autoload is in the pack's file table, " +
+    "then runs the pack natively (godot --main-pack, movie mode, opens a window briefly) and fails a blank last frame (< 5% non-background on the whole frame or the centre, or < 8 colours), " +
+    "a non-zero exit, no frames, or engine load errors. Mandatory before a release: a project-dir pass alone is not a release pass. Verdict JSON {ok, exitCode, checks[], packs[]}.",
+  input: z
+    .object({
+      dist_dir: z.string().optional().describe("dist dir inside the clone (default dist)"),
+      frames: z.number().int().min(10).max(600).optional().describe("frames to render before the still (default 90 at 30 fps)"),
+      timeout_ms: z.number().int().positive().max(10 * 60_000).optional().describe("per-pack engine timeout (default 180000)"),
+      run: z.boolean().optional().describe("false = pack-table check only (no engine run)"),
+    })
+    .strict(),
+  async run(input, ctx) {
+    return runQa("export-check", input, ctx);
+  },
+};
+
+const qaHarnessTools = { qa_smoke: qaSmoke, qa_check: qaCheck, qa_determinism: qaDeterminism, qa_export_check: qaExportCheck };
 
 // ---------- media_capture (tools/media): stills, footage, and deterministic edits for marketing ----------
 // Built against docs/contracts only. Inputs are workspace-relative (the game clone is <workspace>/game);

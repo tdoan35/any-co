@@ -10,6 +10,7 @@ implements the contracts; knows nothing about the game itself.
              [--ack-timeout-ms N] [--ready-timeout-ms N] [--end-wait-ms N]
     qa check --dir <qa dir> [--max-entities N] [--identical-dumps N] [--tick-rate N]
     qa determinism --cmd '<json argv>' --dir <game dir> --seed N --ticks N [as smoke]
+    qa export-check --dir <game dir> [--dist <dir>/dist] [--frames 90] [--timeout-ms N] [--run true|false]
 
 - `smoke` — clears stale `qa/` outputs, launches `--cmd` (argv array, never a shell string) in
   `--dir` with the contract flags (`--qa --seed --autoplay --policy? --exit-after-ticks`), waits
@@ -24,6 +25,19 @@ implements the contracts; knows nothing about the game itself.
   already in `--dir`. Only the final dump survives a run, so softlock data comes from `smoke`.
 - `determinism` — two full runs (each with cleared `qa/`), same seed/policy; both must end
   cleanly and the final state dumps must be identical (first differing path reported).
+- `export-check` (`export.ts`, the release gate on what ships, T26). It checks
+  `dist/web/index.pck` and any `dist/windows/*.pck`. (1) Pack table: parse the .pck directory
+  (format 1–4, refused if encrypted) and require every `project.godot` `[autoload]` script as `.gd`,
+  `.gdc` or `.remap`. A `strings` scan would be fooled, because exported scenes still reference
+  `res://src/…` when the scripts are left out. (2) Native run: `godot --main-pack <pck>` from an
+  empty temp dir (no project.godot, so only the pack loads) in movie mode (`--write-movie`,
+  `--fixed-fps 30`, `--quit-after N`; it opens a window, since plain `--headless` doesn't render
+  here). Fails on a non-zero exit, zero frames, or engine load-failure lines. The LAST frame must
+  have ≥ 5% non-background pixels (background = most common colour) on the whole frame AND the
+  central half, and ≥ 8 colours. Why movie mode, not the screenshot command: the qa/ capture
+  scenes are excluded from exports, so the shipped pack can't answer `screenshot`. The movie
+  writer is the engine's own capture of the frame a player sees. Every project-dir layer can
+  pass on a pack that ships without its scripts; this one can't.
 
 Exit codes: `0` pass, `1` invariant failure — including an unclean process end, which is its
 own `process_exit_clean` check —, `2` harness/usage error (ready/ack timeout on a live
