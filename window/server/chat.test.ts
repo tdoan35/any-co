@@ -138,7 +138,25 @@ test("chat: interventions are ledgered only from the event start, with the messa
     assert.deepEqual(summary.by_category, { steering: 1 });
     assert.equal(summary.steering, 1);
     assert.equal(summary.entries[0].reason, "pause the art loop");
+    assert.deepEqual((summary as unknown as { decisions: { count: number } }).decisions.count, 0, "chat messages are never agent decisions");
     f.stop();
+  } finally {
+    await srv.close();
+    w.cleanup();
+  }
+});
+
+test("interventions: agent decisions ride along, without operator-run or pre-event entries", async () => {
+  const w = world({ now: () => new Date("2026-11-08T00:00:00Z") });
+  const line = (agent: string, ts: string) => JSON.stringify({ kind: "decision", ts, agent, run_id: "r", topic: "t", decision: `${agent} call`, rationale: "why" }) + "\n";
+  mkdirSync(path.dirname(w.ledgerFile), { recursive: true });
+  appendFileSync(w.ledgerFile, line("studio-head", "2026-11-07T20:00:00Z") + line("studio-head", "2026-11-07T22:00:00Z") + line("tech-lead", "2026-11-07T23:00:00Z") + line("operator", "2026-11-07T23:30:00Z"));
+  const srv = await w.boot();
+  try {
+    const d = (await (await fetch(`http://127.0.0.1:${srv.port}/api/interventions`)).json() as { decisions: { count: number; by_agent: Record<string, number>; entries: Array<{ decision: string }> } }).decisions;
+    assert.equal(d.count, 2);
+    assert.deepEqual(d.by_agent, { "studio-head": 1, "tech-lead": 1 });
+    assert.deepEqual(d.entries.map((e) => e.decision), ["studio-head call", "tech-lead call"]);
   } finally {
     await srv.close();
     w.cleanup();

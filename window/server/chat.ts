@@ -21,7 +21,7 @@ import type { AgentSpec } from "../../runner/spec.ts";
 import type { Block, Message, Provider } from "../../runner/types.ts";
 import type { Board } from "../../runner/board/index.ts";
 import type { NaiveClient } from "../../runner/providers.ts";
-import { append as ledgerAppend, LEDGER_FILE, read as ledgerRead, type InterventionEntry } from "../../tools/ledger/ledger.ts";
+import { append as ledgerAppend, LEDGER_FILE, read as ledgerRead, type DecisionEntry, type InterventionEntry } from "../../tools/ledger/ledger.ts";
 
 /** 1:00 PM PT on Sat Nov 7 2026 (PST, UTC-8). Messages before this are practice, not interventions. */
 export const DEFAULT_EVENT_START = "2026-11-07T21:00:00.000Z";
@@ -270,6 +270,8 @@ export class ChatEngine {
     by_category: Record<string, number>; // missing category on old lines counts as "uncategorized"
     steering: number; // the headline autonomy number (T17)
     entries: InterventionEntry[];
+    /** The other side of the ledger: calls the agents made on their own (operator-run entries are human, left out). */
+    decisions: { count: number; by_agent: Record<string, number>; entries: Array<Pick<DecisionEntry, "ts" | "agent" | "topic" | "decision" | "rationale">> };
   } {
     const entries = ledgerRead(this.ledgerFile).filter((e): e is InterventionEntry => e.kind === "intervention" && Date.parse(e.ts) >= this.eventStart);
     const by_category = entries.reduce<Record<string, number>>((a, e) => {
@@ -282,6 +284,18 @@ export class ChatEngine {
       by_category,
       steering: by_category["steering"] ?? 0,
       entries: entries.slice(-50),
+      decisions: this.agentDecisions(),
+    };
+  }
+
+  private agentDecisions() {
+    const all = ledgerRead(this.ledgerFile).filter((e): e is DecisionEntry =>
+      e.kind === "decision" && e.agent !== "operator" && Date.parse(e.ts) >= this.eventStart);
+    const by_agent = all.reduce<Record<string, number>>((a, e) => ((a[e.agent] = (a[e.agent] ?? 0) + 1), a), {});
+    return {
+      count: all.length,
+      by_agent,
+      entries: all.slice(-50).map(({ ts, agent, topic, decision, rationale }) => ({ ts, agent, topic, decision, rationale })),
     };
   }
 }
