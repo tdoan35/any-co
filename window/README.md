@@ -11,6 +11,8 @@ From the repo root:
 ```bash
 npm run window:live            # adapter (port 8787) + browser UI on real runs/
 npm run window:live:electron   # adapter + desktop app
+npm run window:live:both       # both studios, switchable (browser)
+npm run window:live:both:electron  # both studios, switchable (desktop app)
 npm run window:server          # adapter alone
 npm run window:check           # validate real runs/ + agents/ against the UI contract
 npm run window:dev             # UI with mock data only (no adapter)
@@ -21,10 +23,25 @@ npm run window:build
 
 The adapter restarts are manual: agent specs are read once at startup.
 
+## Both studios in one window
+
+`window:live:both` starts one window that switches between two studios: studio 1 (this
+Mac's live adapter, default port 8787) and studio 2 (the ty-ubuntu mirror, served
+read-only). It reuses adapters that are already listening — the EA's mirror adapter on
+8790, or a live 8787 — and starts its own only where nothing answers, stopping just
+those on exit. The switcher sits under the brand in the sidebar; the selection is
+remembered per viewer. Studio 2 shows a read-only tag and its chat composer is disabled:
+mirror adapters refuse writes (403).
+
+Which studios appear comes from `VITE_STUDIOS`, a JSON array of
+`{"id","label","api","readOnly?"}` entries. Unset, the window behaves exactly as the
+single-studio launchers above (one API base from `VITE_API_URL`, no switcher). Labels
+come from the config; the window never hard-codes studio or game names.
+
 ## Pages
 
-- **Studio**: the org chart. Departments, teams and agents with a live presence dot. The Studio Head sits at the top.
-- **Weave**: the studio deck. Who is working, a pulse of run starts and ends, and the intervention count. The approval inbox is empty until the approval ledger exists.
+- **Agents**: the org chart. Departments, teams and agents with a live presence dot. The Studio Head sits at the top.
+- **Studio**: the studio deck. Who is working, a pulse of run starts and ends, and the intervention count. The approval inbox is empty until the approval ledger exists.
 - **Work**: runs as a board. Open one to watch its loop (model replies, tool calls, results, wrap-up notes).
 - **Chat** (home): talk to the Studio Head. It answers from the studio's runs, spend and roster through read-only tools. It cannot start or stop agents yet.
 

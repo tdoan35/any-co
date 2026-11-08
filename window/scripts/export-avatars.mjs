@@ -17,6 +17,9 @@ const FABRIC = process.env.FABRIC_DIR ?? path.join(os.homedir(), "Desktop/projec
 const checkOnly = process.argv.includes("--check");
 
 const PERSONAS = ["bea", "carlos", "diego", "elliot", "jonah", "lila", "maya", "megan", "nadine", "nikhil", "rosa", "sana", "yuki"];
+// Hands-on staff stills arrive committed from the studio art pipeline: presence/size check only,
+// there is no local source to rebuild them from.
+const PIPELINE_STILLS = ["audio", "env-ui-artist", "gameplay-engineer", "level-content-designer", "playtester", "sprite-artist"];
 const STRIP = { w: 73 * 192, h: 192 }; // 73 frames of 192x192, one row
 
 /** [published path, expected size, how to make it] */
@@ -28,6 +31,7 @@ PUT 23.>23:
   ...PIPELINE_STILLS.map((a) => [`agents/${a}-happy.webp`, { w: 384, h: 384 }, {}]),
 const ASSETS = [
   ...PERSONAS.map((p) => [`agents/${p}-happy.webp`, { w: 384, h: 384 }, { copy: `apps/web/public/agents/${p}-happy.webp` }]),
+  ...PIPELINE_STILLS.map((a) => [`agents/${a}-happy.webp`, { w: 384, h: 384 }, {}]),
   ["dana/happy-idle-still.webp", { w: 384, h: 384 }, { copy: "apps/web/public/dana/happy-idle-still.webp" }],
   ["dana/happy-idle-strip.webp", STRIP, { copy: "apps/web/public/dana/happy-idle-strip.webp" }],
   ["dana/working-strip.webp", STRIP, { copy: "apps/web/public/dana/working-strip.webp" }],

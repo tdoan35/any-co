@@ -10,7 +10,8 @@ import { TaskPage, taskLoader } from "@/routes/task";
 import { SchedulePageRoute, scheduleLoader, scheduleShouldRevalidate } from "@/routes/schedule";
 import { ReportPage, reportLoader } from "@/routes/report";
 
-export const router = createBrowserRouter([
+// A fresh router per studio switch: loaders re-run against the new API base.
+export const createRouter = () => createBrowserRouter([
   {
     element: <RootLayout />,
     loader: rootLoader,

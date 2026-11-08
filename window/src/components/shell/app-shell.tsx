@@ -24,12 +24,13 @@ import type { ChatAgent } from "@/lib/mock/assistant";
 import { SESSION_PARAM, sessionHref } from "@/lib/chat/session";
 import { httpMode } from "@/lib/api";
 import { TabsProvider } from "./tabs";
+import { StudioBrand } from "./studio-switcher";
 import { TitleBar } from "./title-bar";
 
 const nav = [
   { href: "/", label: "New thread", icon: SquarePen, match: (p: string) => p === "/" },
-  { href: "/weave", label: "Weave", icon: Spool, match: (p: string) => p.startsWith("/weave"), badge: true },
-  { href: "/agents", label: "Studio", icon: Hammer, match: (p: string) => p.startsWith("/agents") },
+  { href: "/weave", label: "Studio", icon: Spool, match: (p: string) => p.startsWith("/weave"), badge: true },
+  { href: "/agents", label: "Agents", icon: Hammer, match: (p: string) => p.startsWith("/agents") },
   { href: "/schedule", label: "Schedule", icon: CalendarClock, match: (p: string) => p.startsWith("/schedule") },
   { href: "/work", label: "Work", icon: Briefcase, match: (p: string) => p.startsWith("/work") || p.startsWith("/runs") || p.startsWith("/reports") },
 ];
@@ -74,7 +75,7 @@ function SidebarTop() {
         <span className={cn(layer, collapsed && toggleInHeader && "group-hover:opacity-0")}><BrandIcon /></span>
         {toggleInHeader && <span className={cn(layer, "opacity-0", collapsed && "group-hover:opacity-100")}><PanelLeftOpen className="size-4" /></span>}
       </button>
-      <span className="ml-2 whitespace-nowrap text-[15px] font-semibold tracking-tight transition-opacity duration-150 group-data-[collapsible=icon]:opacity-0">any-co</span>
+      <StudioBrand />
       {/* Anchored to the expanded width (not the animating edge) so they fade in place instead of sliding. */}
       {toggleInHeader && <>
         <Button

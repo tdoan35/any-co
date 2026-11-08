@@ -5,7 +5,7 @@ import {
 } from "@assistant-ui/react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
-import { Ghost, Maximize2, Monitor, PanelRightClose, PanelRightOpen, Plus } from "lucide-react";
+import { Ghost, Lock, Maximize2, Monitor, PanelRightClose, PanelRightOpen, Plus } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTabs } from "@/components/shell/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -19,7 +19,7 @@ import { fetchHistory, toRuntimePart, toRuntimeParts } from "@/lib/chat/session"
 import { onSessionMessage } from "@/lib/chat/events";
 import { useSessionDesktop } from "@/lib/chat/desktop";
 import type { SessionDesktop } from "@/lib/chat/events";
-import { apiBase } from "@/lib/api/http";
+import { currentApiBase, useStudio } from "@/lib/studio";
 import { isFixtureHotkey, toggleFixture } from "@/lib/chat/fixture";
 import { demoMode, liveChat } from "@/lib/chat/demo";
 import { suggestionPool, type Suggestion } from "@/lib/mock/suggestions";
@@ -260,7 +260,7 @@ function DesktopView({ desktop, label = "Desktop" }: { desktop: SessionDesktop; 
             </Button>
           </>
         ) : runId && screenshotArtifactId ? (
-          <img key={screenshotArtifactId} src={`${apiBase}/api/artifacts/${encodeURIComponent(screenshotArtifactId)}/screenshot`} alt={replay ? "Browser errand replay screenshot" : "Latest browser errand step"} className="absolute inset-0 size-full object-contain" />
+          <img key={screenshotArtifactId} src={`${currentApiBase()}/api/artifacts/${encodeURIComponent(screenshotArtifactId)}/screenshot`} alt={replay ? "Browser errand replay screenshot" : "Latest browser errand step"} className="absolute inset-0 size-full object-contain" />
         ) : (
           <div className="flex size-full flex-col items-center justify-center gap-1.5 px-6 text-center">
             <Monitor className="size-5 text-neutral-500" />
@@ -430,6 +430,10 @@ function ThreadBody({ sessionId, agentIndex, onAgentChange, onBackToDana, incogn
   incognito: boolean; setIncognito: Dispatch<SetStateAction<boolean>>;
 }) {
   useLiveResults(sessionId);
+  // Mirror studios refuse chat (the adapter 403s every POST): disable the composer up
+  // front instead of letting a send fail. Read-only comes from VITE_STUDIOS config.
+  const { studio: readOnlyStudio } = useStudio();
+  const chatDisabled = liveChat && readOnlyStudio?.readOnly === true;
   useStreamResync(sessionId);
   useFixtureHotkey();
   const started = useAuiState((st) => !st.thread.isEmpty);
@@ -522,7 +526,14 @@ function ThreadBody({ sessionId, agentIndex, onAgentChange, onBackToDana, incogn
           )}
 
           <motion.div layout transition={FLY} className={cn("@container/composer mx-auto w-full max-w-[720px] shrink-0 px-4 @lg/main:px-6", started && "pb-4 pt-2")}>
-            <Composer autoFocus placeholder={copy.placeholder} showContext={started} />
+            {chatDisabled ? (
+              <div role="note" className="flex items-center justify-center gap-2 rounded-2xl border bg-card px-4 py-5 text-sm text-muted-foreground shadow-sm">
+                <Lock className="size-4 shrink-0" aria-hidden />
+                {readOnlyStudio?.label} is a read-only mirror — chat is disabled.
+              </div>
+            ) : (
+              <Composer autoFocus placeholder={copy.placeholder} showContext={started} />
+            )}
             {!started && !liveChat && <ComposerBar />}
           </motion.div>
 

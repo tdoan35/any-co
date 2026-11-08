@@ -188,7 +188,7 @@ export function WeaveScreen() {
           </>}
         </>}
       >
-        <span className={headerTitle}>Weave</span>
+        <span className={headerTitle}>Studio</span>
       </PageHeader>
       <div className="min-h-0 flex-1 animate-in fade-in slide-in-from-bottom-3 p-4 pt-3 duration-500 ease-out fill-mode-backwards">
         <div ref={panelRef} style={{ gridTemplateColumns: template }} className={cn(

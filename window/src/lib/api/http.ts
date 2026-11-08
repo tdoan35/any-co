@@ -10,12 +10,12 @@ import {
 } from "@fabric/contracts";
 import { createSession, followSession, postMessage } from "@fabric/contracts";
 import { z } from "zod";
+import { currentApiBase } from "../studio";
 
-export const apiBase = (import.meta.env.VITE_API_URL || "http://localhost:8787").replace(/\/$/, "");
 const dev = import.meta.env.DEV;
 
 async function request<T>(path: string, schema: z.ZodType, init?: RequestInit, missing = false): Promise<T> {
-  const response = await fetch(`${apiBase}/api${path}`, init);
+  const response = await fetch(`${currentApiBase()}/api${path}`, init);
   if (missing && response.status === 404) return undefined as T;
   if (!response.ok) {
     const body = await response.json().catch(() => ({})) as { error?: string };
@@ -76,10 +76,10 @@ export const httpApi = {
     request<{ ok: boolean }>(`/memories/${encodeURIComponent(id)}/decision`, decisionSchema, json({ decision })),
   // Chat: the thread history read; turns go through the session stream (RUNTIME §13).
   getSessionMessages: (id: string) => request<SessionMessages>(`/sessions/${encodeURIComponent(id)}/messages`, SessionMessagesSchema),
-  // Sessions (RUNTIME §13): post, then follow the stream. The S12a client over the global fetch.
-  createSession: (req: CreateSessionRequest): Promise<CreateSessionResponse> => createSession(fetch, apiBase, req),
+  createSession: (req: CreateSessionRequest): Promise<CreateSessionResponse> => createSession(fetch, currentApiBase(), req),
   postMessage: (id: string, req: PostMessageInput): Promise<PostMessageResponse & { done?: Promise<void> }> =>
-    postMessage(fetch, apiBase, id, req).then((res) => ({ ...res, done: undefined })),
-  followSession: (id: string, opts: FollowSessionOptions): Promise<void> => followSession(fetch, apiBase, id, opts),
+    postMessage(fetch, currentApiBase(), id, req).then((res) => ({ ...res, done: undefined })),
+  followSession: (id: string, opts: FollowSessionOptions): Promise<void> => followSession(fetch, currentApiBase(), id, opts),
+  // Sessions (RUNTIME §13): post, then follow the stream. The S12a client over the global fetch.
   getSessionEvents: (id: string) => request<SessionEvent[]>(`/sessions/${encodeURIComponent(id)}/events`, z.array(SessionEventSchema)),
 };

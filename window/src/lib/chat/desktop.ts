@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { httpMode } from "@/lib/api";
-import { apiBase } from "@/lib/api/http";
+import { currentApiBase } from "@/lib/studio";
 import { onSessionDesktop, onStreamConnected, type SessionDesktop } from "./events";
 
 const idle: SessionDesktop = { url: null, runId: null, screenshotArtifactId: null, replay: false };
@@ -22,7 +22,7 @@ export function useSessionDesktop(sessionId: string): SessionDesktop {
       pending = controller;
       const expectedRevision = revision;
       const expectedRequest = ++requestId;
-      void fetch(`${apiBase}/api/sessions/${encodeURIComponent(sessionId)}`, { signal: controller.signal })
+      void fetch(`${currentApiBase()}/api/sessions/${encodeURIComponent(sessionId)}`, { signal: controller.signal })
         .then(async (response) => {
           if (!response.ok) throw new Error(`Session desktop unavailable (${response.status})`);
           return response.json() as Promise<{ desktop?: SessionDesktop }>;

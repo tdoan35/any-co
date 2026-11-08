@@ -2,12 +2,26 @@ import { Outlet, useRevalidator } from "react-router";
 import { useEffect, useRef } from "react";
 import { AppShell } from "@/components/shell/app-shell";
 import { api, httpMode, streamUrl } from "@/lib/api";
-import { setRegistry, setWorkData } from "@/lib/registry";
+import { currentApiBase, useStudio } from "@/lib/studio";
+import { resetRegistryStore, setRegistry, setWorkData } from "@/lib/registry";
 import { setWeaveSnapshot } from "@/lib/weave-store";
 import { AppEventSchema } from "@fabric/contracts";
 import { publishSessionDesktop, publishSessionMessage, publishStreamConnected } from "@/lib/chat/events";
 
+let loadedFor: string | undefined;
+
 export async function rootLoader() {
+  // Studio switch (fresh base): drop the previous studio's module stores before the
+  // awaits. The initial load of a fresh router blocks the first paint, so the new studio
+  // starts empty instead of flashing the old one's agents, threads and pulse. Same-studio
+  // revalidations keep serving the old data until the new fetch lands (the pre-switcher
+  // behaviour).
+  const base = currentApiBase();
+  if (loadedFor !== base) {
+    loadedFor = base;
+    resetRegistryStore();
+    setWeaveSnapshot({ items: [], pulse: [], presence: [], calendar: [] });
+  }
   const [registry, tasks, runs, weave] = await Promise.all([
     api.getRegistry(), api.listTasks(), api.listRuns(), api.getWeave(),
   ]);
@@ -20,6 +34,7 @@ export async function rootLoader() {
 export function RootLayout() {
   const revalidator = useRevalidator();
   const revalidateRef = useRef(revalidator.revalidate);
+  const { studio } = useStudio();
   useEffect(() => { revalidateRef.current = revalidator.revalidate; }, [revalidator.revalidate]);
   useEffect(() => {
     if (!httpMode) return;
@@ -58,6 +73,6 @@ export function RootLayout() {
     };
     connect();
     return () => { stopped = true; source?.close(); if (retry) clearTimeout(retry); };
-  }, []);
+  }, [studio?.id]); // studio switch: close the old studio's stream, connect to the new base
   return <AppShell><Outlet /></AppShell>;
 }

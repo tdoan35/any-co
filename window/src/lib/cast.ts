@@ -23,8 +23,10 @@ export const CAST: Readonly<Record<string, SpriteAvatar>> = {
   "player-voice-analyst": still("megan"),
   "feasibility-critic": still("carlos"),
   "greenlight-chair": still("elliot"),
-  // design: the design-doc owner keeps Diego. The Pitch Writer is a different agent and has no spare portrait yet.
+  // design
   "game-design-director": still("diego"),
+  "pitch-writer": still("pitch-writer"),
+  "ui-ux-designer": still("ui-ux-designer"),
   // art / eng / qa
   "art-director": still("maya"),
   "tech-lead": still("jonah"),
@@ -35,13 +37,16 @@ export const CAST: Readonly<Record<string, SpriteAvatar>> = {
   "env-ui-artist": still("env-ui-artist"),
   "sprite-artist": still("sprite-artist"),
   "gameplay-engineer-a": still("gameplay-engineer"),
+  "gameplay-engineer-b": still("gameplay-engineer-b"),
   "level-content-designer": still("level-content-designer"),
   "audio": still("audio"),
   // marketing / ops
   "marketing-lead": still("nikhil"),
+  "social-media-manager": still("social-media-manager"),
   "community-outreach": still("nadine"),
   "finance-compliance": still("rosa"),
   "studio-historian": still("yuki"),
+  "toy-catalog-reporter": still("toy-catalog-reporter"),
 };
 
 const dress = (profiles: StudioProfile[]) => profiles.map((p) => {
