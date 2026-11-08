@@ -143,3 +143,22 @@ test("T32: our own request timeout (TimeoutError / AbortError) is retried at mos
     assert.equal(v, "ok");
   });
 });
+
+test("a poisoned pooled connection (ERR_HTTP2_INVALID_SESSION, TLS BAD_RECORD_MAC) resets the fetch dispatcher before the retry", async () => {
+  const { withRetry, connectionResets } = await import("./providers.ts");
+  const before = connectionResets.count;
+  const poisoned = (code: string) => Object.assign(new TypeError("fetch failed"), { cause: { code } });
+  let calls = 0;
+  const out = await withRetry(async () => {
+    calls++;
+    if (calls === 1) throw poisoned("ERR_HTTP2_INVALID_SESSION");
+    if (calls === 2) throw poisoned("ERR_SSL_TLS_ALERT_BAD_RECORD_MAC");
+    return "ok";
+  }, "test", 5, 1);
+  assert.equal(out, "ok");
+  assert.equal(connectionResets.count - before, 2, "one reset per poisoned failure");
+  // a plain reset-by-peer is a network blip, not a poisoned pool: no dispatcher reset
+  let n = 0;
+  await withRetry(async () => { if (n++ === 0) throw poisoned("ECONNRESET"); return 1; }, "test", 5, 1);
+  assert.equal(connectionResets.count - before, 2);
+});
