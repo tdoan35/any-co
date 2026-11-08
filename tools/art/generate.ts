@@ -30,6 +30,9 @@ export interface GenerateInput {
   style?: string;
   /** Keep at most this many returned images (default 4, max 8); the rest are discarded unwritten. */
   maxCandidates?: number;
+  /** PixelLab: collect an already-submitted background job by id instead of submitting a new one
+   *  (after a timeout or poll failure). Same inputs as the original call; costs no new generation. */
+  resumeJobId?: string;
 }
 
 export interface GenerateOptions {
@@ -49,7 +52,7 @@ export interface GenerateResult {
   /** Workspace-relative paths of the PNGs written. */
   images: string[];
   cost_micro_usd: number;
-  cost_source: "reported" | "estimated";
+  cost_source: "reported" | "estimated" | "collected";
   /** Provider facts (job/task ids, balances, model). No auth material, no image payloads. */
   metadata: Record<string, unknown>;
 }
@@ -98,11 +101,15 @@ const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47];
 export class ChargedFailure extends Error {
   cost_micro_usd: number;
   cost_source: string;
-  constructor(message: string, costMicroUsd: number, source: string) {
-    super(`${message} [cost_micro_usd=${costMicroUsd} cost_source=${source}]`);
+  /** The provider's background job, when one exists: collect it later instead of regenerating. */
+  job_id?: string;
+  constructor(message: string, costMicroUsd: number, source: string, jobId?: string) {
+    const hint = jobId ? ` [job_id=${jobId}: the job may still finish; collect it with resume_job_id "${jobId}" (same inputs) instead of regenerating]` : "";
+    super(`${message} [cost_micro_usd=${costMicroUsd} cost_source=${source}]${hint}`);
     this.name = "ChargedFailure";
     this.cost_micro_usd = costMicroUsd;
     this.cost_source = source;
+    if (jobId) this.job_id = jobId;
   }
 }
 
@@ -141,9 +148,11 @@ function failureCost(provider: ProviderName, input: GenerateInput, reportedUsd?:
 }
 
 /** Build the ChargedFailure for a post-submit throw (keeps the original message). */
-function charged(provider: ProviderName, input: GenerateInput, message: string, reportedUsd?: number): ChargedFailure {
+function charged(provider: ProviderName, input: GenerateInput, message: string, reportedUsd?: number, jobId?: string): ChargedFailure {
+  // collecting an existing job bills nothing new: its failures carry the job id at zero cost
+  if (input.resumeJobId) return new ChargedFailure(message, 0, "no new charge (collect)", jobId);
   const { micro, source } = failureCost(provider, input, reportedUsd);
-  return new ChargedFailure(message, micro, source);
+  return new ChargedFailure(message, micro, source, jobId);
 }
 
 function requireKey(env: Record<string, string | undefined>, name: string): string {
@@ -187,13 +196,36 @@ async function writeImages(workspace: string, out: string, images: Uint8Array[][
   return outs;
 }
 
+/** Save frames byte-for-byte as <out dir>/<name>.frame-<i>.png (workspace-relative paths returned). */
+async function writeRawFrames(workspace: string, out: string, frames: Uint8Array[]): Promise<string[]> {
+  const stem = out.replace(/\.png$/i, "");
+  const rels: string[] = [];
+  for (const [i, bytes] of frames.entries()) {
+    const rel = `${stem}.frame-${i}.png`;
+    const abs = resolveInside(workspace, rel);
+    await mkdir(path.dirname(abs), { recursive: true });
+    await writeFile(abs, bytes);
+    rels.push(rel);
+  }
+  return rels;
+}
+
+/**
+ * The generation deadline when the caller sets none: ART_GENERATE_TIMEOUT_MS, else 600 s for a PixelLab
+ * animation (30-180 s each, queued one at a time on Tier 1), else 180 s.
+ */
+export function defaultTimeoutMs(input: Pick<GenerateInput, "provider" | "frames">, env: Record<string, string | undefined> = process.env): number {
+  const envTimeout = Number(env.ART_GENERATE_TIMEOUT_MS);
+  if (Number.isFinite(envTimeout) && envTimeout > 0) return envTimeout;
+  return input.provider === "pixellab" && input.frames !== undefined ? 600_000 : 180_000;
+}
+
 export async function generate(input: GenerateInput, opts: GenerateOptions): Promise<GenerateResult> {
   if (!/\.png$/i.test(input.out)) throw new Error(`out must end in .png, got "${input.out}"`);
   resolveInside(opts.workspace, input.out); // refuse path escapes before spending money
   // Default deadline is configurable: PixelLab Tier 1 runs one job at a time and portraits took over 180 s on Nov 7;
   // a job that times out still runs (and counts) on the provider side, so a short deadline wastes generations.
-  const envTimeout = Number((opts.env ?? process.env).ART_GENERATE_TIMEOUT_MS);
-  const defaultTimeout = Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : 180_000;
+  const defaultTimeout = defaultTimeoutMs(input, opts.env ?? process.env);
   if (opts.pollIntervalMs === undefined || opts.timeoutMs === undefined) {
     opts = { pollIntervalMs: 2000, timeoutMs: defaultTimeout, ...opts };
   }
@@ -206,6 +238,8 @@ export async function generate(input: GenerateInput, opts: GenerateOptions): Pro
     setTimeout(resolve, ms);
     return promise;
   };
+  if (input.resumeJobId !== undefined && input.provider !== "pixellab") throw new Error("resume_job_id collects PixelLab background jobs only");
+  if (input.resumeJobId !== undefined && !/^[A-Za-z0-9_-]{1,80}$/.test(input.resumeJobId)) throw new Error(`resume_job_id "${input.resumeJobId}" is not a job id`);
   if (input.provider === "retrodiffusion") return retrodiffusion(input, opts, env, fetchImpl, deadline, sleep);
   return pixellab(input, opts, env, fetchImpl, deadline, sleep);
 }
@@ -399,12 +433,12 @@ async function pollPixellabJob(
   fetchImpl: typeof fetch, deadline: number, sleep: (ms: number) => Promise<void>, submittedUsd: number | undefined,
 ): Promise<any> {
   for (;;) {
-    if (Date.now() > deadline) throw charged("pixellab", input, `pixellab generation timed out after ${opts.timeoutMs} ms (job ${jobId})`, submittedUsd);
+    if (Date.now() > deadline) throw charged("pixellab", input, `pixellab generation timed out after ${opts.timeoutMs} ms (job ${jobId})`, submittedUsd, jobId);
     const poll = await httpJson(fetchImpl, `${base}/v2/background-jobs/${jobId}`, { headers: { authorization: `Bearer ${key}` } }, deadline).catch((e: unknown) => {
-      throw charged("pixellab", input, `pixellab job poll failed: ${(e as Error).message}`, submittedUsd);
+      throw charged("pixellab", input, `pixellab job poll failed: ${(e as Error).message}`, submittedUsd, jobId);
     });
     if (poll.status >= 400)
-      throw charged("pixellab", input, `pixellab job poll failed (${poll.status}): ${poll.body?.detail ?? JSON.stringify(poll.body).slice(0, 300)}`, submittedUsd);
+      throw charged("pixellab", input, `pixellab job poll failed (${poll.status}): ${poll.body?.detail ?? JSON.stringify(poll.body).slice(0, 300)}`, submittedUsd, jobId);
     if (poll.body?.status === "failed")
       throw charged("pixellab", input, `pixellab job failed: ${JSON.stringify(poll.body?.last_response?.detail ?? poll.body?.last_response ?? poll.body).slice(0, 300)}`, usageUsd(poll.body?.usage) ?? submittedUsd);
     if (poll.body?.status === "completed") return poll.body;
@@ -458,16 +492,18 @@ async function pixellabAnimate(
   };
   if (input.seed !== undefined) body.seed = input.seed;
 
-  const submitted = await submitJson("pixellab", input, fetchImpl, `${base}/v2/animate-with-text-v3`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
-    body: JSON.stringify(body),
-  }, deadline);
+  const submitted = input.resumeJobId
+    ? { status: 200, body: { background_job_id: input.resumeJobId } as any }
+    : await submitJson("pixellab", input, fetchImpl, `${base}/v2/animate-with-text-v3`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+        body: JSON.stringify(body),
+      }, deadline);
   if (exhaustedAnswer(submitted.status, submitted.body))
     throw new ProviderExhausted("pixellab", `${submitted.status} ${submitted.body?.detail ?? "Insufficient credits"}`);
   if (submitted.status >= 400)
     throw new Error(`pixellab rejected the animation (${submitted.status}): ${JSON.stringify(submitted.body?.detail ?? submitted.body).slice(0, 300)}`);
-  const jobId = submitted.body?.background_job_id;
+  const jobId: string = submitted.body?.background_job_id;
   if (!jobId) throw charged("pixellab", input, `pixellab returned no background_job_id: ${JSON.stringify(submitted.body).slice(0, 300)}`);
   const submittedUsd = usageUsd(submitted.body?.usage);
   const job = await pollPixellabJob(base, key, jobId, input, opts, fetchImpl, deadline, sleep, submittedUsd);
@@ -515,27 +551,33 @@ async function pixellabAnimate(
     const cap = keepCandidates(groups, input.maxCandidates);
     discarded = cap.discarded;
     const strips: Uint8Array[][] = [];
-    for (const g of cap.kept) {
-      const imgs = g.map((b) => {
-        if (!isPng(b)) throw new Error("pixellab returned a non-PNG frame");
-        return decodePng(b);
-      });
-      if (imgs[0].width !== ref.width || imgs[0].height !== ref.height)
-        notes.push(`frames are ${imgs[0].width}x${imgs[0].height}, not the reference's ${ref.width}x${ref.height}`);
-      strips.push([encodePng(contactSheet(imgs).image)]); // horizontal, no gap, frame order kept
+    try {
+      for (const g of cap.kept) {
+        const imgs = g.map((b) => {
+          if (!isPng(b)) throw new Error("pixellab returned a non-PNG frame");
+          return decodePng(b);
+        });
+        if (imgs[0].width !== ref.width || imgs[0].height !== ref.height)
+          notes.push(`frames are ${imgs[0].width}x${imgs[0].height}, not the reference's ${ref.width}x${ref.height}`);
+        strips.push([encodePng(contactSheet(imgs).image)]); // horizontal, no gap, frame order kept
+      }
+    } catch (e) {
+      // a billed job is never thrown away: keep every returned frame as-is next to the intended strip
+      const saved = await writeRawFrames(opts.workspace, input.out, pngs);
+      throw new Error(`could not build the strip (${(e as Error).message}); the ${pngs.length} raw frames were saved as ${saved.join(", ")}`);
     }
     written = await writeImages(opts.workspace, input.out, strips);
   } catch (e) {
-    throw charged("pixellab", input, (e as Error).message, reportedUsd);
+    throw charged("pixellab", input, (e as Error).message, reportedUsd, jobId);
   }
   const costUsd = reportedUsd ?? PIXELLAB_ANIMATION_ESTIMATE_USD;
   return {
     provider: "pixellab",
     images: written,
-    cost_micro_usd: usdToMicro(costUsd),
-    cost_source: reportedUsd === undefined ? "estimated" : "reported",
+    cost_micro_usd: input.resumeJobId ? 0 : usdToMicro(costUsd),
+    cost_source: input.resumeJobId ? "collected" : reportedUsd === undefined ? "estimated" : "reported",
     metadata: {
-      endpoint: "animate-with-text-v3", background_job_id: jobId, usage: usage ?? null, created_at: job?.created_at,
+      endpoint: "animate-with-text-v3", background_job_id: jobId, ...(input.resumeJobId ? { collected: true } : {}), usage: usage ?? null, created_at: job?.created_at,
       frames_per_strip: perStrip, frame_size: { w: ref.width, h: ref.height }, frames_returned: returned, candidates_discarded: discarded,
       ...(notes.length ? { notes } : {}),
     },
@@ -565,11 +607,13 @@ async function pixellab(
     body.reference_images = [{ image: { type: "base64", base64: ref.base64, format: "png" }, size: { width: ref.width, height: ref.height } }];
   }
 
-  const submitted = await submitJson("pixellab", input, fetchImpl, `${base}/v2/generate-image-v2`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
-    body: JSON.stringify(body),
-  }, deadline);
+  const submitted = input.resumeJobId
+    ? { status: 200, body: { background_job_id: input.resumeJobId } as any }
+    : await submitJson("pixellab", input, fetchImpl, `${base}/v2/generate-image-v2`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+        body: JSON.stringify(body),
+      }, deadline);
   if (exhaustedAnswer(submitted.status, submitted.body))
     throw new ProviderExhausted("pixellab", `${submitted.status} ${submitted.body?.detail ?? "Insufficient credits"}`);
   if (submitted.status >= 400)
@@ -592,15 +636,15 @@ async function pixellab(
     discarded = cap.discarded;
     written = await writeImages(opts.workspace, input.out, cap.kept.map((b64) => [new Uint8Array(Buffer.from(b64, "base64"))]));
   } catch (e) {
-    throw charged("pixellab", input, (e as Error).message, reportedUsd);
+    throw charged("pixellab", input, (e as Error).message, reportedUsd, jobId);
   }
   const costUsd = reportedUsd ?? PIXELLAB_ESTIMATE_USD;
   return {
     provider: "pixellab",
     images: written,
-    cost_micro_usd: usdToMicro(costUsd),
-    cost_source: reportedUsd === undefined ? "estimated" : "reported",
-    metadata: { background_job_id: jobId, usage: usage ?? null, created_at: job?.created_at, candidates_discarded: discarded },
+    cost_micro_usd: input.resumeJobId ? 0 : usdToMicro(costUsd),
+    cost_source: input.resumeJobId ? "collected" : reportedUsd === undefined ? "estimated" : "reported",
+    metadata: { background_job_id: jobId, ...(input.resumeJobId ? { collected: true } : {}), usage: usage ?? null, created_at: job?.created_at, candidates_discarded: discarded },
   };
 }
 

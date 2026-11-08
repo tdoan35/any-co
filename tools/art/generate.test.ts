@@ -652,7 +652,7 @@ test("T3-followup 2: a submit that dies after the request was sent is charged; r
 // ---- T19: credit-aware generation (free-trial tiers, never buy credits) ----
 
 import { ProviderExhausted } from "./generate.ts";
-import { readCredits, readGallery, readProviders, statePaths } from "./credits.ts";
+import { countGeneration, readCredits, readGallery, readProviders, statePaths } from "./credits.ts";
 import { runCommand } from "./art.ts";
 import { read as readLedger } from "../ledger/ledger.ts";
 
@@ -1080,4 +1080,94 @@ test("T23: art_generate capability — animation needs justify, counts toward th
       else process.env[k] = prev[k];
     }
   }
+});
+
+// ---- T23b: never lose a billed PixelLab job ----
+
+import { defaultTimeoutMs } from "./generate.ts";
+
+test("T23b-1: PixelLab animations default to a 600 s deadline; ART_GENERATE_TIMEOUT_MS still overrides", () => {
+  assert.equal(defaultTimeoutMs({ provider: "pixellab", frames: 6 }, {}), 600_000);
+  assert.equal(defaultTimeoutMs({ provider: "pixellab" }, {}), 180_000);
+  assert.equal(defaultTimeoutMs({ provider: "retrodiffusion", frames: 6 }, {}), 180_000);
+  assert.equal(defaultTimeoutMs({ provider: "pixellab", frames: 6 }, { ART_GENERATE_TIMEOUT_MS: "90000" }), 90_000);
+  assert.equal(defaultTimeoutMs({ provider: "pixellab", frames: 6 }, { ART_GENERATE_TIMEOUT_MS: "nope" }), 600_000);
+});
+
+test("T23b-2: a timed-out job carries its id; resume_job_id collects it without a new submit or charge", async () => {
+  const ws = animWorkspace();
+  let done = false;
+  const posts: string[] = [];
+  const handle = (req: CapturedRequest, _n: number, res: ServerResponse) => {
+    if (req.method === "POST") {
+      posts.push(req.url ?? "");
+      return json(res, 200, { background_job_id: "anim-77", status: "processing", usage: null });
+    }
+    if (req.url === "/v2/background-jobs/anim-77")
+      return done
+        ? json(res, 200, { id: "anim-77", status: "completed", created_at: "t", last_response: { images: [0, 1, 2, 3].map((i) => ({ type: "base64", base64: b64png(16, 16, 10 * (i + 1)) })) } })
+        : json(res, 200, { id: "anim-77", status: "processing", created_at: "t" });
+    return json(res, 404, {});
+  };
+  await withServer(handle, async ({ baseUrl }) => {
+    const err = (await generate(anim({ frames: 4 }), { workspace: ws, baseUrl: { pixellab: baseUrl }, env: ENV, pollIntervalMs: 1, timeoutMs: 300 }).catch((e: unknown) => e)) as ChargedFailure;
+    assert.ok(err instanceof ChargedFailure, String(err));
+    assert.equal(err.job_id, "anim-77");
+    assert.match(err.message, /resume_job_id "anim-77"/);
+    assert.equal(err.cost_micro_usd, PIXELLAB_ANIMATION_ESTIMATE_USD * 1e6, "the original call is charged");
+    done = true; // the provider finished it after we stopped waiting
+    const r = await generate(anim({ frames: 4, resumeJobId: "anim-77" }), { workspace: ws, baseUrl: { pixellab: baseUrl }, env: ENV, ...FAST });
+    assert.deepEqual(posts, ["/v2/animate-with-text-v3"], "collecting never submits again");
+    assert.equal(r.cost_micro_usd, 0);
+    assert.equal(r.cost_source, "collected");
+    assert.deepEqual(redsOf(path.join(ws, r.images[0]), 16).reds, [10, 20, 30, 40], "written exactly like a fresh call");
+    await assert.rejects(generate(anim({ provider: "retrodiffusion", resumeJobId: "x" }), { workspace: ws, env: ENV, ...FAST }), /PixelLab background jobs only/);
+    await assert.rejects(generate(anim({ resumeJobId: "../x" }), { workspace: ws, env: ENV, ...FAST }), /not a job id/);
+  });
+});
+
+test("T23b-2: art_generate collect is free, skips the regen cap and justify, and is not counted", async () => {
+  const ws = animWorkspace();
+  const ctx = capabilityCtx(ws);
+  const srv = animServer(() => [0, 1, 2, 3].map((i) => ({ type: "base64", base64: b64png(16, 16, 10 * (i + 1)) })));
+  const prev = { ...process.env };
+  process.env.PIXELLAB_API_KEY = "pl-t23b";
+  try {
+    await withServer(srv.handle, async (h) => {
+      process.env.PIXELLAB_BASE_URL = h.baseUrl;
+      // the asset is already at its cap (1 + 2 regenerations)
+      for (let n = 0; n < 3; n++) countGeneration(statePaths(ctx.runsDir).gallery, "game/assets/hero-walk.png");
+      const capped = await IMPLS.art_generate.art_generate.run({ ...anim({ frames: 4 }), justify: "walk cycle for the hero" }, ctx);
+      assert.match(capped.content, /refused: .* 3 paid generations/);
+      const r = await IMPLS.art_generate.art_generate.run({ ...anim({ frames: 4 }), resume_job_id: "anim-1" }, ctx);
+      assert.equal(r.is_error, undefined, r.content);
+      assert.equal(r.cost_micro_usd, 0);
+      const out = JSON.parse(r.content);
+      assert.equal(out.collected, "anim-1");
+      assert.equal(out.cost_source, "collected");
+      assert.equal(readGallery(statePaths(ctx.runsDir).gallery).generations["assets/hero-walk.png"], 3, "not counted");
+      assert.equal(h.requests.filter((q) => q.method === "POST").length, 0, "no submit");
+      assert.match(IMPLS.art_generate.art_generate.description, /resume_job_id/);
+    });
+  } finally {
+    for (const k of ["PIXELLAB_API_KEY", "PIXELLAB_BASE_URL"]) {
+      if (prev[k] === undefined) delete process.env[k];
+      else process.env[k] = prev[k];
+    }
+  }
+});
+
+test("T23b-3: if the strip cannot be built, the raw frames are saved and the error says where", async () => {
+  const ws = animWorkspace();
+  // mixed frame sizes: contactSheet refuses them
+  const srv = animServer(() => [16, 16, 8, 16].map((w, i) => ({ type: "base64", base64: b64png(w, w, 10 * (i + 1)) })));
+  await withServer(srv.handle, async ({ baseUrl }) => {
+    const err = (await generate(anim({ frames: 4 }), { workspace: ws, baseUrl: { pixellab: baseUrl }, env: ENV, ...FAST }).catch((e: unknown) => e)) as ChargedFailure;
+    assert.ok(err instanceof ChargedFailure, String(err));
+    assert.equal(err.job_id, "anim-1");
+    assert.match(err.message, /raw frames were saved as game\/assets\/hero-walk\.frame-0\.png, .*hero-walk\.frame-3\.png/);
+    for (let i = 0; i < 4; i++) assert.ok(existsSync(path.join(ws, `game/assets/hero-walk.frame-${i}.png`)));
+    assert.equal(decodePng(new Uint8Array(readFileSync(path.join(ws, "game/assets/hero-walk.frame-2.png")))).width, 8, "byte-for-byte");
+    assert.equal(existsSync(path.join(ws, "game/assets/hero-walk.png")), false, "no half-built strip");
+  });
 });
