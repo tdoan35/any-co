@@ -30,7 +30,7 @@ import { WithHarness } from "../../../.storybook/harness";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { setRegistry } from "@/lib/registry";
 import { storyRegistry } from "@/testing/seed";
-import { TeamsStudio, type TeamsView } from "./teams-view";
+import { TeamsCatalog, TeamsStudio } from "./teams-view";
 
 const TooltipDecorator: Decorator = (Story) => (
   <TooltipProvider>
@@ -43,7 +43,7 @@ const meta = {
   component: TeamsStudio,
   // Required-props placeholder: the mounted UI comes from each story's router harness
   // route element (a stage with the real view state), never from these args.
-  args: { view: "teams", onViewChange: () => {} },
+  args: { onOpenTeam: () => {}, onOpenAgent: () => {}, onOpenMember: () => {}, onBack: () => {} },
   decorators: [WithHarness, TooltipDecorator],
   parameters: {
     a11y: {
@@ -72,22 +72,30 @@ const routesFor = (element: ReactElement) => ({
   routes: [{ path: "/agents", element }],
   initialEntries: ["/agents"],
 });
-const staticView = (view: TeamsView) => {
-  const noop = () => {};
-  return routesFor(<TeamsStudio view={view} onViewChange={noop} />);
-};
+const chartProps = { onOpenTeam: () => {}, onOpenAgent: () => {}, onOpenMember: () => {}, onBack: () => {} };
+const staticView = () => routesFor(<TeamsStudio {...chartProps} />);
 
-/** Orgs pane with a live view state, so the org→teams handoff runs the real contract. */
+/** Chart with a live team id, so opening a department runs the real contract. */
 function CrossingStage() {
-  const [view, setView] = useState<TeamsView>("orgs");
-  return <TeamsStudio view={view} onViewChange={setView} />;
+  const [teamId, setTeamId] = useState<string | undefined>();
+  return (
+    <TeamsStudio
+      teamId={teamId}
+      onOpenTeam={setTeamId}
+      onOpenAgent={() => {}}
+      onOpenMember={() => {}}
+      onBack={() => setTeamId(undefined)}
+    />
+  );
 }
 
-/** The catalog with community teams emptied — the "added every team" state. */
+/** The chart with community teams emptied. The chart does not list them. */
 function ExhaustedStage() {
   useState(() => setRegistry({ ...storyRegistry(), communityTeams: [] }));
-  return <TeamsStudio view="teams" onViewChange={() => {}} />;
+  return <TeamsCatalog />;
 }
+
+const catalog = () => routesFor(<TeamsCatalog />);
 
 const exhaustedRoutes = routesFor(<ExhaustedStage />);
 const crossingRoutes = routesFor(<CrossingStage />);
@@ -97,7 +105,7 @@ const crossingRoutes = routesFor(<CrossingStage />);
 /** Both sections: two of yours (active + idle), three community cards, live counts. */
 export const TeamCatalog: Story = {
   name: "Team catalog",
-  parameters: { router: staticView("teams") },
+  parameters: { router: catalog() },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
 
@@ -132,7 +140,7 @@ export const TeamCatalog: Story = {
 /** Opening a yours-card expands it in place; the community shelf fades; tabs and Escape. */
 export const OwnedTeamTabs: Story = {
   name: "Owned team · members, workflow, loops; Escape closes",
-  parameters: { router: staticView("teams") },
+  parameters: { router: catalog() },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const user = userEvent.setup();
@@ -176,7 +184,7 @@ export const OwnedTeamTabs: Story = {
 /** The expanded community card: author line, add-from-expanded lands in Your teams. */
 export const CommunityTeamAdd: Story = {
   name: "Community team · add from expanded",
-  parameters: { router: staticView("teams") },
+  parameters: { router: catalog() },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const user = userEvent.setup();
@@ -209,7 +217,7 @@ export const CommunityTeamAdd: Story = {
 /** The card's plus button adds without expanding anything. */
 export const AddCommunityFromCard: Story = {
   name: "Community add from the card",
-  parameters: { router: staticView("teams") },
+  parameters: { router: catalog() },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const user = userEvent.setup();
@@ -244,14 +252,13 @@ export const CommunityExhausted: Story = {
 /** The org folder: tab count, Dana at the head, one box per slot, shared members tagged. */
 export const OrgChart: Story = {
   name: "Organization chart",
-  parameters: { router: { ...staticView("orgs") } },
+  parameters: { router: { ...staticView() } },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
 
-    expect(canvas.getByRole("heading", { name: /Your organizations/ })).toBeInTheDocument();
-    const folder = canvas.getByRole("button", { name: /Ty's Lab/ });
-    expect(folder).toHaveAttribute("aria-expanded", "false");
-    expect(folder).toHaveTextContent("2 teams");
+    expect(canvas.getByRole("heading", { name: /Teams/ })).toBeInTheDocument();
+    expect(canvas.getByText("Ty's Lab")).toBeInTheDocument();
+    expect(canvas.getByText(/2 departments/)).toBeInTheDocument();
 
     // Head, one box per slot, lead crowned, the twice-membered agent tagged shared.
     expect(canvas.getByText("Dana")).toBeInTheDocument();
@@ -264,49 +271,20 @@ export const OrgChart: Story = {
   },
 };
 
-/** Editing: the tab opens the slot editor; remove, add a copy, add a community team; Escape. */
+/** The chart is read-only: the folder name is not an editor, and there is no add or remove. */
 export const OrgEditing: Story = {
-  name: "Organization editing · remove, copy, add-from-community",
-  parameters: { router: { ...staticView("orgs") } },
+  name: "Organization chart is read-only",
+  parameters: { router: { ...staticView() } },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    const user = userEvent.setup();
 
-    await user.click(canvas.getByRole("button", { name: /Ty's Lab/ }));
-    expect(canvas.getByRole("button", { name: /Ty's Lab/ })).toHaveAttribute("aria-expanded", "true");
-    expect(canvas.getByText(/Add teams to Ty's Lab/)).toBeInTheDocument();
-    expect(canvas.getByText("Pick a team below")).toBeInTheDocument(); // the empty slot
-    expect(canvas.getByRole("button", { name: "Remove Research Team from this organization" })).toBeInTheDocument();
-
-    // Remove the research slot: the tab recounts and the box leaves the chart.
-    await user.click(canvas.getByRole("button", { name: "Remove Research Team from this organization" }));
-    await waitFor(() => expect(canvas.getByRole("button", { name: /1 team$/ })).toBeInTheDocument());
-    await waitFor(() => expect(canvas.getAllByRole("button", { name: /· Lead/ })).toHaveLength(1)); // research box left
-
-    // Add a second copy of Product: the row (already in the org) offers "Add copy",
-    // the chart grows a "copy 2" box and the row recounts its copies.
-    const yourTeams = canvas.getByRole("heading", { name: /Your teams/ }).closest("section") as HTMLElement;
-    const productRow = within(yourTeams).getByText("Product Team").closest("li") as HTMLElement;
-    expect(within(productRow).getByText(/1 in this org|in this org/)).toBeInTheDocument();
-    await user.click(within(productRow).getByRole("button", { name: "Add copy" }));
-    await waitFor(() => expect(canvas.getByText("copy 2")).toBeInTheDocument());
-    expect(within(productRow).getByText(/2 copies in this org/)).toBeInTheDocument();
-
-    // Adding a community team files it under the org and pulls it into Your teams.
-    const community = canvas.getByRole("heading", { name: /Community teams/ }).closest("section") as HTMLElement;
-    const tripRow = within(community).getByText("Trip Crew").closest("li") as HTMLElement;
-    await user.click(within(tripRow).getByRole("button", { name: "Add" }));
-    await waitFor(() => expect(within(yourTeams).getByText("Trip Crew")).toBeInTheDocument());
-    await waitFor(() => expect(within(community).queryByText("Trip Crew")).toBeNull());
-
-    // Escape leaves editing; the chart keeps every slot: research out, product copy and
-    // the community add in → 3 teams under the tab.
-    await user.keyboard("{Escape}");
-    await waitFor(() => expect(canvas.getByRole("button", { name: /Ty's Lab/ })).toHaveAttribute("aria-expanded", "false"));
-    await waitFor(() => expect(canvas.queryByText(/Add teams to/)).toBeNull());
-    expect(canvas.getByRole("button", { name: /3 teams/ })).toBeInTheDocument();
+    expect(canvas.queryByRole("button", { name: /Ty's Lab/ })).toBeNull();
+    expect(canvas.queryByText(/Add teams to/)).toBeNull();
+    expect(canvas.queryByRole("button", { name: /Remove Research Team/ })).toBeNull();
+    expect(canvas.getByRole("button", { name: /Research Team/ })).toBeInTheDocument();
+    expect(canvas.getByRole("button", { name: /Product Team/ })).toBeInTheDocument();
   },
-}
+};
 
 /** Clicking a team box in the org jumps to the teams view with that team expanded. */
 export const OrgTeamJumpsToTeams: Story = {
@@ -320,13 +298,9 @@ export const OrgTeamJumpsToTeams: Story = {
 
     // The teams view took over: org chart gone, expansion live, both shelves visible.
     await waitFor(() => expect(canvas.getByRole("heading", { name: "Product Team" })).toBeInTheDocument());
-    await waitFor(() => expect(canvas.queryByRole("heading", { name: /Your organizations/ })).toBeNull());
-    expect(canvas.getByRole("heading", { name: /Your teams/ })).toBeInTheDocument();
-    // A yours-team is open, so the community shelf is hidden exactly as on a click.
-    expect(canvas.queryByRole("heading", { name: /Community teams/ })).toBeNull();
+    expect(canvas.queryByRole("heading", { name: /Teams/ })).toBeNull();
     expect(canvas.getByText("Turns validated findings into product decisions: market fit, scope and a first build.")).toBeInTheDocument();
 
-    // Closing lands on the plain catalog; the selection is gone, not transferred.
     await user.keyboard("{Escape}");
     await waitFor(() => expect(canvas.queryByRole("heading", { name: "Product Team" })).toBeNull());
     expect(canvas.getByRole("button", { name: /Research Team/ })).toBeInTheDocument();

@@ -696,7 +696,7 @@ test("T29: a submit without `complete` fails the spec's schema on the runner's s
 test("T29: every ticket-work agent requires `complete` with the same description", async () => {
   const { COMPLETE_DESCRIPTION } = await import("./spec.ts");
   const AGENTS = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "agents");
-  for (const name of ["gameplay-engineer", "gameplay-engineer-b", "tech-lead", "level-content-designer", "art-director", "sprite-artist", "env-ui-artist", "qa-lead", "playtester", "build-release"]) {
+  for (const name of ["gameplay-engineer-a", "gameplay-engineer-b", "tech-lead", "level-content-designer", "art-director", "sprite-artist", "env-ui-artist", "qa-lead", "playtester", "build-release"]) {
     const spec = await loadAgent(name, AGENTS);
     const js = JSON.stringify((await import("zod")).z.toJSONSchema(spec.output_schema!));
     const schema = JSON.parse(js) as { required?: string[]; properties?: Record<string, { type?: string; description?: string }> };

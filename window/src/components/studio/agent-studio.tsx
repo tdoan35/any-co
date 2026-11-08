@@ -205,7 +205,7 @@ const formatInstalls = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1).repl
 
 /* ── Expanded profile ─────────────────────────────────────────────── */
 
-function ExpandedCard({ profile, isDefault, onClose, onAdd }: { profile: StudioProfile; isDefault?: boolean; onClose: () => void; onAdd?: () => void }) {
+export function ExpandedCard({ profile, isDefault, onClose, onAdd }: { profile: StudioProfile; isDefault?: boolean; onClose: () => void; onAdd?: () => void }) {
   const { agent, workspace, author, origin } = profile;
   return (
     <motion.div layoutId={cardId(agent.id)} transition={EASE} style={{ borderRadius: 16 }} className={cn("overflow-hidden", surface, "bg-background/60")}>

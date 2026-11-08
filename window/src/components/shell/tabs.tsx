@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import { useLocation, useNavigate } from "react-router";
-import { Briefcase, Hammer, MessageSquare, Plus, Spool, SquarePen, Users, X } from "lucide-react";
+import { Briefcase, MessageSquare, Plus, Spool, SquarePen, Users, X } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { sessions, useRegistry } from "@/lib/registry";
@@ -75,7 +75,6 @@ export function TabsProvider({ children }: { children: React.ReactNode }) {
 
 function describe(path: string): { title: string; icon: ComponentType<{ className?: string }> } {
   const [pathname, search = ""] = path.split("?");
-  const view = new URLSearchParams(search).get("view");
   if (pathname === "/") {
     // A tab whose thread isn't mounted (another tab is active) is still labelled by its session.
     const session = new URLSearchParams(search).get(SESSION_PARAM);
@@ -83,7 +82,7 @@ function describe(path: string): { title: string; icon: ComponentType<{ classNam
     return title ? { title, icon: MessageSquare } : { title: "New thread", icon: SquarePen };
   }
   if (pathname.startsWith("/weave")) return { title: "Weave", icon: Spool };
-  if (pathname.startsWith("/agents")) return view === "teams" ? { title: "Departments", icon: Users } : view === "agents" ? { title: "Agents", icon: Hammer } : { title: "Org chart", icon: Users };
+  if (pathname.startsWith("/agents")) return { title: "Teams", icon: Users };
   if (pathname.startsWith("/work") || pathname.startsWith("/runs") || pathname.startsWith("/reports")) return { title: "Work", icon: Briefcase };
   return { title: "any-co", icon: SquarePen };
 }
