@@ -1,5 +1,5 @@
 // Mechanical art-only merges into a game repo's main (T46, AGENTS.md rule 5): no LLM. An agent/* branch whose changes touch
-// only assets/** and art/gallery/** is merged in a TEMP clone (never the studio's live checkout), gated with runGate on the
+// only assets/** and art/** (no engine code) is merged in a TEMP clone (never the studio's live checkout), gated with runGate on the
 // merged tree, and pushed to the game repo's main only if the merge was clean AND the gate is ok. Every refusal leaves main
 // untouched. The push passes the repo's single-merger pre-receive hook with the operator override ANYCO_ALLOW_MAIN=1 — the
 // harness's logged path (one ledger decision per merge); agents still cannot move main (game_exec refuses ANYCO_* env).
@@ -15,7 +15,10 @@ import { append as ledgerAppend, LEDGER_FILE } from "../ledger/ledger.ts";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /** Paths an art-only branch may change: assets (incl. manifest.json and Godot .import/.uid sidecars) and the review gallery. */
-export const ART_ONLY = /^(assets\/|art\/gallery\/)/;
+export const ART_ONLY = /^(assets\/|art\/)/;
+/** T46b: files the engine can load or run are never art, even under assets/ or art/ (scripts, scenes, resources, project config).
+ *  Other files under art/ (helper .py, scratch sheets) are inert data: the merge never executes branch files. */
+export const ENGINE_CODE = /\.(gd|gdshader|gdextension|cs|tscn|scn|tres|res|godot)$|(^|\/)(export_presets\.cfg|override\.cfg)$/i;
 export const AGENT_BRANCH = /^agent\/[a-z0-9][a-z0-9-]{0,60}$/;
 
 export interface ArtMergeOptions {
@@ -117,7 +120,7 @@ function attemptMerge(gameDir: string, branch: string, opts: ArtMergeOptions, at
     if (head.code !== 0) return refuse(`the game repo has no branch ${branch}`);
     const changed = git(repo, ["diff", "--name-only", `origin/main...origin/${branch}`]).out.split("\n").filter(Boolean);
     if (changed.length === 0) return refuse(`${branch} has nothing to merge (no changes against main)`);
-    const notArt = changed.filter((p) => !ART_ONLY.test(p));
+    const notArt = changed.filter((p) => !ART_ONLY.test(p) || ENGINE_CODE.test(p));
     if (notArt.length) return refuse(`not art-only: ${notArt.slice(0, 20).join(", ")}${notArt.length > 20 ? ` (+${notArt.length - 20} more)` : ""}`, { changed });
 
     git(repo, ["checkout", "-q", "-B", "main", "origin/main"]);
@@ -169,7 +172,7 @@ function attemptMerge(gameDir: string, branch: string, opts: ArtMergeOptions, at
     ledgerAppend({
       kind: "decision", ts: new Date().toISOString(), agent: opts.agent ?? "harness", run_id: opts.run_id ?? "art-merge", topic: "art.merge",
       decision: `merged ${branch} into ${path.basename(path.resolve(gameDir))} main mechanically (${mode}): ${base.out.slice(0, 10)} → ${merged.slice(0, 10)}, ${assets} asset file(s), gate ok`,
-      rationale: "Art-only branches (assets/** and art/gallery/** only), merged clean in a temp clone, gate ok on the merged tree: no LLM needed (AGENTS.md rule 5).",
+      rationale: "Art-only branches (assets/** and art/** only, no engine code/scenes/resources), merged clean in a temp clone, gate ok on the merged tree: no LLM needed (AGENTS.md rule 5).",
       refs: [branch, merged],
     }, opts.ledgerFile ?? LEDGER_FILE);
     return { ok: true, branch, mode, base: base.out, merged, changed, assets, gate, attempts: attempt };

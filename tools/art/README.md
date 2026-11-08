@@ -28,7 +28,7 @@ dispatcher hook (an artist's card closing done with `complete: true`; `STUDIO_AU
 `agent/*` branch into the game repo's main with no LLM, only if ALL hold:
 
 1. `git diff --name-only main...<branch>` touches only `assets/**` (manifest and Godot `.import`/`.uid` sidecars included) and
-   `art/gallery/**`; else "not art-only: <paths>".
+   `art/**` (helper scripts and scratch sheets there are inert data); engine code (.gd, .tscn, .tres, ...) anywhere is refused; else "not art-only: <paths>".
 2. In a temp clone (never the live checkout): fast-forward, or a clean `--no-ff` merge; a conflict aborts with
    "conflict: <paths> → needs a tech-lead card".
 3. `runGate` on the MERGED tree is ok; else the gate summary (failed ids, missing, unlisted, manifest errors).

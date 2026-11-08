@@ -56,6 +56,29 @@ test("T46: a branch touching anything outside assets/ and art/gallery/ is refuse
   assert.equal(mainSha(game), before);
 });
 
+test("T46b: helper scripts and scratch sheets under art/ are inert data and merge; engine code under assets/ or art/ is refused", async () => {
+  const game = makeGameRepo();
+  const clone = agentClone(game, "sprite-artist");
+  pushBranch(clone, "sprite-artist", {
+    "assets/sprites/hero.png": null,
+    "art/tools/ascii_view.py": "print('x')\n",
+    "art/tools/paldump.py": "print('y')\n",
+    "art/capsule-v2-candidates-sheet.png": null,
+  });
+  const r = await artMerge(game, "agent/sprite-artist", state());
+  assert.equal(r.ok, true, String(r.reason));
+  assert.equal(readMain(game, "art/tools/paldump.py"), "print('y')\n");
+
+  const game2 = makeGameRepo();
+  const before = mainSha(game2);
+  const clone2 = agentClone(game2, "sprite-artist");
+  pushBranch(clone2, "sprite-artist", { "assets/sprites/hero.png": null, "art/tools/loader.gd": "extends Node\n", "assets/fx/glow.tscn": "[gd_scene]\n" });
+  const r2 = await artMerge(game2, "agent/sprite-artist", state());
+  assert.equal(r2.ok, false);
+  assert.match(r2.reason!, /^not art-only: art\/tools\/loader\.gd, assets\/fx\/glow\.tscn$/);
+  assert.equal(mainSha(game2), before);
+});
+
 test("T46: a conflict is refused (needs a tech-lead card) and main is untouched", async () => {
   const game = makeGameRepo();
   const clone = agentClone(game, "sprite-artist");
