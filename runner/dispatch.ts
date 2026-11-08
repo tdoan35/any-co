@@ -2,7 +2,7 @@
 // twin of Naïve's board clock. Same rules the hosted clock applies, so the board reads the same
 // on both backends: one doing card per assignee, blocked cards wait, done needs a note.
 // scripts/studio-loop.ts is the CLI (`npm run studio`); the logic lives here so tests drive it.
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import path from "node:path";
 import { RUNS_DIR, stamp, runAgent, denyAll, type Approver, type RunResult } from "./run.ts";
@@ -87,8 +87,16 @@ export function acquireStudioLock(runsDir: string): StudioLock {
     try { renameSync(file, grave); } catch { continue; }
     let moved = "";
     try { moved = readFileSync(grave, "utf8"); } catch { /* gone */ }
-    if (moved !== staleText) { try { renameSync(grave, file); } catch { /* best effort */ } continue; }
-    try { rmSync(grave); } catch { /* already gone */ }
+    if (moved !== staleText) {
+      // We moved a lock that wasn't the stale one we read (a live taker won in between):
+      // put it back where it was — create-exclusive link; if the path is taken, that lock
+      // is theirs and ours is redundant. Never drop a live holder's lock (two-winner bug).
+      try { linkSync(grave, file); } catch { /* path taken: the real holder's lock */ }
+      try { rmSync(grave); } catch { /* already gone */ }
+      continue;
+    }
+    // The stale lock is now aside and the path is free: retry wx. If another taker wx-created a
+    // live lock meanwhile, our wx fails EEXIST and the next read sees a live pid -> refusal.
   }
   throw new Error(`could not take ${file}: another studio loop is starting at the same time`);
 }

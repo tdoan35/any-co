@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { execFile } from "node:child_process";
+import { existsSync, appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -413,13 +413,52 @@ test("N4: two lock takers at once — exactly one wins, including over a stale l
   for (const stale of [false, true]) {
     const runsDir = tmpDir();
     if (stale) writeFileSync(path.join(runsDir, "studio.lock"), JSON.stringify({ pid: 99999999, host: hostname(), at: "2026-11-07T00:00:00Z" }));
-    const script = `import { acquireStudioLock } from ${JSON.stringify(path.join(path.dirname(fileURLToPath(import.meta.url)), "dispatch.ts"))};
-      try { acquireStudioLock(${JSON.stringify(runsDir)}); console.log("WON"); setTimeout(() => {}, 400); } catch { console.log("LOST"); }`;
-    const outs = await Promise.all(
-      Array.from({ length: 6 }, () => new Promise<string>((resolve) => {
-        execFile(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], (_e, out) => resolve(String(out).trim()));
-      })),
+    // File-verdict protocol, no pipes and no wall-clock races: every contender writes
+    // verdict-<pid> (WON/LOST) next to the lock; the parent waits until all N verdicts exist
+    // (bounded), then asserts exactly one winner. Winners keep the lock until the parent kills
+    // them, so no loser can resurrect a released lock into a second win.
+    const script = `import { writeFileSync } from "node:fs";
+      import { acquireStudioLock } from ${JSON.stringify(path.join(path.dirname(fileURLToPath(import.meta.url)), "dispatch.ts"))};
+      const runs = process.argv[1];
+      try {
+        acquireStudioLock(runs);
+        writeFileSync(runs + "/verdict-" + process.pid, "WON");
+        setInterval(() => {}, 1000); // hold the lock; the parent SIGTERMs us when done
+      } catch {
+        writeFileSync(runs + "/verdict-" + process.pid, "LOST");
+      }`;
+    const N = 6;
+    const children = Array.from({ length: N }, () =>
+      spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, runsDir], { stdio: "ignore", timeout: 20_000 }),
     );
-    assert.equal(outs.filter((o) => o === "WON").length, 1, `stale=${stale}: ${outs.join(",")}`);
+    const verdictFile = (pid: number) => path.join(runsDir, `verdict-${pid}`);
+    const deadline = Date.now() + 15_000;
+    let verdicts: string[] = [];
+    while (Date.now() < deadline) {
+      verdicts = children.filter((c) => c.pid && existsSync(verdictFile(c.pid))).map((c) => readFileSync(verdictFile(c.pid!), "utf8"));
+      if (verdicts.length === N) break;
+      await new Promise((r) => setImmediate(r));
+    }
+    assert.equal(verdicts.length, N, `stale=${stale}: every contender reported, got ${verdicts.length}: [${verdicts.join(",")}]`);
+    assert.equal(verdicts.filter((v) => v === "WON").length, 1, `stale=${stale}: exactly one winner, got [${verdicts.join(",")}]`);
+    assert.equal(verdicts.filter((v) => v === "LOST").length, N - 1, `stale=${stale}: losers report, got [${verdicts.join(",")}]`);
+    // release: kill the survivors (winner holds the lock via its interval)
+    for (const c of children) c.kill("SIGKILL");
+    // no wait: killed children release the lock file via the OS; the assert below polls instead
+    await new Promise((r) => setImmediate(r));
+    for (const c of children) if (c.pid) rmSync(verdictFile(c.pid), { force: true });
+    // The winner was SIGKILLed, so its lock file remains as a stale entry: the invariant is
+    // that the next taker can take over (stale recovery), not that the file vanished.
+    const takeover = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, runsDir], { stdio: "ignore", timeout: 10_000 });
+    let takeoverOk = false;
+    const t0 = Date.now();
+    while (Date.now() - t0 < 8000) {
+      const pid = takeover.pid;
+      if (pid && existsSync(verdictFile(pid))) { takeoverOk = readFileSync(verdictFile(pid), "utf8") === "WON"; break; }
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    assert.ok(takeoverOk, `stale=${stale}: a fresh taker takes over the killed winner's lock`);
+    takeover.kill("SIGKILL");
+    if (takeover.pid) rmSync(verdictFile(takeover.pid), { force: true });
   }
 });
