@@ -36,10 +36,11 @@ const SPECS: Record<string, GameSpec> = {
     itchUrl: "https://tdoan35gmailcom.itch.io/caravan-cargo-cult",
     covers: ["capsule/itch_cover_630x500.png"],
     capsules: ["assets/capsule/itch_cover.png"],
+    // v3 (Nov 8): gameplay cropped to the game area and scaled to fill the frame; replaces release-package-studio1/trailer.mp4.
     trailer: {
-      rel: "trailer.mp4",
-      abs: (_root, runsDir) => path.join(runsDir, "release-package-studio1", "trailer.mp4"),
-      base: (_root, runsDir) => path.join(runsDir, "release-package-studio1"),
+      rel: "trailer-caravan-cargo-cult-v3.mp4",
+      abs: (_root, runsDir) => path.join(runsDir, "handoff", "crd_c0295963-cea", "media", "trailer-caravan-cargo-cult-v3.mp4"),
+      base: (_root, runsDir) => path.join(runsDir, "handoff", "crd_c0295963-cea", "media"),
     },
   },
 };
