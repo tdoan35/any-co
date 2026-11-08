@@ -244,8 +244,20 @@ test("R16-2: engine launch args are allowlisted; --path must be the clone", () =
   mkdirSync(clone);
   assert.deepEqual(mediaLaunch(clone, ["godot", "--path", ".", "--rendering-method", "gl_compatibility", "--windowed"]), ["godot", "--path", clone, "--rendering-method", "gl_compatibility", "--windowed"]);
   assert.deepEqual(mediaLaunch(clone, ["godot"]), ["godot"]);
-  for (const bad of [["--script", "x.gd"], ["-s", "x.gd"], ["--main-pack", "x.pck"], ["--editor"], ["-e"], ["--path", "/elsewhere"], ["--path", ".."], ["--rendering-method", "a b"], ["--rendering-method"]])
-    assert.throws(() => mediaLaunch(clone, ["godot", ...bad]), /not allowed|--path must be the game clone|escapes/, bad.join(" "));
+  for (const bad of [["--script", "x.gd"], ["-s", "x.gd"], ["--editor"], ["-e"], ["--path", "/elsewhere"], ["--path", ".."], ["--rendering-method", "a b"], ["--rendering-method"]])
+    assert.throws(() => mediaLaunch(clone, ["godot", ...bad]), /not allowed|--path must be the game clone|escapes|does not exist/, bad.join(" "));
+  // T49: --main-pack, the exported pack, as the project source
+  mkdirSync(path.join(clone, "dist"), { recursive: true });
+  writeFileSync(path.join(clone, "dist", "web.pck"), Buffer.alloc(8));
+  assert.deepEqual(mediaLaunch(clone, ["godot", "--main-pack", "dist/web.pck"]), ["godot", "--main-pack", path.join(clone, "dist", "web.pck")]);
+  // pack + the qa scene (T49: when the export includes qa/, drive the protocol through the pack)
+  writeFileSync(path.join(clone, "qa-driver.tscn"), Buffer.alloc(4));
+  assert.deepEqual(mediaLaunch(clone, ["godot", "--main-pack", "dist/web.pck", "res://qa-driver.tscn"]), ["godot", "--main-pack", path.join(clone, "dist", "web.pck"), "res://qa-driver.tscn"]);
+  assert.throws(() => mediaLaunch(clone, ["godot", "--main-pack", "dist/other.pck"]), /does not exist/);
+  assert.throws(() => mediaLaunch(clone, ["godot", "--main-pack", "dist/../escape.pck"]), /does not exist|escapes/);
+  assert.throws(() => mediaLaunch(clone, ["godot", "--main-pack", "dist/web.pck", "--path", "."]), /mutually exclusive/);
+  assert.throws(() => mediaLaunch(clone, ["godot", "--main-pack", "dist/web.pck", "--main-pack", "dist/web.pck"]), /only one/);
+  assert.throws(() => mediaLaunch(clone, ["godot", "--main-pack", "dist/web.txt"]), /\.pck/);
 });
 
 test("R16-4: playlists and non-media containers are refused before ffmpeg reads them", { skip: NO_FF }, async () => {
