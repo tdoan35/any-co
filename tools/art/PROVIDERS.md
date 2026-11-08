@@ -74,9 +74,11 @@ PixelLab OpenAPI `https://api.pixellab.ai/v2/openapi.json` + `llms.txt`, and Ret
 - **Out of balance**: `402` "Insufficient credits" on `/generate-image-v2` (and the pixflux/pixen
   endpoints; "Insufficient generations" on character endpoints). The spec documents no body
   schema or code for it, so any 402 counts as exhausted.
-- **Balance**: `GET /v2/balance` (Bearer) → `BalanceResponse {credits, subscription}`. The
-  `credits` sub-schema was not in the part of the spec we read (unverified); we take the first
-  number among `credits.usd`, `credits.amount`, `credits`, `usd`, `balance`, else no reading.
+- **Balance** (verified live 2026-11-07, Tier 1 subscription): `GET /v2/balance` (Bearer, free) →
+  `{"credits":{"type":"usd","usd":0.0},"subscription":{"type":"generations","status":"active","plan":"Tier 1: Pixel Apprentice","generations":2000.0,"total":2000.0}}`.
+  With an active `generations` subscription the balance is `subscription.generations` (remaining) of
+  `subscription.total`, unit **generations**; otherwise `credits.usd`, unit usd (`pixellabBalance`).
+  A 402 on a subscription account means the generations are spent: exhausted, as for credits.
 - **Cost reporting**: `usage.usd` when present (subscription `generations` usage has no USD
   value) — reported; when `usage` is null we fall back to the estimate below, marked
   `estimated`.
@@ -113,7 +115,14 @@ called. The `art_generate` capability (runner/tools/impl.ts over tools/art/credi
   refused). One generation + 2 regenerations per asset (counted in the gallery). Animation
   (frames, `rd_animation__*`, `rd_advanced_animation__*`) needs `justify`. `art_quote` returns
   RD's free check_cost quote (PixelLab: price table) × count against the remaining balance.
+- **PixelLab subscription (T21)**: art_generate reads the free balance before and after every
+  PixelLab call and reports `generations_used` (the delta) in the result and in art-credits.jsonl.
+  Generation balances use absolute thresholds: ONE ledger note at <= 400 remaining and one at 0
+  (per day). USD balances keep the 20%-of-first-reading / 0 rule. `max_candidates` (default 4,
+  max 8) caps the images kept per call. Extras are discarded before decoding, download, or write.
+  It keeps the gallery reviewable but does not save generations: the provider bills what it made.
 - **Visibility**: every reported balance (RD `remaining_balance`; PixelLab `GET /v2/balance`
-  after a generation) goes to `runs/art-credits.jsonl` (ts, provider, remaining, run_id, source)
+  after a generation) goes to `runs/art-credits.jsonl` (ts, provider, remaining, unit, total,
+  generations_used, run_id, source)
   and into the result. Below 20% of the day's first reading, and at 0, ONE ledger decision per
   threshold per provider per day (topic `art.credits_low`, deduplicated by its `refs` key).
