@@ -32,6 +32,9 @@ The head turn runs outside `--max-parallel`: count N dispatched runs + 1 head tu
   that ends `done` with `complete: false` closes its card as `blocked`, with a note starting "not complete:"
   and the agent's own summary, so downstream cards keep waiting. Budget/max-turns ends still block. Unblock
   it by fixing the cause and setting the card back to `todo` (or let the Studio Head's cycle triage it).
+- Steer a card with a comment (T37): the next run's task gets an "Operator notes" section with the card's comments by
+  `operator`, `studio-head` (board_comment) or a person in the Naïve app (`usr_`), oldest first, capped at 4,000 chars (newest kept).
+  Dispatcher and agent comments are left out. A note reaches the next run, not one already in progress.
 - Restart-safe: a `doing` card whose claiming process is dead is requeued to `todo` with a comment; a card
   whose finished run could not be closed is left for a manual close (comment `dispatcher: close failed`).
 - Stop: `touch runs/KILL` (no new dispatches; in-flight runs stop at their next call, cards requeue).

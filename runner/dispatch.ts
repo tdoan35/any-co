@@ -10,7 +10,7 @@ import { killSwitchOn } from "./spend.ts";
 import type { AgentSpec } from "./spec.ts";
 import type { Provider } from "./types.ts";
 import type { NaiveClient } from "./providers.ts";
-import { BoardError, type Board, type BoardCard } from "./board/index.ts";
+import { BoardError, type Board, type BoardCard, type BoardComment } from "./board/index.ts";
 
 export interface DispatchOptions {
   board: Board;
@@ -203,8 +203,40 @@ export function acquireStudioLock(runsDir: string): StudioLock {
   throw new Error(`could not take ${file}: another studio loop is starting at the same time`);
 }
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
-/** The task handed to an agent: the card, plus what its finished blockers produced. */
-export function cardTask(card: BoardCard, blockers: BoardCard[]): string {
+/** Comment authors whose words steer the run (T37). The dispatcher's and other agents' comments stay out (no feedback loops). */
+export const STEERING_AUTHORS = new Set(["operator", "studio-head"]);
+/** Total characters of operator notes put into a task; the newest notes are kept. */
+export const OPERATOR_NOTES_CAP = 4000;
+
+/** A steering comment: author "operator" or "studio-head" (local names; on Naïve the runner tags its own comments),
+ *  or a person on the Naïve board (`usr_` principal: a human commenting in the app). */
+export function isSteering(c: BoardComment): boolean {
+  return STEERING_AUTHORS.has(c.author) || c.author.startsWith("usr_");
+}
+
+/** "Operator notes", oldest → newest, clipped to `cap` characters by dropping the OLDEST first (a single note over the cap keeps its end). */
+export function operatorNotes(comments: BoardComment[], cap = OPERATOR_NOTES_CAP): string | null {
+  const notes = comments.filter(isSteering).sort((a, b) => a.created_at.localeCompare(b.created_at));
+  if (notes.length === 0) return null;
+  const lines = notes.map((c) => `- ${c.created_at} ${c.author}: ${c.body.trim()}`);
+  const kept: string[] = [];
+  let used = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const add = lines[i].length + (kept.length ? 1 : 0); // + the newline joining it to the kept ones
+    if (used + add <= cap) {
+      kept.unshift(lines[i]);
+      used += add;
+      continue;
+    }
+    if (kept.length === 0) kept.unshift(`- …${lines[i].slice(-(cap - 3))}`); // the newest alone is over the cap: keep its end
+    break;
+  }
+  const dropped = notes.length - kept.length;
+  return `--- Operator notes (card comments from the operator / Studio Head, newest last${dropped ? `; ${dropped} older clipped` : ""}) ---\n${kept.join("\n")}`;
+}
+
+/** The task handed to an agent: the card, what its finished blockers produced, and the operator's comments on the card. */
+export function cardTask(card: BoardCard, blockers: BoardCard[], comments: BoardComment[] = []): string {
   const parts = [`# ${card.title}`, card.body].filter(Boolean);
   if (blockers.length) {
     parts.push(
@@ -212,6 +244,8 @@ export function cardTask(card: BoardCard, blockers: BoardCard[]): string {
         blockers.map((b) => `## ${b.title} (${b.id})\n${b.note ?? "(no note)"}`).join("\n\n"),
     );
   }
+  const notes = operatorNotes(comments);
+  if (notes) parts.push(notes);
   return parts.join("\n\n");
 }
 
@@ -324,7 +358,12 @@ export class Dispatcher {
     await board.comment(card.id, `dispatcher: claimed for local run ${runId}`, "dispatcher");
     // upstream = the original edges (N1): blocked_by loses done ids on a block, upstream never does
     const blockers = await Promise.all((card.upstream ?? card.blocked_by).map((id) => board.get(id)));
-    const task = cardTask(card, blockers);
+    // operator steering rides card comments (T37); a comment read that fails must not block the run
+    const comments = await board.comments(card.id).catch((e: unknown) => {
+      this.opts.log?.(`card ${card.id}: could not read comments (${errText(e)}); starting without operator notes`);
+      return [] as BoardComment[];
+    });
+    const task = cardTask(card, blockers, comments);
     this.opts.log?.(`▶ ${spec.name} on card ${card.id}: ${card.title}`);
     const done = this.run(spec, card, task, runId);
     this.inflight.set(spec.name, done);
