@@ -66,7 +66,6 @@ if (await probe(s2EaPort)) {
   }, "studio 2 (own mirror, read-only)");
   await waitFor(s2Port, "studio 2");
 }
-
 // Studio 1: this Mac's live adapter; reuse one that is already running (e.g. the EA's).
 if (!(await probe(s1Port))) {
   spawnAdapter(s1Port, {}, "studio 1");
@@ -80,8 +79,9 @@ const studios = [
   { id: "s2", label: "Studio 2", api: `http://127.0.0.1:${s2Port}`, readOnly: true },
 ];
 const uiEnv = { ...process.env, VITE_API_MODE: "http", VITE_API_URL: studios[0].api, VITE_STUDIOS: JSON.stringify(studios) };
+// Extra CLI args (e.g. --remote-debugging-port=9222) pass through to Electron.
 const ui = electron
-  ? spawn(process.execPath, ["scripts/electron-dev.mjs"], { cwd: winDir, env: uiEnv, stdio: "inherit" })
+  ? spawn(process.execPath, ["scripts/electron-dev.mjs", ...process.argv.slice(2).filter((a) => a !== "electron")], { cwd: winDir, env: uiEnv, stdio: "inherit" })
   : spawn("npx", ["vite"], { cwd: winDir, env: uiEnv, stdio: "inherit" });
 console.log(`[live-both] window starting: studio 1 ${studios[0].api}, studio 2 ${studios[1].api} (read-only)`);
 ui.on("exit", (code) => { stop(); process.exit(code ?? 0); });
