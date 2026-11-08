@@ -1094,6 +1094,68 @@ function capRefusal(out: string, used: number, kind: GenCounter = "paid", cap = 
 }
 
 /**
+ * T39d: resolve `out` from a manifest asset id. Returns { out } on success or { error } with the
+ * closest manifest ids (prefix match, then edit distance, up to 5) when the id is unknown, or a
+ * mismatch message when an explicit out disagrees with the entry's path.
+ */
+async function resolveOutFromAsset(
+  workspace: string,
+  asset: string,
+  out: string | undefined,
+): Promise<{ out: string } | { error: string }> {
+  let manifest: { assets?: Array<{ id?: string; path?: string }> };
+  try {
+    manifest = JSON.parse(await readFile(resolveInWorkspace(workspace, path.join("game", "assets", "manifest.json")), "utf8"));
+  } catch {
+    return { error: "asset lookup needs game/assets/manifest.json (game_clone, and the Art Director locks it) before generating" };
+  }
+  const assets = manifest.assets ?? [];
+  const entry = assets.find((a) => a.id === asset);
+  if (!entry?.path) {
+    const ids = assets.map((a) => a.id).filter((v): v is string => typeof v === "string");
+    const low = asset.toLowerCase();
+    const scored = ids
+      .map((id) => ({ id, prefix: id.toLowerCase().startsWith(low) ? 0 : 1, dist: editDistance(low, id.toLowerCase()) }))
+      .sort((x, y) => x.prefix - y.prefix || x.dist - y.dist)
+      .slice(0, 5)
+      .map((x) => x.id);
+    return { error: `unknown asset id "${asset}" in game/assets/manifest.json. Closest ids: ${scored.join(", ") || "none"}. Pass asset: <id> or out: game/assets/<path>/<name>.png` };
+  }
+  const resolved = `game/${entry.path}`.replace(/\/\.$/, "");
+  if (out !== undefined) {
+    const norm = (s: string) => path.posix.normalize(s.replace(/\\/g, "/")).replace(/^\.\//, "").replace(/\/$/, "");
+    if (norm(out) !== norm(resolved))
+      return { error: `asset "${asset}" maps to ${resolved} in game/assets/manifest.json, but out is "${out}": they disagree. Pass asset alone, or out exactly ${resolved}` };
+  }
+  return { out: resolved };
+}
+
+/** Simple Levenshtein on lowercased strings, bounded lengths (ids <= 60 chars per the schema). */
+function editDistance(a: string, b: string): number {
+  const dp = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array<number>(b.length).fill(0)]);
+  for (let j = 0; j <= b.length; j++) dp[0]![j] = j;
+  for (let i = 1; i <= a.length; i++)
+    for (let j = 1; j <= b.length; j++)
+      dp[i]![j] = Math.min(dp[i - 1]![j]! + 1, dp[i]![j - 1]! + 1, dp[i - 1]![j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return dp[a.length]![b.length]!;
+}
+
+/** Enrich the empty-basename refusal with the manifest ids on offer (T39d: the next call succeeds). */
+async function outRefusalWithSuggestions(workspace: string, base: string): Promise<string> {
+  let ids: string[] = [];
+  try {
+    const manifest = JSON.parse(await readFile(resolveInWorkspace(workspace, path.join("game", "assets", "manifest.json")), "utf8")) as {
+      assets?: Array<{ id?: string }>;
+    };
+    ids = (manifest.assets ?? []).map((a) => a.id).filter((v): v is string => typeof v === "string").slice(0, 5);
+  } catch {
+    /* no manifest yet: the base message stands alone */
+  }
+  const suffix = ids.length > 0 ? `; manifest ids here: ${ids.join(", ")} (or pass asset: <id>)` : "";
+  return `${base}${suffix}`;
+}
+
+/**
  * Pre-call check for postprocess (T39): the snap/lock/outline steps need the manifest and the asset's entry, and a
  * generation without them is paid for and then unusable ("snap needs the manifest entry", Nov 7). Null = fine.
  */
@@ -1144,7 +1206,8 @@ const artGenerate: ToolImpl = {
       prompt: z.string().min(1).max(2000),
       width: z.number().int().min(12).max(792),
       height: z.number().int().min(12).max(792),
-      out: z.string().min(1).regex(/\.png$/i, "out must end in <name>.png, e.g. game/assets/sprites/hero.png").describe("workspace-relative output PNG: game/assets/<path>/<name>.png"),
+      out: z.string().min(1).regex(/\.png$/i, "out must end in <name>.png, e.g. game/assets/sprites/hero.png").optional().describe("workspace-relative output PNG: game/assets/<path>/<name>.png. Omit and pass asset instead: resolved from the manifest entry's path verbatim"),
+      asset: z.string().regex(/^[a-z0-9][a-z0-9-]*$/).optional().describe("manifest asset id: out resolves to that entry's path (game/<path>); with both, they must agree"),
       reference: z.string().min(1).optional().describe("workspace-relative reference/anchor PNG"),
       seed: z.number().int().nonnegative().optional(),
       frames: z.number().int().optional().describe("animation frames. retrodiffusion: frames_duration 4|6|8|10|12|16. pixellab: 4-16 even (4|6|8|10|12|14|16); animates `reference` (required, the start frame, at most 256x256, width/height = its size) with `prompt` as the action; w*h*frames <= 524288. Output: one horizontal strip (frames x width, 1 row)"),
@@ -1167,10 +1230,23 @@ const artGenerate: ToolImpl = {
   async run(i, ctx) {
     if (i.resume_job_id) return collectJob(i, ctx);
     const paths = statePaths(ctx.runsDir);
-    // T39: refuse, with zero requests, a call that could not produce a usable asset
-    const outIssue = outPathProblem(i.out);
+    // T39d: `asset` resolves out from the manifest entry's path; both given must agree. Refused
+    // here, before any provider call, so a bad id/out costs nothing.
+    let out: string | undefined = i.out;
+    if (i.asset !== undefined || out === undefined || !/^[A-Za-z0-9_][A-Za-z0-9_.-]*\.png$/i.test(path.posix.basename(path.posix.normalize(out.replace(/\\/g, "/"))))) {
+      if (i.asset === undefined && out !== undefined) {
+        // no asset given but out is bare/odd: keep the T39 refusal, now with manifest ids on offer
+        const base = outPathProblem(out);
+        if (base) return { content: `refused before any request: ${await outRefusalWithSuggestions(ctx.workspace, base)}`, is_error: true };
+      } else {
+        const resolved = await resolveOutFromAsset(ctx.workspace, i.asset ?? "", out);
+        if ("error" in resolved) return { content: `refused before any request: ${resolved.error}`, is_error: true };
+        out = resolved.out;
+      }
+    }
+    const outIssue = outPathProblem(out);
     if (outIssue) return { content: `refused before any request: ${outIssue}`, is_error: true };
-    const ppIssue = await postprocessProblem(ctx.workspace, i.out, i.postprocess);
+    const ppIssue = await postprocessProblem(ctx.workspace, out, i.postprocess);
     if (ppIssue) return { content: `refused before any request: ${ppIssue}`, is_error: true };
     let comfyCap: number;
     try {
@@ -1208,8 +1284,8 @@ const artGenerate: ToolImpl = {
     // taken before any request (no race past the cap); the slot moves if the chain falls to the other kind, and is given back
     // unless the call billed.
     const kind0 = counterFor(requested);
-    let slot = reserveGeneration(paths.gallery, i.out, kind0, capOf(kind0));
-    if (!slot) return { content: capRefusal(i.out, generationsUsedSinceRedo(paths.gallery, i.out, kind0), kind0, capOf(kind0)), is_error: true };
+    let slot = reserveGeneration(paths.gallery, out, kind0, capOf(kind0));
+    if (!slot) return { content: capRefusal(out, generationsUsedSinceRedo(paths.gallery, out, kind0), kind0, capOf(kind0)), is_error: true };
     let billed = false;
     try {
     const exhausted: ProviderName[] = [];
@@ -1256,10 +1332,10 @@ const artGenerate: ToolImpl = {
       }
       const kindP = counterFor(p);
       if (!slot || slot.kind !== kindP) {
-        if (slot) releaseGeneration(paths.gallery, i.out, slot.kind);
-        slot = reserveGeneration(paths.gallery, i.out, kindP, capOf(kindP));
+        if (slot) releaseGeneration(paths.gallery, out, slot.kind);
+        slot = reserveGeneration(paths.gallery, out, kindP, capOf(kindP));
         if (!slot) {
-          notes.push(`${p} skipped: ${capRefusal(i.out, generationsUsedSinceRedo(paths.gallery, i.out, kindP), kindP, capOf(kindP))}`);
+          notes.push(`${p} skipped: ${capRefusal(out, generationsUsedSinceRedo(paths.gallery, out, kindP), kindP, capOf(kindP))}`);
           continue;
         }
       }
@@ -1268,11 +1344,11 @@ const artGenerate: ToolImpl = {
         notes.push(`${requested} is ${why}; tried ${p} once instead (same prompt and size)`);
       }
       try {
-        const { justify: _j, postprocess: _p, max_candidates, ...gen } = i;
+        const { justify: _j, postprocess: _p, max_candidates, asset: _asset, ...gen } = i;
         // PixelLab: read the (free) balance before and after, so the result says what the call used (already read when a floor is set)
         if (p === "pixellab" && floor === null) before = await providerBalance("pixellab", {}).catch(() => null);
         else if (p !== "pixellab") before = null;
-        result = await generate({ ...gen, provider: p, maxCandidates: max_candidates }, { workspace: ctx.workspace });
+        result = await generate({ ...gen, out: out!, provider: p, maxCandidates: max_candidates }, { workspace: ctx.workspace });
         break;
       } catch (e) {
         if (e instanceof ProviderExhausted) {
@@ -1332,14 +1408,14 @@ const artGenerate: ToolImpl = {
     try {
       let postprocess: Record<string, unknown> | null = null;
       if (i.postprocess && (i.postprocess.snap || i.postprocess.lock || i.postprocess.outline))
-        postprocess = await applyArtPostprocess(ctx.workspace, i.postprocess, result.images, i.out);
+        postprocess = await applyArtPostprocess(ctx.workspace, i.postprocess, result.images, out);
       return { content: JSON.stringify({ ...result, postprocess, ...extra }), cost_micro_usd: result.cost_micro_usd };
     } catch (e) {
       // generation succeeded and was paid; postprocess failing must not erase the charge
       return { content: `generated ${result.images.join(", ")} but postprocess failed: ${errText(e)} ${JSON.stringify(extra)}`, is_error: true, cost_micro_usd: result.cost_micro_usd };
     }
     } finally {
-      if (!billed && slot) releaseGeneration(paths.gallery, i.out, slot.kind);
+      if (!billed && slot) releaseGeneration(paths.gallery, out, slot.kind);
     }
   },
 };

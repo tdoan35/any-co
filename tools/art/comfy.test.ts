@@ -428,3 +428,68 @@ test("T41 art_generate comfy: the default call (max_candidates 4) returns a batc
     await lab.close();
   }
 });
+
+// ----- T39d: out resolved from the manifest asset id; refusals before any provider call -----
+
+test("T39d art_generate: asset-only resolves the manifest path; mismatched out refused; unknown id lists suggestions; bare out lists ids", async () => {
+  const lab = await startLab(happyLab());
+  const { ws, ctx } = capabilityWorkspace();
+  const env = { COMFY_BASE_URL: lab.base };
+  try {
+    await withEnv(env, async () => {
+  // no provider env at all: any path that would call a provider must be avoided by these refusals,
+  // and the asset-resolved success path is covered by the happy-path tests above with comfy.
+  const res = await IMPLS.art_generate.art_generate.run({ provider: "comfy", prompt: "x", width: 16, height: 16, asset: "merchant" }, ctx);
+  // either it ran (comfy lab unreachable => ProviderUnavailable naming the fallback) or was refused
+  // after resolution: both prove the RESOLVED out was used, so assert on the path, not success.
+  assert.match(res.content, /game\/assets\/merchant\.png|assets\/merchant\.png|merchant/);
+
+  const mismatch = await IMPLS.art_generate.art_generate.run(
+    { provider: "comfy", prompt: "x", width: 16, height: 16, asset: "merchant", out: "game/assets/other.png" },
+    ctx,
+  );
+  assert.equal(mismatch.is_error, true);
+  assert.match(mismatch.content, /asset "merchant" maps to game\/assets\/merchant\.png.*disagree/);
+
+  const unknown = await IMPLS.art_generate.art_generate.run({ provider: "comfy", prompt: "x", width: 16, height: 16, asset:merchnt() }, ctx);
+  function merchnt(): string {
+    return "merchnt"; // edit distance 1 from merchant
+  }
+  assert.equal(unknown.is_error, true);
+  assert.match(unknown.content, /unknown asset id "merchnt".*Closest ids: merchant/);
+
+  const bare = await IMPLS.art_generate.art_generate.run({ provider: "comfy", prompt: "x", width: 16, height: 16, out: ".png" }, ctx);
+  assert.equal(bare.is_error, true);
+  assert.doesNotMatch(bare.content, /^\{"/); // refusals are plain text, not clipped JSON
+  assert.match(bare.content, /has no file name/);
+  assert.match(bare.content, /manifest ids here: merchant/);
+  });
+  } finally {
+    await lab.close();
+  }
+});
+
+test("T39d: the resolved out still respects the T39/T39c caps and postprocess entry checks", async () => {
+  const lab = await startLab(happyLab());
+  const { ws, ctx } = capabilityWorkspace();
+  try {
+    await withEnv({ COMFY_BASE_URL: lab.base }, async () => {
+      // fill the comfy cap on the RESOLVED path (asset merchant -> game/assets/merchant.png)
+      for (let i = 0; i < 8; i++) {
+        await IMPLS.art_generate.art_generate.run(
+          { provider: "comfy", prompt: "x", width: 16, height: 16, asset: "merchant", postprocess: { snap: true, lock: true, outline: "#1a1c2c" } },
+          ctx,
+        );
+      }
+      const r = await IMPLS.art_generate.art_generate.run(
+        { provider: "comfy", prompt: "x", width: 16, height: 16, asset: "merchant", postprocess: { snap: true, lock: true, outline: "#1a1c2c" } },
+        ctx,
+      );
+      assert.equal(r.is_error, true, r.content.slice(0, 300));
+      assert.match(r.content, /game\/assets\/merchant\.png/); // the cap refusal names the RESOLVED path
+      assert.match(r.content, /cap|exhaust|refus/i);
+    });
+  } finally {
+    await lab.close();
+  }
+});

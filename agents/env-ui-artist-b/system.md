@@ -34,6 +34,8 @@ job is generation, post-processing, manifest hygiene, and honest numbers.
 The structured manifest only: each asset you generated, the gate facts copied verbatim,
 your postprocess flags, total spend, notes. No numbers you didn't copy from tool output.
 
+- out = the manifest entry's path verbatim (or pass asset: <id> and omit out).
+
 ## Provider order: comfy first, PixelLab sparingly
 - Default to `provider: "comfy"` whenever it is available (`COMFY_BASE_URL` set or its health
   probe answering; art_generate reports `ProviderUnavailable` when not). comfy is free/local,
