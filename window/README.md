@@ -40,10 +40,15 @@ come from the config; the window never hard-codes studio or game names.
 
 ## Pages
 
-- **Agents**: the org chart. Departments, teams and agents with a live presence dot. The Studio Head sits at the top.
+- **Agents**: the org chart. Departments, teams and agents with a live presence dot. The Studio Head sits at the top. The Flow tab shows the studio work order.
 - **Studio**: the studio deck. Who is working, a pulse of run starts and ends, and the intervention count. The approval inbox is empty until the approval ledger exists.
 - **Work**: runs as a board. Open one to watch its loop (model replies, tool calls, results, wrap-up notes).
+- **Gallery**: every kept art candidate and contact sheet from the studio game repo(s), grouped by asset with the verdict, provider and art-gate numbers. Pixel art renders nearest-neighbour at integer scales only. Adapters that predate `/api/art-gallery` (and repos whose art is still on agent branches) show the calm empty state; mock mode serves `packages/fixtures/src/gallery.ts`.
 - **Chat** (home): talk to the Studio Head. It answers from the studio's runs, spend and roster through read-only tools. It cannot start or stop agents yet.
+
+The Studio header carries the autonomy counter: human interventions since the event start
+from `GET /api/interventions`, split by ledger category; clicking opens the entries, newest
+first. It follows the studio switcher — each studio has its own ledger.
 
 ## Interventions
 

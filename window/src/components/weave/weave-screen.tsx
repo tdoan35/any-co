@@ -6,6 +6,7 @@ import { PageHeader } from "@/components/shell/app-shell";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Segmented, headerButton, headerTitle } from "@/components/studio/studio-ui";
+import { LiveInterventionsCounter } from "@/components/weave/interventions-counter";
 import { inboxGroups, isAsk, itemById, navigableIds, useWeave, weave } from "@/lib/weave-store";
 import { httpMode } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -186,6 +187,7 @@ export function WeaveScreen() {
             <span className="hidden text-xs text-muted-foreground sm:inline">{fullDayLabel(TODAY)}</span>
             <Button size="sm" variant="outline" className={headerButton} onClick={() => setRailOpen(true)}><CalendarDays />Your day</Button>
           </>}
+          <LiveInterventionsCounter />
         </>}
       >
         <span className={headerTitle}>Studio</span>
