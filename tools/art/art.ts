@@ -7,6 +7,7 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import { decodePng, encodePng, type RgbaImage } from "./png.ts";
 import { addOutline, contactSheet, lockPalette, snapToGrid, splitStrip } from "./ops.ts";
+import { artMerge } from "./merge.ts";
 import { runGate, type GateReport } from "./gate.ts";
 import { PROVIDERS, clearProvider, grantRedo, outPathProblem, readCredits, readProviders, statePaths } from "./credits.ts";
 import { append as ledgerAppend } from "../ledger/ledger.ts";
@@ -26,6 +27,7 @@ export type CommandResult =
   | { kind: "error"; json: { error: string }; exitCode: 2 };
 
 const USAGE = `usage: art.ts <command> ...
+  merge   <game-dir> <agent/branch> [--dry-run]       (operator / harness: art-only branch -> main, no LLM; gate on the merged tree)
   lock    <in.png> <out.png> --palette "#rrggbb,#rrggbb,..." [--alpha-threshold N]
   snap    <in.png> <out.png> --w N --h N
   outline <in.png> <out.png> --color "#rrggbb" [--mode outer]
@@ -156,8 +158,23 @@ export function runCommand(argv: string[]): CommandResult {
   }
 }
 
+/** `merge <game-dir> <agent/branch> [--dry-run]` (T46): the mechanical art-only merge. Async (it waits on the repo lock). */
+export async function runMergeCommand(argv: string[]): Promise<CommandResult> {
+  try {
+    refuseAgent("merge"); // an agent run must never move main through this CLI
+    const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { "dry-run": { type: "boolean" } } });
+    const [gameDir, branch] = positionals;
+    if (!gameDir || !branch) throw new Error("usage: merge <game-dir> <agent/branch> [--dry-run]");
+    const r = await artMerge(path.resolve(gameDir), branch, { dryRun: values["dry-run"] === true, agent: "operator (npm run art -- merge)", ...(process.env.STUDIO_LEDGER_FILE ? { ledgerFile: process.env.STUDIO_LEDGER_FILE } : {}) });
+    return { kind: "ok", json: r as unknown as Record<string, unknown>, exitCode: r.ok ? 0 : 1 }; // 1 = a refusal verdict, as with gate
+  } catch (e) {
+    return { kind: "error", json: { error: (e as Error).message }, exitCode: 2 };
+  }
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const r = runCommand(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  const r = argv[0] === "merge" ? await runMergeCommand(argv.slice(1)) : runCommand(argv);
   console.log(JSON.stringify(r.json));
   process.exitCode = r.exitCode;
 }

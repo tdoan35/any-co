@@ -1,0 +1,138 @@
+// T46: mechanical art-only merges into a game repo's main. Temp git repos only (never games/).
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { artMerge } from "./merge.ts";
+import { runMergeCommand } from "./art.ts";
+import { agentClone, git, mainSha, makeGameRepo, manifest, pushBranch, readMain } from "./testdata/game-repo.ts";
+import { read as readLedger } from "../ledger/ledger.ts";
+
+function state() {
+  const runsDir = mkdtempSync(path.join(tmpdir(), "artmerge-runs-"));
+  return { runsDir, ledgerFile: path.join(runsDir, "ledger.jsonl") };
+}
+
+test("T46: an art-only branch fast-forwards main (live checkout updated), with one art.merge ledger decision", async () => {
+  const game = makeGameRepo();
+  const before = mainSha(game);
+  const clone = agentClone(game, "sprite-artist");
+  pushBranch(clone, "sprite-artist", { "assets/manifest.json": manifest(["hero", "slime"]), "assets/sprites/slime.png": null, "assets/sprites/slime.png.import": "[remap]\n", "art/gallery/slime/1-comfy-accepted.png": null });
+  const s = state();
+  const r = await artMerge(game, "agent/sprite-artist", s);
+  assert.equal(r.ok, true, r.reason ?? "");
+  assert.equal(r.mode, "fast-forward");
+  assert.equal(r.base, before);
+  assert.equal(r.assets, 1, "slime.png; manifest and sidecar not counted as assets");
+  assert.equal(mainSha(game), git(clone, ["rev-parse", "HEAD"]), "main is the branch head");
+  assert.ok(existsSync(path.join(game, "assets", "sprites", "slime.png")), "the live checkout was updated (updateInstead)");
+  const notes = readLedger(s.ledgerFile).filter((e) => e.kind === "decision" && e.topic === "art.merge");
+  assert.equal(notes.length, 1);
+  assert.match(String((notes[0] as { decision?: string }).decision), /merged agent\/sprite-artist into caravan main mechanically \(fast-forward\).*1 asset file\(s\), gate ok/);
+});
+
+test("T46: a diverged art-only branch lands as a clean --no-ff merge commit", async () => {
+  const game = makeGameRepo();
+  const clone = agentClone(game, "env-ui-artist");
+  pushBranch(clone, "env-ui-artist", { "assets/manifest.json": manifest(["hero", "panel"]), "assets/sprites/panel.png": null });
+  writeFileSync(path.join(game, "src", "main.gd"), "extends Node2D\n"); // main moves on (a tech-lead merge)
+  git(game, ["commit", "-qam", "engine change"]);
+  const r = await artMerge(game, "agent/env-ui-artist", state());
+  assert.equal(r.ok, true, r.reason ?? "");
+  assert.equal(r.mode, "merge");
+  assert.match(git(game, ["log", "-1", "--format=%s", "main"]), /^Art merge agent\/env-ui-artist \(harness, mechanical/);
+  assert.equal(readMain(game, "src/main.gd"), "extends Node2D\n", "main's own change survives");
+});
+
+test("T46: a branch touching anything outside assets/ and art/gallery/ is refused; main untouched", async () => {
+  const game = makeGameRepo();
+  const before = mainSha(game);
+  const clone = agentClone(game, "sprite-artist");
+  pushBranch(clone, "sprite-artist", { "assets/sprites/hero.png": null, "src/main.gd": "extends Node3D\n", "project.godot": "x" });
+  const r = await artMerge(game, "agent/sprite-artist", state());
+  assert.equal(r.ok, false);
+  assert.match(r.reason!, /^not art-only: project\.godot, src\/main\.gd$/);
+  assert.equal(mainSha(game), before);
+});
+
+test("T46: a conflict is refused (needs a tech-lead card) and main is untouched", async () => {
+  const game = makeGameRepo();
+  const clone = agentClone(game, "sprite-artist");
+  pushBranch(clone, "sprite-artist", { "assets/manifest.json": manifest(["hero", "slime"]), "assets/sprites/slime.png": null });
+  writeFileSync(path.join(game, "assets", "manifest.json"), manifest(["hero", "bat"])); // main edits the same lines
+  writeFileSync(path.join(game, "assets", "sprites", "bat.png"), "x");
+  git(game, ["add", "-A"]);
+  git(game, ["commit", "-qm", "other art on main"]);
+  const before = mainSha(game);
+  const r = await artMerge(game, "agent/sprite-artist", state());
+  assert.equal(r.ok, false);
+  assert.match(r.reason!, /^conflict: assets\/manifest\.json → needs a tech-lead card$/);
+  assert.equal(mainSha(game), before);
+});
+
+test("T46: the gate runs on the merged tree; a failure is refused with its summary and main is untouched", async () => {
+  const game = makeGameRepo();
+  const before = mainSha(game);
+  const clone = agentClone(game, "sprite-artist");
+  pushBranch(clone, "sprite-artist", { "assets/sprites/stray.png": null }); // on disk, not in the manifest
+  const r = await artMerge(game, "agent/sprite-artist", state());
+  assert.equal(r.ok, false);
+  assert.match(r.reason!, /^gate failed on the merged tree \(unlisted: assets\/sprites\/stray\.png\)$/);
+  assert.equal(r.gate?.ok, false);
+  assert.equal(mainSha(game), before);
+});
+
+test("T46: dry run merges and gates without pushing; bad branches and a busy repo are refused", async () => {
+  const game = makeGameRepo();
+  const before = mainSha(game);
+  const clone = agentClone(game, "sprite-artist");
+  pushBranch(clone, "sprite-artist", { "assets/manifest.json": manifest(["hero", "slime"]), "assets/sprites/slime.png": null });
+  const s = state();
+  const dry = await artMerge(game, "agent/sprite-artist", { ...s, dryRun: true });
+  assert.equal(dry.ok, true, dry.reason ?? "");
+  assert.equal(dry.dry_run, true);
+  assert.equal(mainSha(game), before, "nothing pushed");
+  assert.equal(readLedger(s.ledgerFile).length, 0, "nothing ledgered");
+  assert.match((await artMerge(game, "main", s)).reason!, /only agent\/<name> branches/);
+  assert.match((await artMerge(game, "agent/nobody", s)).reason!, /has no branch agent\/nobody/);
+  // another merge holds this repo's lock (a live pid): refused after the wait, nothing moved
+  mkdirSync(path.join(s.runsDir, "locks", "art-merge-caravan.lock"), { recursive: true });
+  writeFileSync(path.join(s.runsDir, "locks", "art-merge-caravan.lock", "pid"), String(process.pid));
+  assert.match((await artMerge(game, "agent/sprite-artist", { ...s, lockWaitMs: 50 })).reason!, /another art merge on this game repo is still running/);
+  // a stale lock (its process is gone) is taken over
+  writeFileSync(path.join(s.runsDir, "locks", "art-merge-caravan.lock", "pid"), "999999");
+  assert.equal((await artMerge(game, "agent/sprite-artist", { ...s, lockWaitMs: 50 })).ok, true);
+});
+
+test("T46: the single-merger hook is not weakened: an agent's own push to main is still refused", () => {
+  const game = makeGameRepo();
+  const clone = agentClone(game, "sprite-artist");
+  pushBranch(clone, "sprite-artist", { "art/gallery/hero/1-comfy-rejected.png": null });
+  assert.throws(() => git(clone, ["push", "-q", "origin", "HEAD:main"], { ...process.env, ANYCO_AGENT: "sprite-artist" }), /only the tech-lead agent may update main/);
+});
+
+test("T46: the operator CLI merges, and refuses a process an agent started", async () => {
+  const game = makeGameRepo();
+  const clone = agentClone(game, "sprite-artist");
+  pushBranch(clone, "sprite-artist", { "assets/manifest.json": manifest(["hero", "slime"]), "assets/sprites/slime.png": null });
+  const prev = { agent: process.env.ANYCO_AGENT, ledger: process.env.STUDIO_LEDGER_FILE };
+  process.env.STUDIO_LEDGER_FILE = state().ledgerFile;
+  try {
+    process.env.ANYCO_AGENT = "sprite-artist";
+    const refused = await runMergeCommand([game, "agent/sprite-artist"]);
+    assert.equal(refused.exitCode, 2);
+    assert.match(String((refused.json as { error?: string }).error), /operator command .* started by agent "sprite-artist"/);
+    delete process.env.ANYCO_AGENT;
+    const dry = await runMergeCommand([game, "agent/sprite-artist", "--dry-run"]);
+    assert.equal(dry.exitCode, 0, JSON.stringify(dry.json));
+    const ok = await runMergeCommand([game, "agent/sprite-artist"]);
+    assert.equal(ok.exitCode, 0, JSON.stringify(ok.json));
+    assert.equal(mainSha(game), git(clone, ["rev-parse", "HEAD"]));
+  } finally {
+    for (const [k, v] of [["ANYCO_AGENT", prev.agent], ["STUDIO_LEDGER_FILE", prev.ledger]] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});

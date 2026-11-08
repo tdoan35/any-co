@@ -843,3 +843,67 @@ test("T38 safety net: a replacement whose supersede never finished is completed 
   await d.pass(); // idempotent: nothing left to do
   assert.ok(!logs.some((l) => l.startsWith("supersede")), logs.join("\n"));
 });
+
+// ---- T46: an artist's done card merges its art-only branch mechanically (no LLM) ----
+
+import { readdirSync } from "node:fs";
+import { agentClone, mainSha, makeGameRepo, manifest, pushBranch } from "../tools/art/testdata/game-repo.ts";
+
+/** A scripted sprite-artist run: in its workspace it clones the game repo, pushes `files` on agent/sprite-artist, reports `complete`. */
+async function artistRig(files: Record<string, string | null>, complete = true) {
+  const runsDir = tmpDir();
+  const board = new LocalBoard(path.join(runsDir, "board.jsonl"));
+  const spec = await loadAgent("sprite-artist", FIX);
+  const game = makeGameRepo();
+  const before = mainSha(game);
+  const provider = new FakeProvider([
+    () => {
+      const run = readdirSync(runsDir).find((d) => existsSync(path.join(runsDir, d, "workspace")))!;
+      const clone = agentClone(game, "sprite-artist", path.join(runsDir, run, "workspace", "game"));
+      pushBranch(clone, "sprite-artist", files);
+      return submitWith({ complete, summary: "pushed agent/sprite-artist" });
+    },
+  ]);
+  const logs: string[] = [];
+  const d = new Dispatcher({ board, specs: new Map([["sprite-artist", spec]]), provider: () => provider, runsDir, ledgerFile: path.join(runsDir, "ledger.jsonl"), log: (l) => logs.push(l) });
+  const { card } = await board.create({ title: "Draw the slime", assignee: "sprite-artist" });
+  await d.pass();
+  await d.wait();
+  const artComments = (await board.comments(card.id)).filter((c) => c.body.startsWith("art-merge:")).map((c) => c.body);
+  return { game, before, card: await board.get(card.id), artComments, logs };
+}
+const ART = { "assets/manifest.json": manifest(["hero", "slime"]), "assets/sprites/slime.png": null };
+
+test("T46 dispatcher: an artist's done card (complete:true) merges its art-only branch into main and says so on the card", async () => {
+  const { game, before, card, artComments } = await artistRig(ART);
+  assert.equal(card.status, "done");
+  assert.equal(artComments.length, 1);
+  assert.match(artComments[0], /^art-merge: merged agent\/sprite-artist into main mechanically \(fast-forward, 1 asset file\(s\), gate ok\) @ [0-9a-f]{10}$/);
+  assert.notEqual(mainSha(game), before);
+});
+
+test("T46 dispatcher: a refusal is a card comment for the head; main untouched, the card stays done, nothing throws", async () => {
+  const { game, before, card, artComments } = await artistRig({ ...ART, "src/main.gd": "extends Node3D\n" });
+  assert.equal(card.status, "done");
+  assert.deepEqual(artComments, ["art-merge: refused — not art-only: src/main.gd. Card a tech-lead merge for agent/sprite-artist."]);
+  assert.equal(mainSha(game), before);
+});
+
+test("T46 dispatcher: STUDIO_AUTO_ART_MERGE=off, complete:false, or a non-artist agent never merges", async () => {
+  const prev = process.env.STUDIO_AUTO_ART_MERGE;
+  process.env.STUDIO_AUTO_ART_MERGE = "off";
+  try {
+    const off = await artistRig(ART);
+    assert.deepEqual(off.artComments, []);
+    assert.equal(mainSha(off.game), off.before);
+  } finally {
+    if (prev === undefined) delete process.env.STUDIO_AUTO_ART_MERGE;
+    else process.env.STUDIO_AUTO_ART_MERGE = prev;
+  }
+  const notDone = await artistRig(ART, false);
+  assert.equal(notDone.card.status, "blocked");
+  assert.deepEqual(notDone.artComments, []);
+  assert.equal(mainSha(notDone.game), notDone.before);
+  const { board, card } = await ticketRig([submitWith({ complete: true, summary: "Built and pushed." })]);
+  assert.deepEqual((await board.comments(card.id)).filter((c) => c.body.startsWith("art-merge:")), [], "ticket-agent is not an artist");
+});

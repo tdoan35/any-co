@@ -75,7 +75,8 @@ TODO: fill in as they exist.
 - approvals queue: `npm run approvals -- list | show <id> | approve <id> [--note "..."] | deny <id> --note "..."` (decide gated tool calls; every decision ledgered)
 - game repo after the Greenlight pick: `npm run new-game -- runs/<greenlight-chair-run>` → `games/<slug>` (empty first commit)
 - gap map: `tools/gapmap/README.md` (embed → build → render)
-- art pipeline: `npm run art -- lock|snap|outline|strip|sheet|gate ...` (`tools/art/README.md`); art credits: `npm run art -- providers [--clear <provider>]`
+- art pipeline: `npm run art -- lock|snap|outline|strip|sheet|gate ...` (`tools/art/README.md`); art credits: `npm run art -- providers [--clear <provider>]`;
+  art-only merge into a game's main (no LLM; dispatcher does it on artist cards): `npm run art -- merge games/<slug> agent/<artist> [--dry-run]`
 - media capture: `npm run media -- probe <file> | edit <plan.json>`; agents capture via the `media_capture` capability (`tools/media/README.md`, needs ffmpeg)
 - eval Market Analyst: `npm run eval:market-analyst -- runs/<run_id>` (see `agents/market-analyst/eval/`)
 - eval Pitch Writer pitches: `npm run eval:pitch-writer -- runs/<run_id>`
