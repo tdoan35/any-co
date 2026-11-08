@@ -34,7 +34,7 @@ export function profileOf(spec: AgentSpec): StudioProfile {
       tone,
       summary: spec.description,
       personality: "",
-      traits: [spec.dept, `runs ${spec.runner}`, `$${spec.budget.max_task_usd}/task`],
+      traits: [deptLabel(spec.dept), `runs ${spec.runner}`, `$${spec.budget.max_task_usd}/task`],
       model: spec.model,
       contextTokens: Math.round(spec.system.length / 4),
       memory: [],
@@ -86,7 +86,7 @@ export function buildRegistry(specs: AgentSpec[], busy: ReadonlySet<string>, ses
   // The Studio Head tops the chart once a `head` spec exists. Until then headId is "" and the UI
   // shows a placeholder: no other agent stands in. A team made only of the head isn't drawn twice.
   const head = specs.find((s) => s.dept === "head");
-  // The head is not drawn twice. `test` is the harness toy, not a studio department: it stays on the Agents tab.
+  // The head is not drawn twice. `test` is the harness toy, not a studio department: one line under the chart opens it.
   const drawn = teams.filter((t) => {
     if (t.id === teamIdOf("test")) return false;
     return !(head && t.members.length === 1 && t.members[0].agentId === head.name);

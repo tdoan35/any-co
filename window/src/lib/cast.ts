@@ -34,7 +34,7 @@ export const CAST: Readonly<Record<string, SpriteAvatar>> = {
   // art / eng hands-on
   "env-ui-artist": still("env-ui-artist"),
   "sprite-artist": still("sprite-artist"),
-  "gameplay-engineer": still("gameplay-engineer"),
+  "gameplay-engineer-a": still("gameplay-engineer"),
   "level-content-designer": still("level-content-designer"),
   "audio": still("audio"),
   // marketing / ops
