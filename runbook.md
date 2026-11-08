@@ -8,12 +8,17 @@ Overnight command (two terminals, from the repo root):
 npm run studio -- --head-every-min 120 --max-parallel 2 --approval-timeout-min 30
 npm run window:live          # operator view + chat; same board, read-only cards
 ```
+Add `--head-now` for a Studio Head turn right at start (e.g. after a restart mid-event). Dry run first
+with nothing at stake: `npm run studio -- --once --head-every-min 120 --head-now` runs one dispatch pass
+plus one head turn and exits. Runs pick up the real agent names from `agents/`; the head's `board_create`
+refuses any assignee that is not one of them.
 - The dispatcher polls the board (`--poll-s`, default 10) and runs local agents on due cards: one card
   per agent, `blocked_by` for order, `--max-parallel` runs at once. Done notes carry run id and spend.
 - Studio Head cycle: every `--head-every-min` minutes one `studio-head` turn (single-flight) reads the
   board, runs, spend and ledger, then unblocks, cuts or assigns next work as cards, logging each steering
   decision. It also runs once at start when the board is empty and the ledger has a `greenlight.pick`,
-  so work begins after the pick with no human. Off without the flag.
+  so work begins after the pick with no human. Off without the flag. The kill switch also stops head turns.
+- Every run's `log_decision` writes the ledger in its runs dir (`STUDIO_LEDGER_FILE` overrides).
 - Approvals: `ask` tools in dispatched runs wait on the queue — decide with
   `npm run approvals -- list | approve <id> | deny <id> --note "..."`; unanswered requests expire after
   `--approval-timeout-min`. `--approve-all` is for tests only (ledgered as auto).

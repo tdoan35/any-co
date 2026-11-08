@@ -135,7 +135,10 @@ export async function runAgent(spec: AgentSpec, opts: RunOptions): Promise<RunRe
   })();
   const schema = outputJsonSchema(spec);
   const tools = toolDefs(spec, schema);
-  const ctx: ToolContext = { workspace, naive: opts.naive, agent: spec.name, run_id: runId, runsDir, board: opts.board };
+  // The decision ledger lives with the runs it describes (STUDIO_LEDGER_FILE still wins), so a run in a
+  // temp/other runs dir never writes the repo's ledger.
+  const ledgerFile = process.env.STUDIO_LEDGER_FILE ?? path.join(runsDir, "ledger.jsonl");
+  const ctx: ToolContext = { workspace, naive: opts.naive, agent: spec.name, run_id: runId, runsDir, ledgerFile, board: opts.board };
 
   const transcript = path.join(dir, "transcript.jsonl");
   const event = (type: string, data: Record<string, unknown>) => {

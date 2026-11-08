@@ -1,7 +1,9 @@
 // The studio loop (T4/T10): poll the board, run local agents on due cards, close the cards,
 // and (optionally) run the Studio Head on a cadence so the studio triages itself overnight.
 //   npm run studio -- [--max-parallel 2] [--poll-s 10] [--once]
-//                     [--approval-timeout-min 30] [--head-every-min 120]
+//                     [--approval-timeout-min 30] [--head-every-min 120 [--head-now]]
+// --head-now runs one Studio Head turn at startup (restart, dry run); without it the first turn
+// comes after one cadence, or at once when the board is empty and a Greenlight pick is ledgered.
 // Board backend: STUDIO_BOARD=local (default; runs/board.jsonl, override with STUDIO_BOARD_FILE)
 // or STUDIO_BOARD=naive (needs NAIVE_API_KEY and STUDIO_BOARD_REF, the Studio Head's brd_/agt_ id).
 // Approvals: dispatched runs wait on the durable queue (`npm run approvals`), expiring after
@@ -12,8 +14,8 @@ import { loadAgent, loadAllAgents } from "../runner/load.ts";
 import { naiveClient, providerFor } from "../runner/providers.ts";
 import { boardFromEnv } from "../runner/board/index.ts";
 import { studioLoop } from "../runner/dispatch.ts";
-import { decide, queueApprover, request } from "../tools/approvals/approvals.ts";
-import { read as ledgerRead } from "../tools/ledger/ledger.ts";
+import { buildApprover } from "./approver.ts";
+import { HEAD_TASK, hasGreenlightPick } from "../runner/head-cycle.ts";
 import type { Approver } from "../runner/run.ts";
 
 const { values } = parseArgs({
@@ -24,6 +26,7 @@ const { values } = parseArgs({
     "approve-all": { type: "boolean", default: false },
     "approval-timeout-min": { type: "string", default: "30" },
     "head-every-min": { type: "string" },
+    "head-now": { type: "boolean", default: false },
   },
 });
 
@@ -38,16 +41,10 @@ if (headEveryMin !== undefined && (!Number.isFinite(headEveryMin) || headEveryMi
   process.exit(2);
 }
 
-// The Studio Head's cycle task. Fixed and mechanical — mechanism only, no game/genre/design
-// content: look at the studio's own state, triage, assign next work, log the decisions.
-const HEAD_TASK = `Studio cycle. Work from your tools only, in this order:
-1. Look: board_list (board_get on every doing and blocked card), studio_runs, studio_spend, ledger_recent.
-2. Triage:
-   - A blocked card: read its note. If the next step is clear and within the studio's scope, comment it and, if the card is too big, create a smaller one blocked on nothing. If it needs a human, say so in a comment and leave it.
-   - A done card: its note is a report. Assign follow-up work only if that note or the operator asks for it.
-   - Nothing in flight and no ready work: create at most one card for the agent best placed to move the studio forward, with a clear title and a brief that says what done looks like.
-3. Log every steering decision with log_decision (topic "studio.cycle", refs = the card ids).
-Rules: a few tool calls, then stop. Never invent work nobody asked for. Never redo finished work.`;
+if (values["head-now"] && headEveryMin === undefined) {
+  console.error("--head-now needs --head-every-min (the head cycle is off without it)");
+  process.exit(2);
+}
 
 const naive = process.env.NAIVE_API_KEY ? naiveClient() : null;
 const board = boardFromEnv(naive);
@@ -59,9 +56,8 @@ if (!specs.size) throw new Error("no local agent specs found under agents/");
 // Approval gate for dispatched runs (rule 4): the durable queue by default (the operator decides
 // from `npm run approvals`; unanswered requests expire after --approval-timeout-min), --approve-all
 // decides immediately as auto for tests. Both paths ledger the decision.
-const approver: Approver = values["approve-all"]
-  ? async (req) => (decide(request(req), true, "auto (--approve-all)"), true)
-  : queueApprover({ timeoutMs: approvalTimeoutMin * 60_000 });
+// Queue mode only: dispatched runs are parallel and unattended, so a tty prompt is never right here.
+const approver: Approver = buildApprover({ approveAll: values["approve-all"] === true, approvalsMode: "queue", approvalTimeoutMs: approvalTimeoutMin * 60_000 });
 
 const head = headEveryMin !== undefined ? await loadAgent("studio-head") : undefined;
 
@@ -84,7 +80,8 @@ await studioLoop({
     ? {
         headEveryMin,
         head: { spec: head, task: HEAD_TASK, provider: (spec: typeof head) => providerFor(spec, naive) },
-        hasGreenlightPick: () => ledgerRead().some((e) => e.kind === "decision" && e.topic === "greenlight.pick"),
+        hasGreenlightPick: () => hasGreenlightPick(),
+        headNow: values["head-now"],
       }
     : {}),
   log: (l) => console.log(l),

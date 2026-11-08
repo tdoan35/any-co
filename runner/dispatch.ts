@@ -287,6 +287,8 @@ export interface StudioLoopOptions extends DispatchOptions {
   head?: HeadCycle;
   /** Auto-start trigger: true when a Greenlight pick exists in the ledger (topic greenlight.pick). */
   hasGreenlightPick?: () => boolean;
+  /** Run one head turn at startup regardless of the board (operator restart, dry run). */
+  headNow?: boolean;
   /** Test seams: a fake clock and an instant sleep make the cadence testable without waiting. */
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -317,7 +319,9 @@ export async function studioLoop(opts: StudioLoopOptions): Promise<void> {
     // Studio Head cycle — one turn in flight at a time; spend caps apply inside runAgent.
     let headRun: Promise<void> | null = null;
     let lastHeadAt = now();
+    const runsDir = opts.runsDir ?? RUNS_DIR;
     const runHead = () => {
+      if (killSwitchOn(runsDir)) return log("kill switch on: no studio-head turn");
       const h = opts.head!;
       lastHeadAt = now();
       headRun = (async () => {
@@ -342,7 +346,10 @@ export async function studioLoop(opts: StudioLoopOptions): Promise<void> {
     };
 
     const headOn = opts.head !== undefined && opts.headEveryMin !== undefined;
-    if (headOn && !(await opts.board.list()).length && opts.hasGreenlightPick?.()) {
+    if (headOn && opts.headNow) {
+      log("--head-now: one studio-head turn now");
+      runHead();
+    } else if (headOn && !(await opts.board.list()).length && opts.hasGreenlightPick?.()) {
       log("board is empty and a Greenlight pick exists: one studio-head turn now");
       runHead();
     }

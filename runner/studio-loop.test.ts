@@ -1,10 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadAgent } from "./load.ts";
+import { loadAgent, loadAllAgents } from "./load.ts";
+import { HEAD_TASK } from "./head-cycle.ts";
+import { IMPLS } from "./tools/impl.ts";
 import { FakeProvider } from "./providers.ts";
 import { Dispatcher, studioLoop, type HeadCycle } from "./dispatch.ts";
 import { LocalBoard } from "./board/local.ts";
@@ -144,4 +146,62 @@ test("approvals: on deny the gated tool never runs", async () => {
   const r = await gatedRun("deny");
   assert.equal(r.wrote, false);
   assert.equal(r.status, "done"); // the model was told no and submitted without the file
+});
+
+test("head cycle: --head-now runs one turn at startup even on a busy board; the kill switch blocks head turns", async () => {
+  const runsDir = tmpDir();
+  const board = new LocalBoard(path.join(runsDir, "board.jsonl"));
+  await board.create({ title: "already planned" });
+  const { head, turns } = await countingHead();
+  await studioLoop({ board, specs: new Map(), provider: () => new FakeProvider([]), runsDir, head, headEveryMin: 120, once: true, now: () => 0, headNow: true });
+  assert.equal(turns.started, 1);
+
+  const killed = tmpDir();
+  writeFileSync(path.join(killed, "KILL"), "");
+  const k = await countingHead();
+  await studioLoop({ board: new LocalBoard(path.join(killed, "board.jsonl")), specs: new Map(), provider: () => new FakeProvider([]), runsDir: killed, head: k.head, headEveryMin: 120, once: true, now: () => 0, headNow: true, hasGreenlightPick: () => true });
+  assert.equal(k.turns.started, 0);
+});
+
+test("end to end with the real agent specs: the Studio Head cycle assigns a card by a real agent name, and the loop dispatches it", async () => {
+  const runsDir = tmpDir();
+  const board = new LocalBoard(path.join(runsDir, "board.jsonl"));
+  const { ok } = await loadAllAgents(); // the real agents/ folder
+  const specs = new Map(ok.filter((s) => s.runner === "local").map((s) => [s.name, s]));
+  const headSpec = specs.get("studio-head")!;
+  assert.ok(headSpec && specs.has("market-analyst"));
+  const use = (id: string, name: string, input: Record<string, unknown>): ToolUseBlock => ({ type: "tool_use", id, name, input });
+  // the head looks, assigns one card, logs the decision, and stops (a scripted model; no inference)
+  const headProvider = new FakeProvider([
+    { content: [use("a", "board_list", {}), use("b", "studio_agents", {})], stop_reason: "tool_use" },
+    { content: [use("c", "board_create", { title: "Dry-run card for the loop", body: "Harness dry run: no real work.", assignee: "market-analyst", key: "assign-market-analyst-dry-run" })], stop_reason: "tool_use" },
+    { content: [use("d", "log_decision", { topic: "studio.cycle", decision: "Assigned the dry-run card", rationale: "End-to-end harness check of the head cycle." })], stop_reason: "tool_use" },
+    { content: [{ type: "text", text: "Assigned one card." }] },
+  ]);
+  let dispatchedAgent: string | null = null;
+  let ticks = 0;
+  await studioLoop({
+    board, specs, runsDir,
+    provider: (spec) => { dispatchedAgent = spec.name; return new FakeProvider([{ content: [{ type: "text", text: "(dry run)" }] }]); },
+    head: { spec: headSpec, task: HEAD_TASK, provider: () => headProvider },
+    headEveryMin: 120, headNow: true,
+    now: () => 0,
+    sleep: async () => { ticks++; await new Promise((r) => setTimeout(r, 20)); },
+    shouldStop: () => dispatchedAgent !== null || ticks > 100,
+  });
+  const cards = await board.list();
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0].assignee, "market-analyst");
+  assert.equal(dispatchedAgent, "market-analyst", "the dispatcher started the assignee's run");
+  assert.notEqual(cards[0].status, "todo");
+  const comments = await board.comments(cards[0].id);
+  assert.ok(comments.some((c) => c.body.startsWith("dispatcher: claimed")));
+  // the head's decision lands in this runs dir's ledger, not the repo's
+  const ledger = readFileSync(path.join(runsDir, "ledger.jsonl"), "utf8");
+  assert.match(ledger, /"topic":"studio.cycle"/);
+  assert.ok(headProvider.requests[0].messages.some((m) => JSON.stringify(m.content).includes("Studio cycle.")));
+  // a made-up assignee is refused with the real roster in the error
+  const bad = await IMPLS.board.board_create.run({ title: "Nobody", assignee: "game-designer-9000" }, { workspace: runsDir, naive: null, board });
+  assert.equal(bad.is_error, true);
+  assert.match(bad.content, /known agents: .*market-analyst/);
 });
