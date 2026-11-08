@@ -37,6 +37,15 @@ test("T40 env: an allowlist (PATH, HOME, locale, Godot/ffmpeg bins, ANYCO_AGENT)
   assert.equal(env.PATH, ["/usr/bin", "/bin"].join(path.delimiter), "the harness node_modules/.bin is not on PATH");
 });
 
+test("T40b env: XAUTHORITY (an Xvfb -auth cookie path) passes with DISPLAY; *_AUTH_* secrets still drop", () => {
+  const env = execEnv("qa-lead", "/tmp", { DISPLAY: ":99", XAUTHORITY: "/mnt/data/anyco-render/.Xauthority-99", GITHUB_AUTH_TOKEN: "g", AUTH: "a", XAUTH_SECRET: "s" });
+  assert.equal(env.DISPLAY, ":99");
+  assert.equal(env.XAUTHORITY, "/mnt/data/anyco-render/.Xauthority-99");
+  assert.equal(env.GITHUB_AUTH_TOKEN, undefined);
+  assert.equal(env.AUTH, undefined);
+  assert.equal(env.XAUTH_SECRET, undefined);
+});
+
 test("T40 env: a probe inside game_exec sees no secrets", async () => {
   const ws = mkdtempSync(path.join(tmpdir(), "t40-env-"));
   mkdirSync(path.join(ws, "game"));
