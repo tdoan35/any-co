@@ -29,6 +29,7 @@ import { GALLERY_DIR, nextGalleryOrdinal, recordGalleryImage } from "../../tools
 import type { ImageBlock } from "../types.ts";
 import { AGENTS_DIR } from "../load.ts";
 import type { Board } from "../board/index.ts";
+import { supersede, supersedeRefusal, supersedesBody } from "../board/supersede.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -859,7 +860,9 @@ const boardTools: Record<string, ToolImpl> = {
     description:
       "Create a work card on the studio board — this is how work is assigned. The dispatcher starts the " +
       "assignee's local run once the card has no open blocker and the assignee is idle. Use blocked_by with " +
-      "card ids to order work. Creating with the same key twice returns the existing card (no duplicate).",
+      "card ids to order work. Creating with the same key twice returns the existing card (no duplicate). " +
+      "Replacing a card (it blocked or ran out of turns)? Pass supersedes with the old card's id: every open card waiting on " +
+      "the old one waits on the new one instead, and the old card closes done \"superseded by <new id>\".",
     input: z
       .object({
         title: z.string().min(3).max(120).describe("What needs doing, as an instruction"),
@@ -867,6 +870,7 @@ const boardTools: Record<string, ToolImpl> = {
         assignee: z.string().min(2).max(41).describe("Agent spec name that should do the work (a folder under agents/)"),
         blocked_by: z.array(z.string().max(64)).max(10).optional().describe("Card ids this card waits on"),
         key: z.string().max(128).optional().describe("Idempotency key: re-creating with the same key returns the existing card"),
+        supersedes: z.string().min(3).max(64).optional().describe("Id of the blocked/todo card this one replaces: its dependents are re-pointed here and it closes done"),
       })
       .strict(),
     async run(i, ctx) {
@@ -884,9 +888,18 @@ const boardTools: Record<string, ToolImpl> = {
         const missing = i.blocked_by.filter((id: string) => !ids.has(id));
         if (missing.length) return { content: `unknown card id(s) in blocked_by: ${missing.join(", ")}`, is_error: true };
       }
+      if (i.supersedes) {
+        const old = (await ctx.board.list()).find((c) => c.id === i.supersedes);
+        const refusal = supersedeRefusal(old, i.supersedes);
+        if (refusal) return { content: `board_create refused: ${refusal}`, is_error: true };
+        if (i.blocked_by?.includes(i.supersedes)) return { content: `board_create refused: a replacement cannot wait on the card it supersedes (${i.supersedes})`, is_error: true };
+      }
       try {
-        const { card, created } = await ctx.board.create({ title: i.title, body: i.body, assignee: i.assignee, blocked_by: i.blocked_by, key: i.key });
-        return { content: JSON.stringify({ ...card, created }) };
+        const body = i.supersedes ? supersedesBody(i.supersedes, i.body) : i.body;
+        const { card, created } = await ctx.board.create({ title: i.title, body, assignee: i.assignee, blocked_by: i.blocked_by, key: i.key });
+        // re-point dependents, then close the old card; if this is interrupted, the dispatcher's next pass finishes it
+        const superseded = i.supersedes ? await supersede(ctx.board, i.supersedes, card.id) : undefined;
+        return { content: JSON.stringify({ ...card, created, ...(superseded ? { superseded } : {}) }) };
       } catch (e) {
         return { content: `board_create refused: ${e instanceof Error ? e.message : String(e)}`, is_error: true };
       }

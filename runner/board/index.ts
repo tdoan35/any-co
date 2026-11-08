@@ -2,6 +2,7 @@
 export * from "./types.ts";
 export { LocalBoard, DEFAULT_BOARD_FILE, healed } from "./local.ts";
 export { NaiveBoard } from "./naive.ts";
+export { completeSupersedes, supersede, supersedeRefusal, supersedesBody, supersedesOf, type SupersedeResult } from "./supersede.ts";
 import type { NaiveClient } from "../providers.ts";
 import path from "node:path";
 import type { Board } from "./types.ts";
