@@ -25,9 +25,13 @@ export const CounterOpensLedger: Story = {
     expect(canvas.getByRole("button", { name: /Human interventions: 23/ })).toHaveTextContent("23");
     await userEvent.click(canvas.getByRole("button", { name: /Open the list/ }));
 
-    // The sheet: newest first, every category as a filter, entries carry who and reason.
+    // The sheet opens on the agents' own decisions, with avatars, newest first.
     const sheet = await within(document.body).findByRole("dialog");
-    expect(sheet).toHaveTextContent("23 since");
+    expect(sheet).toHaveTextContent("Agent decisions · 41");
+    expect(sheet.querySelector("ol li")?.textContent).toContain("Split the blocked release check");
+
+    // The human tab: newest first, every category as a filter, entries carry who and reason.
+    await userEvent.click(within(sheet).getByRole("tab", { name: /Human interventions · 23/ }));
     expect(within(sheet).getByRole("button", { name: "steering · 8", hidden: true })).toBeInTheDocument();
     // Newest first: the 03:41Z entry leads (locale-independent).
     expect(sheet.querySelector("ol li")?.textContent).toContain("Picked option 2");
@@ -42,6 +46,7 @@ export const CategoryFilterNarrows: Story = {
     const canvas = within(canvasElement);
     await userEvent.click(canvas.getByRole("button", { name: /Open the list/ }));
     const sheet = await within(document.body).findByRole("dialog");
+    await userEvent.click(within(sheet).getByRole("tab", { name: /Human interventions/ }));
     expect(sheet.querySelectorAll("ol li")).toHaveLength(5);
 
     await userEvent.click(within(sheet).getByRole("button", { name: "steering · 8" }));

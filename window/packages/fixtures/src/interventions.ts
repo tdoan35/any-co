@@ -14,6 +14,12 @@ export interface InterventionsFixture {
   count: number;
   by_category?: Record<string, number>;
   entries: InterventionEntry[];
+  /** Calls the agents made on their own, from the same ledger. */
+  decisions?: {
+    count: number;
+    by_agent: Record<string, number>;
+    entries: Array<{ ts: string; agent: string; topic: string; decision: string; rationale: string }>;
+  };
 }
 
 export const interventionsFixture: InterventionsFixture = {
@@ -47,4 +53,25 @@ export const interventionsFixture: InterventionsFixture = {
       reason: "Scope too large for the freeze",
     },
   ],
+  decisions: {
+    count: 41,
+    by_agent: { "studio-head": 17, "tech-lead": 14, "qa-lead": 10 },
+    entries: [
+      {
+        ts: "2026-11-08T03:50:00.000Z", agent: "studio-head", topic: "studio.cycle",
+        decision: "Split the blocked release check into two smaller cards",
+        rationale: "The first run hit its budget with no verdict; the smaller cards fit inside it",
+      },
+      {
+        ts: "2026-11-08T02:10:00.000Z", agent: "tech-lead", topic: "scope.cut",
+        decision: "Deferred the settings menu to after the freeze",
+        rationale: "Two engineer-hours left; the core loop matters more",
+      },
+      {
+        ts: "2026-11-08T01:00:00.000Z", agent: "qa-lead", topic: "qa.verdict",
+        decision: "Held the build: determinism check failed on seed 7",
+        rationale: "A release candidate needs a recorded green gate",
+      },
+    ],
+  },
 };

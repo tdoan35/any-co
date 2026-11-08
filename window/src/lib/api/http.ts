@@ -40,6 +40,12 @@ const interventionsSchema = z.object({
   /** Category tallies the ledger assigns (steering, harness, account, approval, ...). */
   by_category: z.record(z.string(), z.number()).optional(),
   entries: z.array(z.object({ ts: z.string(), who: z.string(), action: z.string(), reason: z.string(), category: z.string().optional() })),
+  /** Calls the agents made on their own, from the same ledger (absent on older adapters). */
+  decisions: z.object({
+    count: z.number(),
+    by_agent: z.record(z.string(), z.number()),
+    entries: z.array(z.object({ ts: z.string(), agent: z.string(), topic: z.string(), decision: z.string(), rationale: z.string() })),
+  }).optional(),
 });
 export type Interventions = z.infer<typeof interventionsSchema>;
 const galleryEntrySchema = z.object({
