@@ -1162,7 +1162,9 @@ const artGenerate: ToolImpl = {
       prompt: z.string().min(1).max(2000),
       width: z.number().int().min(12).max(792),
       height: z.number().int().min(12).max(792),
-      out: z.string().min(1).regex(/\.png$/i, "out must end in <name>.png, e.g. game/assets/sprites/hero.png").describe("workspace-relative output PNG: game/assets/<path>/<name>.png"),
+      // .refine(), not .regex(): a JSON-schema "pattern" on this field made GLM-5.3 (Naïve proxy) emit out ".png" in ~half its
+      // calls (probe, Nov 8: 3/6 with the pattern, 0/6 without). A refinement validates the same but is not sent to the model.
+      out: z.string().min(1).refine((v) => /\.png$/i.test(v), "out must end in <name>.png, e.g. game/assets/sprites/hero.png").describe("workspace-relative output PNG: game/assets/<path>/<name>.png"),
       reference: z.string().min(1).optional().describe("workspace-relative reference/anchor PNG"),
       seed: z.number().int().nonnegative().optional(),
       frames: z.number().int().optional().describe("animation frames. retrodiffusion: frames_duration 4|6|8|10|12|16. pixellab: 4-16 even (4|6|8|10|12|14|16); animates `reference` (required, the start frame, at most 256x256, width/height = its size) with `prompt` as the action; w*h*frames <= 524288. Output: one horizontal strip (frames x width, 1 row)"),
