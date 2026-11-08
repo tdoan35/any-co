@@ -1752,8 +1752,8 @@ async function runQa(mode: QaMode, input: Record<string, unknown>, ctx: ToolCont
     };
     if (mode === "check" || mode === "ui-lint") {
       const dir = input["qa_dir"];
-      // ui-lint wants the clone root (its CLI resolves <dir>/state.json); check wants <dir>/qa.
-      cli["dir"] = typeof dir === "string" ? resolveInWorkspace(ctx.workspace, path.join("game", dir)) : mode === "ui-lint" ? clone : path.join(clone, "qa");
+      // both subcommands read files inside a qa/ dir: check via its CLI, ui-lint via <dir>/state.json.
+      cli["dir"] = typeof dir === "string" ? resolveInWorkspace(ctx.workspace, path.join("game", dir, "qa")) : path.join(clone, "qa");
     } else {
       const cmd = validateLaunchArgv(input["cmd"], clone);
       cli["cmd"] = JSON.stringify(cmd);
@@ -1777,6 +1777,7 @@ async function runQa(mode: QaMode, input: Record<string, unknown>, ctx: ToolCont
     if (input["tick_rate"] !== undefined) cli["tick-rate"] = numArg("tick_rate", input["tick_rate"]);
 
     const args = Object.entries(cli).flatMap(([k, v]) => [`--${k}`, String(v)]);
+    if (process.env.T42ARGS) console.error("ARGS", JSON.stringify(args));
     // tsx resolves from the cwd; the child runs in the clone, so import the loader by path.
     const tsxLoader = fileURLToPath(import.meta.resolve("tsx"));
     const proc = await execText(process.execPath, ["--import", `file://${tsxLoader}`, path.join(ROOT, "tools", "qa", "qa.ts"), mode, ...args], 10 * 60_000);
@@ -1870,7 +1871,7 @@ const qaUiLint: ToolImpl = {
     "UI layout lint over the ui[] of the clone's qa/state.json (release-gate layer when the game emits ui[]): overlapping visible non-overlay elements, off-screen/clipped rects, text below min px, optional grid snap. Absent ui[] => ui_lint_not_implemented (reported, not a pass). Verdict JSON {ok, exitCode, checks[], ui:{status,findings[],dumpsChecked}} — findings carry {check, ids, rects, tick, detail}.",
   input: z
     .object({
-      qa_dir: z.string().optional().describe("game-clone dir holding qa/; default the clone root"),
+      qa_dir: z.string().optional().describe("dir inside the clone holding qa/; default the clone root (its qa/)"),
       viewport: z.string().optional().describe("WxH, default 1280x720 (the --resolution backbuffer)"),
       min_text_px: z.number().min(1).max(72).optional().describe("minimum font size (default 10)"),
       grid_px: z.number().min(1).max(512).optional().describe("require x/y on this grid, e.g. 8"),

@@ -361,6 +361,11 @@ export function parseExportArgv(argv: string[]): ExportCheckOptions {
   return { ...o, gameDir: path.resolve(o.gameDir), ...(o.distDir ? { distDir: path.resolve(o.distDir) } : {}) };
 }
 
+/** Run-only knobs the wrapper may forward; meaningless for the offline ui-lint, accepted as no-ops. */
+const NOOP_FLAGS = new Set(["--step-frames", "--max-entities", "--identical-dumps", "--tick-rate", "--policy", "--seed", "--ticks"]);
+
+const SHARED_TIMEOUT_FLAGS = new Set(["--ack-timeout-ms", "--ready-timeout-ms", "--end-wait-ms"]);
+
 function parseUiLintArgv(argv: string[]): { dir: string; viewport?: [number, number]; minTextPx?: number; gridPx?: number } {
   const o: { dir: string; viewport?: [number, number]; minTextPx?: number; gridPx?: number } = { dir: "." };
   for (let i = 0; i < argv.length; i += 2) {
@@ -371,7 +376,11 @@ function parseUiLintArgv(argv: string[]): { dir: string; viewport?: [number, num
       case "--viewport": { const [w, h] = v.split("x").map(Number); if (!Number.isFinite(w) || !Number.isFinite(h)) usage(); o.viewport = [w, h]; break; }
       case "--min-text-px": o.minTextPx = num(v); break;
       case "--grid-px": o.gridPx = num(v); break;
-      default: usage();
+      default:
+        // The qa_harness wrapper passes the shared run flags to every subcommand (T42): ui-lint
+        // is offline, so the timeouts are accepted and ignored, and run-only knobs are no-ops.
+        if (SHARED_TIMEOUT_FLAGS.has(k) || NOOP_FLAGS.has(k)) break;
+        usage();
     }
   }
   return { ...o, dir: path.resolve(o.dir) };
