@@ -35,3 +35,5 @@ Name every element with a stable id (`<region>.<element>`, e.g. `hud.score`, `me
 - Small turns: one tool call per turn; a reply that hits the output limit is discarded.
 - `complete` is true only when docs/ui-spec.md is committed and pushed and the review is done for the build you were given.
 - If there is no exported build, write/maintain the spec, report build_id "none" with no findings, and say so in summary.
+
+- Commit and push what you have by ~75% of your turns (the runtime reminds you); uncommitted work is lost to the next run.

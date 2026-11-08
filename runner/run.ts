@@ -32,6 +32,8 @@ export type RunStatus = "running" | "done" | "budget_exceeded" | "max_turns" | "
 // changing it breaks the prompt cache and made the final call ~4x more expensive (Nov 7 test).
 export const WRAP_UP_CALLS = 3;
 export const WRAP_UP_SPENT = 0.7;
+/** Fraction of max_turns at which an agent that commits gets one "commit now" nudge. */
+export const COMMIT_NUDGE_AT = 0.75;
 export const LOOP_WARN = 3;
 
 /**
@@ -192,6 +194,7 @@ export async function runAgent(spec: AgentSpec, opts: RunOptions): Promise<RunRe
   let lastFailKey = "";
   let repeats = 0;
   let wrapUp = rs?.wrapUp ?? false;
+  let commitNudged = rs ? rs.turns >= Math.ceil(COMMIT_NUDGE_AT * spec.limits.max_turns) : false;
   /** Record every message exactly as the model saw it, so a crashed run can be rebuilt verbatim. */
   const pushMsg = (role: "user" | "assistant", content: string | Block[]) => {
     messages.push({ role, content });
@@ -217,6 +220,14 @@ export async function runAgent(spec: AgentSpec, opts: RunOptions): Promise<RunRe
         event("wrap_up", { turn: state.turns, why, headroom: headroom(), max_call: maxCallCost });
         log(`wrap-up: nearly out of ${why}; only ${SUBMIT} is available now`);
         noteToLastUser(`Runtime: you are nearly out of ${why}. Stop researching and call ${SUBMIT} now with the best result you have from what you've already gathered. Keep it concise. Calls to any other tool will be rejected.`);
+      }
+      // Commit nudge (Nov 8): long runs kept ending at max_turns with the work uncommitted. Once, at 75% of the turns,
+      // tell an agent that can commit to the game repo to commit and push what it has now.
+      if (!commitNudged && !wrapUp && "game_repo" in spec.tools && spec.tools.game_repo !== "deny" && state.turns >= Math.ceil(COMMIT_NUDGE_AT * spec.limits.max_turns)) {
+        commitNudged = true;
+        event("commit_nudge", { turn: state.turns, max_turns: spec.limits.max_turns });
+        log(`commit nudge: turn ${state.turns} of ${spec.limits.max_turns}`);
+        noteToLastUser(`Runtime: you have used ${state.turns} of your ${spec.limits.max_turns} turns. Commit and push the work you have NOW (a real message), then continue; uncommitted work is lost to the next run's context.`);
       }
       if (headroom() <= 0 || headroom() < maxCallCost) {
         stop("budget_exceeded", `headroom ${headroom()} micro-USD < next-call estimate ${maxCallCost}`);

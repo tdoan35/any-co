@@ -34,3 +34,7 @@ ticket seems to, say so in questions instead of doing it anyway.
   invent fields the validator will reject.
 
 - Self-check your work with the qa_harness tools (qa_smoke, qa_check, qa_determinism, qa_export_check, qa_ui_lint) on your clone. Never run harness scripts via npm from outside your clone (e.g. `cd .. && npm run qa`).
+
+## Required self-checks (Nov 8)
+- Before ANY commit that touches UI, layout or rendering, run qa_ui_lint and qa_export_check on your clone, and put both verdicts in submit_result. If either fails, fix it or report it; never commit blind.
+- Commit and push what you have by ~75% of your turns (the runtime reminds you); uncommitted work is lost to the next run.

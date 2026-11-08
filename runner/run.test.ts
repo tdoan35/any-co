@@ -312,3 +312,23 @@ test("salvage: over-long strings are trimmed; other errors are not", async () =>
   assert.equal((ok!.data as any).gaps[0].label.length <= 10, true);
   assert.equal(salvageTooLong(S, { gaps: [{ label: "a very long label" }] }), null); // missing n: not salvageable
 });
+
+test("commit nudge: an agent with game_repo gets ONE 'commit now' note at 75% of max_turns; others never do", async () => {
+  const base = await loadAgent("good-agent", FIX);
+  const run = async (withRepo: boolean) => {
+    const spec = { ...base, tools: withRepo ? { ...base.tools, game_repo: "allow" as const } : { ...base.tools }, limits: { ...base.limits, max_turns: 12 } };
+    const seen: boolean[] = [];
+    const fake = new FakeProvider([
+      ...Array.from({ length: 10 }, (_, i) => (req: any) => { seen.push(/Commit and push the work you have NOW/.test(JSON.stringify(req.messages.at(-1)))); return { content: [use("workspace_read", {}, "c" + i)], cost_micro_usd: 1 }; }),
+      { content: [use("submit_result", { answer: "ok" })], cost_micro_usd: 1 },
+    ]);
+    const r = await runAgent(spec as any, { task: "t", provider: fake, naive: null, runsDir: tmp() });
+    return { r, seen };
+  };
+  const a = await run(true);
+  assert.equal(a.r.status, "done");
+  assert.equal(a.seen.filter(Boolean).length, 1, "exactly one nudge");
+  assert.equal(a.seen.indexOf(true), 9, "the 10th request carries it: turn 9 = ceil(0.75 x 12)");
+  const b = await run(false);
+  assert.equal(b.seen.filter(Boolean).length, 0);
+});
