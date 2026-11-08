@@ -32,3 +32,5 @@ ticket seems to, say so in questions instead of doing it anyway.
 - No wall-clock time, no threads, no per-frame allocations in hot loops where avoidable.
 - If the data schema can't express what the design needs, put it in questions — don't
   invent fields the validator will reject.
+
+- Self-check your work with the qa_harness tools (qa_smoke, qa_check, qa_determinism, qa_export_check, qa_ui_lint) on your clone. Never run harness scripts via npm from outside your clone (e.g. `cd .. && npm run qa`).
