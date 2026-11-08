@@ -118,11 +118,11 @@ function attemptMerge(gameDir: string, branch: string, opts: ArtMergeOptions, at
     if (base.code !== 0) return refuse("the game repo has no main");
     const head = git(repo, ["rev-parse", `origin/${branch}`]);
     if (head.code !== 0) return refuse(`the game repo has no branch ${branch}`);
-    const changed = git(repo, ["diff", "--name-only", `origin/main...origin/${branch}`]).out.split("\n").filter(Boolean);
-    if (changed.length === 0) return refuse(`${branch} has nothing to merge (no changes against main)`);
-    const notArt = changed.filter((p) => !ART_ONLY.test(p) || ENGINE_CODE.test(p));
-    if (notArt.length) return refuse(`not art-only: ${notArt.slice(0, 20).join(", ")}${notArt.length > 20 ? ` (+${notArt.length - 20} more)` : ""}`, { changed });
-
+    // T46c: "art-only" is judged on what the merge would change ON MAIN, not on a merge-base diff. With criss-cross history
+    // (the branch merged main at clone time, main later merged the branch) there are several merge bases, and a
+    // three-dot diff from an old one counts main's own later commits as the branch's. So: merge in this temp clone first,
+    // then diff origin/main..HEAD. Nothing is pushed until every check below passes.
+    let changed: string[] = [];
     git(repo, ["checkout", "-q", "-B", "main", "origin/main"]);
     const ff = git(repo, ["merge-base", "--is-ancestor", "origin/main", `origin/${branch}`]).code === 0;
     let mode: ArtMergeResult["mode"];
@@ -140,6 +140,10 @@ function attemptMerge(gameDir: string, branch: string, opts: ArtMergeOptions, at
       mode = "merge";
     }
     const merged = git(repo, ["rev-parse", "HEAD"]).out;
+    changed = git(repo, ["diff", "--name-only", "origin/main", "HEAD"]).out.split("\n").filter(Boolean);
+    if (changed.length === 0) return refuse(`${branch} has nothing to merge (no changes against main)`);
+    const notArt = changed.filter((p) => !ART_ONLY.test(p) || ENGINE_CODE.test(p));
+    if (notArt.length) return refuse(`not art-only: ${notArt.slice(0, 20).join(", ")}${notArt.length > 20 ? ` (+${notArt.length - 20} more)` : ""}`, { changed });
 
     const report = runGate(repo);
     const gate = {

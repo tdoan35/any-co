@@ -186,3 +186,33 @@ test("T46 security: the game repo comes from the clone's origin only when it is 
   wf(cfg, orig.replace(/url = .*/, "url = ../x"));
   assert.equal(gameRepoOfClone(clone, p.dirname(game)), null);
 });
+
+test("T46c: criss-cross history (branch merged main, main merged the branch, main moved on) is judged on what the merge changes on main", async () => {
+  const game = makeGameRepo();
+  const clone = agentClone(game, "sprite-artist");
+  // B1: the branch adds a sprite
+  pushBranch(clone, "sprite-artist", { "assets/manifest.json": manifest(["hero", "slime"]), "assets/sprites/slime.png": null }, "B1 slime");
+  const b1 = git(clone, ["rev-parse", "HEAD"]);
+  // M1: main gets a non-art commit
+  writeFileSync(path.join(game, "src", "main.gd"), "extends Node2D\n");
+  git(game, ["commit", "-qam", "M1 engine"]);
+  // B2: the branch merges main at clone/refresh time
+  git(clone, ["fetch", "-q", "origin"]);
+  git(clone, ["merge", "-q", "--no-edit", "origin/main"]);
+  git(clone, ["push", "-q", "origin", "agent/sprite-artist"], { ...process.env, ANYCO_AGENT: "sprite-artist" });
+  // M2: main merges the OLD branch tip B1 (criss-cross: merge bases are now M1 and B1)
+  git(game, ["merge", "-q", "--no-ff", "--no-edit", b1]);
+  // M3: main moves on with more non-art work
+  mkdirSync(path.join(game, "audio"), { recursive: true });
+  writeFileSync(path.join(game, "audio", "gen_music.py"), "print('m')\n");
+  git(game, ["add", "-A"]);
+  git(game, ["commit", "-qm", "M3 audio tool"]);
+  // B3: the branch only adds another sprite
+  pushBranch(clone, "sprite-artist", { "assets/manifest.json": manifest(["hero", "slime", "bat"]), "assets/sprites/bat.png": null }, "B3 bat");
+  assert.ok(git(game, ["merge-base", "--all", "main", "agent/sprite-artist"]).split("\n").length >= 1);
+
+  const r = await artMerge(game, "agent/sprite-artist", state());
+  assert.equal(r.ok, true, String(r.reason));
+  assert.deepEqual([...r.changed].sort(), ["assets/manifest.json", "assets/sprites/bat.png"]);
+  assert.equal(readMain(game, "audio/gen_music.py"), "print('m')\n", "main's own work survives");
+});
