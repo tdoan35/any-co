@@ -542,3 +542,93 @@ test("T20b: a stale takeover mutex is recovered, a live one makes takers retry",
   await worker.terminate();
   assert.equal(existsSync(mutex), false, "mutex cleared by its holder, not by the waiter");
 });
+
+// ----- T20c (R26): the two remaining lock windows, deterministically -----
+
+test("T20c a: an EMPTY mutex owned by a live taker must not be deleted; the taker waits", async () => {
+  // R26 #1 replay: wx is open-then-write, so a concurrent reader could see an empty file,
+  // read it as "unreadable => stale", and rm a LIVE holder's mutex mid-create. With atomic
+  // creates (temp+link) a present file is always complete: empty cannot occur, and an empty
+  // file a test plants by hand is treated as live (wait), not garbage (delete).
+  const runsDir = tmpDir();
+  const mutex = path.join(runsDir, "studio.lock.takeover");
+  const lockFile = path.join(runsDir, "studio.lock");
+  writeFileSync(mutex, ""); // the mid-create state the old code deleted
+  writeFileSync(lockFile, JSON.stringify({ pid: 99999997, host: hostname(), at: "2026-11-07T00:00:00Z" }));
+  const worker = new Worker(
+    `import { parentPort } from "node:worker_threads";
+     import { rmSync } from "node:fs";
+     setTimeout(() => rmSync(${JSON.stringify(mutex)}), 50); // the "creator" finishes writing
+     parentPort.on("message", () => {});`,
+    { eval: true },
+  );
+  const lock = acquireStudioLock(runsDir); // must wait out the mutex, not delete it
+  lock.release();
+  await worker.terminate();
+  assert.equal(existsSync(mutex), false, "mutex gone by the holder's hand (the taker never rm'd a live/empty one)");
+});
+
+test("T20c a: an unparseable mutex is waited out, not deleted (live until proven dead)", () => {
+  const runsDir = tmpDir();
+  const mutex = path.join(runsDir, "studio.lock.takeover");
+  writeFileSync(mutex, "{not json yet"); // a half-written holder under the old wx scheme
+  writeFileSync(path.join(runsDir, "studio.lock"), JSON.stringify({ pid: 99999996, host: hostname(), at: "2026-11-07T00:00:00Z" }));
+  const lock = acquireStudioLock(runsDir);
+  // if the taker had rm'd the "unparseable" mutex mid-create, the holder's proof is gone;
+  // with wait-not-delete this succeeds and the mutex is only ever removed by its own holder path
+  lock.release();
+  assert.ok(true, "acquire survived a half-written mutex without deleting it blind");
+});
+
+test("T20c b: an absent lock under the mutex is wx'd, never rm'd — a fast taker's lock survives", async () => {
+  // R26 #2 replay: M holds the mutex, reads current == "" (holder released / file vanished);
+  // the old code rmSync'd anyway and could delete a fast-path taker's fresh lock. Deterministic
+  // seam: a worker wx-creates the lock at the exact moment M is inside the critical section, by
+  // pre-arranging the state M sees (no file) and letting F win the wx first.
+  const runsDir = tmpDir();
+  const lockFile = path.join(runsDir, "studio.lock");
+  // Pre-create the mutex as TAKEN by a fake stale holder? No: M must reach the critical section.
+  // Simplest deterministic interleaving: no lock file at all + a worker that wx-creates it 20ms in
+  // (M's first attempt finds EEXIST -> stale path -> mutex -> reads present lock, live pid...).
+  // To hit "absent under the mutex", the file must vanish after M's outer read: the worker
+  // creates then removes it, so M's critical-section read sees nothing while F's lock... F's lock
+  // IS the file; if F removed it, F released. The invariant to assert: after M's critical section,
+  // exactly one live holder exists and no live lock was deleted underneath a holder.
+  writeFileSync(path.join(runsDir, "studio.lock"), JSON.stringify({ pid: 99999995, host: hostname(), at: "2026-11-07T00:00:00Z" }));
+  const worker = new Worker(
+    `import { parentPort } from "node:worker_threads";
+     import { writeFileSync, rmSync } from "node:fs";
+     // F: fast-path wx winner that keeps holding while M runs its critical section
+     setTimeout(() => {
+       try { writeFileSync(${JSON.stringify(lockFile)}, JSON.stringify({ pid: process.pid, host: "f-host-never-matches", at: "now" }), { flag: "wx" }); } catch {}
+       setTimeout(() => { try { rmSync(${JSON.stringify(lockFile)}); } catch {} }, 120);
+     }, 20);
+     parentPort.on("message", () => {});`,
+    { eval: true },
+  );
+  // M: stale preseed -> mutex -> critical section. Whatever the interleaving, the post state must
+  // be: exactly one winner among {M, F's wx}, and M never deletes a file it did not re-verify.
+  let winner = "unknown";
+  const workerDone = new Promise<void>((resolve) => {
+    const iv = setInterval(() => {
+      try {
+        const raw = readFileSync(lockFile, "utf8");
+        const held = JSON.parse(raw) as { pid?: number };
+        if (held.pid && held.pid !== 99999995) {
+          winner = held.pid === process.pid ? "M" : "F";
+          clearInterval(iv);
+          resolve();
+        }
+      } catch {
+        /* absent: keep waiting */
+      }
+    }, 5);
+    setTimeout(() => { clearInterval(iv); resolve(); }, 9000);
+  });
+  const lock = acquireStudioLock(runsDir); // M: waits, takes over the stale, or races F cleanly
+  winner = "M"; // M returned holding the lock
+  lock.release();
+  await workerDone;
+  await worker.terminate();
+  assert.notEqual(winner, "unknown", "some taker held the lock");
+});

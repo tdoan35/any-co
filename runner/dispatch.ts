@@ -2,7 +2,7 @@
 // twin of Naïve's board clock. Same rules the hosted clock applies, so the board reads the same
 // on both backends: one doing card per assignee, blocked cards wait, done needs a note.
 // scripts/studio-loop.ts is the CLI (`npm run studio`); the logic lives here so tests drive it.
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import path from "node:path";
 import { RUNS_DIR, stamp, runAgent, denyAll, type Approver, type RunResult } from "./run.ts";
@@ -58,16 +58,52 @@ export interface StudioLock {
  *  whose holder is dead is taken over; an unreadable one is stale. */
 export const TAKEOVER_MUTEX = "studio.lock.takeover";
 
-/** A stale takeover mutex (dead holder) is removable; a live one makes us wait via retries. */
-function staleMutex(mutex: string): boolean {
+/**
+ * Create `path` with exactly `content`, visible atomically: write to a unique temp then
+ * create-exclusive link. A wx write is two syscalls (open O_CREAT|O_EXCL, write), so a concurrent
+ * reader can see an EMPTY file mid-create and misread it as stale garbage (R26 #1). With link,
+ * a file at the path is always complete.
+ * Returns false if the path exists (someone else won).
+ */
+function createAtomically(path: string, content: string): boolean {
+  const tmp = `${path}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   try {
-    const held = JSON.parse(readFileSync(mutex, "utf8")) as { pid?: unknown; host?: unknown };
+    writeFileSync(tmp, content);
+    try {
+      linkSync(tmp, path);
+      return true;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw e;
+    }
+  } finally {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      /* tmp already gone */
+    }
+  }
+}
+
+/** A stale takeover mutex (dead holder) is removable; anything ambiguous means "live, retry":
+ *  with atomic creates a present file is always complete, and an unreadable/vanished one is
+ *  transient — deleting it could kill a holder mid-create (R26 #1). */
+function staleMutex(mutex: string): boolean {
+  let raw: string;
+  try {
+    raw = readFileSync(mutex, "utf8");
+  } catch {
+    return false; // vanished between create and read: a live taker owns it; wait, don't delete
+  }
+  if (raw.trim() === "") return false; // empty cannot exist with atomic creates; treat as live
+  try {
+    const held = JSON.parse(raw) as { pid?: unknown; host?: unknown };
     const pid = typeof held.pid === "number" ? held.pid : NaN;
     const host = typeof held.host === "string" ? held.host : "";
     if (host && host !== hostname()) return false;
     return !(Number.isFinite(pid) && pidAlive(pid));
   } catch {
-    return true; // unreadable/empty: stale
+    return true; // unparseable: no coherent holder (holders always write parseable JSON) — replaceable
   }
 }
 
@@ -87,58 +123,81 @@ export function acquireStudioLock(runsDir: string): StudioLock {
   // create-exclusive (N4): two loops started at the same instant cannot both pass a check-then-write
   const deadline = Date.now() + 10_000;
   for (let attempt = 0; attempt < 100 && Date.now() < deadline; attempt++) {
-    try {
-      writeFileSync(file, mine, { flag: "wx" });
+    if (createAtomically(file, mine)) {
       return { file, release: () => { try { rmSync(file); } catch { /* already gone */ } } };
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
     }
     mutexWait(); // bounded pause between attempts (sync park, no busy spin)
 
-    // Read the holder under no lock first: a live holder refuses us; unreadable/dead/pidless is stale.
+    // Read the holder under no lock first: a live holder refuses us; a provably dead one is stale.
+    // With atomic creates the file, when present, is always complete (R26 #1).
     let staleText = "";
+    let present = false;
     let stale = false;
     try {
       staleText = readFileSync(file, "utf8");
+      present = true;
       const held = JSON.parse(staleText) as { pid?: unknown; host?: unknown };
       const pid = typeof held.pid === "number" ? held.pid : NaN;
       const host = typeof held.host === "string" ? held.host : "";
       const live = host && host !== hostname() ? true : Number.isFinite(pid) && pidAlive(pid);
       stale = !live;
     } catch {
-      stale = true; // vanished/unreadable between wx and read: treat as stale gap
+      stale = false; // vanished mid-read: treat as live-until-proven; a fast retry re-reads
     }
     if (!stale) throw new Error(`another studio loop holds ${file}; refusing to start. If it is dead, remove the file.`);
-    // Stale takeover under a mutex (R24): without it, B can rename A's just-written live lock
-    // aside while C wx-creates in the gap, and B's restore drops A's lock -> two winners.
+    // Stale takeover under a mutex (R24): without it, B can delete A's just-written live lock
+    // while C wx-creates in the gap, and two winners appear.
     let held_mutex = false;
     try {
-      writeFileSync(mutex, mine, { flag: "wx" });
-      held_mutex = true;
-    } catch {
-      if (staleMutex(mutex)) {
-        rmSync(mutex); // dead mutex holder: recover it and retry the wx next round
-      } else {
-        mutexWait(); // live takeover in progress: park 25ms (sync), don't burn attempts
+      if (!createAtomically(mutex, mine)) {
+        if (staleMutex(mutex)) {
+          rmSync(mutex); // dead mutex holder: recover it and retry the wx next round
+        } else {
+          mutexWait(); // live takeover in progress: park 25ms (sync), don't burn attempts
+        }
+        continue;
       }
-      continue;
+      held_mutex = true;
+    } catch (e) {
+      rmSync(mutex, { force: true }); // our own half-created mutex; never a live holder's
+      throw e;
     }
     try {
-      // Under the mutex, re-read and re-verify; only then remove the stale lock. No rename: the
-      // unlink + wx pair is atomic wrt other takers because they hold the mutex to touch it —
-      // and takers that only wx (fast path) can't create in our gap: we wx immediately after
-      // the unlink inside the same critical section.
+      // Under the mutex, re-read and re-verify; only then remove the lock — and only a NON-EMPTY
+      // one whose content we re-verified dead (R26 #2): an absent/empty lock must not be rm'd,
+      // a fast-path taker's wx in that gap would lose its lock to our cleanup.
       let current = "";
-      try { current = readFileSync(file, "utf8"); } catch { current = ""; }
-      if (current && current !== staleText) {
+      let present = false;
+      try {
+        current = readFileSync(file, "utf8");
+        present = true;
+      } catch {
+        present = false; // vanished: nothing to remove; the mutex still guards our wx
+      }
+      if (present && current !== staleText) {
         const held = JSON.parse(current) as { pid?: unknown };
         const pid = typeof held.pid === "number" ? held.pid : NaN;
         if (Number.isFinite(pid) && pidAlive(pid)) continue; // a live taker won: start over
       }
-      try { rmSync(file); } catch { /* already gone */ }
-      try { writeFileSync(file, mine, { flag: "wx" }); return { file, release: () => { try { rmSync(file); } catch { /* already gone */ } } }; } catch { /* someone raced; retry */ }
+      if (present) {
+        try {
+          rmSync(file);
+        } catch {
+          /* already gone */
+        }
+      }
+      if (createAtomically(file, mine)) {
+        return { file, release: () => { try { rmSync(file); } catch { /* already gone */ } } };
+      }
+      // someone raced the wx: loop and re-read
     } finally {
-      if (held_mutex) { try { rmSync(mutex); } catch { /* already gone */ } }
+      if (held_mutex) {
+        try {
+          rmSync(mutex);
+        } catch {
+          /* already gone */
+        }
+      }
     }
   }
   throw new Error(`could not take ${file}: another studio loop is starting at the same time`);
