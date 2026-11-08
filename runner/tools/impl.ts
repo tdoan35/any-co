@@ -1444,8 +1444,11 @@ export function validateLaunchArgv(argv: unknown, clone: string): string[] {
   if (bin === "godot") return argv;
   const resolved = path.resolve(clone, bin);
   const inside = resolved === clone || resolved.startsWith(clone + path.sep);
-  if (!inside) throw new Error(`launch binary must be "godot" or a path inside the clone, got ${bin}`);
-  if (!existsSync(resolved)) throw new Error(`launch binary not found: ${bin}`);
+  // An absolute godot binary is the engine, wherever the operator put it (build.sh GODOT_BIN).
+  const engineBin = path.basename(bin) === "godot" && path.isAbsolute(bin);
+  if (!inside && !engineBin) throw new Error(`launch binary must be "godot", an absolute godot path, or a path inside the clone, got ${bin}`);
+  if (!inside && !existsSync(bin)) throw new Error(`launch binary not found: ${bin}`);
+  if (inside && !existsSync(resolved)) throw new Error(`launch binary not found: ${bin}`);
   return argv;
 }
 
