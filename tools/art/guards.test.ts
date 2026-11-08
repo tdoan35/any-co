@@ -22,7 +22,7 @@ const PALETTE = ["#1a1c2c", "#f4f4f4"];
 interface Fakes { base: string; requests: () => number; plPosts: () => number; close: () => Promise<void> }
 
 /** Fake PixelLab (USD credits, so no generations floor) + fake ComfyUI on one port; counts every request. */
-async function fakes(): Promise<Fakes> {
+async function fakes(opts: { generations?: number } = {}): Promise<Fakes> {
   let requests = 0;
   let plPosts = 0;
   const send = (res: ServerResponse, status: number, body: unknown) => {
@@ -35,7 +35,8 @@ async function fakes(): Promise<Fakes> {
     req.resume();
     req.on("end", () => {
       const url = req.url ?? "";
-      if (url === "/v2/balance") return send(res, 200, { credits: { type: "usd", usd: 5 } });
+      if (url === "/v2/balance")
+        return send(res, 200, opts.generations === undefined ? { credits: { type: "usd", usd: 5 } } : { subscription: { type: "generations", status: "active", generations: opts.generations, total: 2000 } });
       if (req.method === "POST" && url === "/v2/generate-image-v2") {
         plPosts++;
         return send(res, 202, { background_job_id: "j1", usage: { type: "usd", usd: 0.02 } });
@@ -70,14 +71,14 @@ function ctxFor(entries: Array<Record<string, unknown>> = [], manifest = true): 
   return { workspace: ws, naive: null, runsDir, ledgerFile: path.join(runsDir, "ledger.jsonl"), run_id: "t39", agent: "art-director" };
 }
 
-async function withLab<T>(fn: (f: Fakes) => Promise<T>): Promise<T> {
-  const f = await fakes();
+async function withLab<T>(fn: (f: Fakes) => Promise<T>, opts: { generations?: number; env?: Record<string, string> } = {}): Promise<T> {
+  const f = await fakes(opts);
   const prev = { ...process.env };
-  Object.assign(process.env, { PIXELLAB_API_KEY: "pl-t39", PIXELLAB_BASE_URL: f.base, COMFY_BASE_URL: f.base, PIXELLAB_MIN_REMAINING: "" });
+  Object.assign(process.env, { PIXELLAB_API_KEY: "pl-t39", PIXELLAB_BASE_URL: f.base, COMFY_BASE_URL: f.base, PIXELLAB_MIN_REMAINING: "", ART_DEFAULT_PROVIDER: "", ...opts.env });
   try {
     return await fn(f);
   } finally {
-    for (const k of ["PIXELLAB_API_KEY", "PIXELLAB_BASE_URL", "COMFY_BASE_URL", "PIXELLAB_MIN_REMAINING"]) {
+    for (const k of ["PIXELLAB_API_KEY", "PIXELLAB_BASE_URL", "COMFY_BASE_URL", "PIXELLAB_MIN_REMAINING", "ART_DEFAULT_PROVIDER"]) {
       if (prev[k] === undefined) delete process.env[k];
       else process.env[k] = prev[k];
     }
@@ -238,5 +239,144 @@ test("T39d: an approved art_redo (or the operator CLI) gives exactly one fresh a
       if (prev.ledger === undefined) delete process.env.STUDIO_LEDGER_FILE;
       else process.env.STUDIO_LEDGER_FILE = prev.ledger;
     }
+  });
+});
+
+// ---- T39b: ART_DEFAULT_PROVIDER, an explicit per-studio default for calls that name no provider ----
+
+const ANCHOR = "game/assets/anchors/hero.png";
+const genNoProvider = (ctx: ToolContext, input: Record<string, unknown> = {}) =>
+  IMPLS.art_generate.art_generate.run({ prompt: "x", width: 32, height: 32, out: "game/assets/sprites/hero.png", reference: ANCHOR, ...input }, ctx);
+
+test("T39b: ART_DEFAULT_PROVIDER=comfy + a reference → comfy, even when pixellab won the anchor's bake-off", async () => {
+  await withLab(async (f) => {
+    const ctx = ctxFor();
+    recordAnchorWinner(statePaths(ctx.runsDir).gallery, ANCHOR, "pixellab", "r", "bake-off");
+    const r = await genNoProvider(ctx);
+    assert.equal(r.is_error, undefined, r.content);
+    assert.equal(JSON.parse(r.content).provider, "comfy");
+    assert.equal(f.plPosts(), 0);
+  }, { env: { ART_DEFAULT_PROVIDER: "comfy" } });
+});
+
+test("T39b: default comfy with the lab down makes NO pixellab request and says to name pixellab explicitly", async () => {
+  const closed = await fakes();
+  const dead = closed.base;
+  await closed.close();
+  await withLab(async (f) => {
+    const ctx = ctxFor();
+    recordAnchorWinner(statePaths(ctx.runsDir).gallery, ANCHOR, "pixellab", "r", "bake-off");
+    const r = await genNoProvider(ctx);
+    assert.equal(r.is_error, undefined, r.content);
+    const out = JSON.parse(r.content);
+    assert.equal(out.fallback, "procedural");
+    assert.equal(out.default_provider, "comfy");
+    assert.deepEqual(out.unavailable, ["comfy"]);
+    assert.match(out.next, /^comfy default: lab unreachable; pass provider pixellab explicitly if a human approved paid generation/);
+    assert.equal(f.requests(), 0, "PixelLab saw nothing: no balance read, no submit");
+    assert.deepEqual(readGallery(statePaths(ctx.runsDir).gallery).generations, {}, "the slot was given back");
+  }, { env: { ART_DEFAULT_PROVIDER: "comfy", COMFY_BASE_URL: dead } });
+});
+
+test("T39b: default comfy without a reference is refused before any request; a typo in the env is an error", async () => {
+  await withLab(async (f) => {
+    const r = await genNoProvider(ctxFor(), { reference: undefined });
+    assert.equal(r.is_error, true);
+    assert.match(r.content, /ART_DEFAULT_PROVIDER=comfy generates from a reference image .* pass reference/);
+    assert.equal(f.requests(), 0);
+  }, { env: { ART_DEFAULT_PROVIDER: "comfy" } });
+  await withLab(async (f) => {
+    const r = await genNoProvider(ctxFor());
+    assert.equal(r.is_error, true);
+    assert.match(r.content, /ART_DEFAULT_PROVIDER must be one of comfy, pixellab, retrodiffusion/);
+    assert.equal(f.requests(), 0);
+  }, { env: { ART_DEFAULT_PROVIDER: "comfyui" } });
+});
+
+test("T39b: unset → unchanged (the anchor's bake-off winner); a paid default never overrides a winner", async () => {
+  await withLab(async (f) => {
+    const ctx = ctxFor();
+    recordAnchorWinner(statePaths(ctx.runsDir).gallery, ANCHOR, "pixellab", "r", "bake-off");
+    assert.equal(JSON.parse((await genNoProvider(ctx)).content).provider, "pixellab");
+    assert.equal(f.plPosts(), 1);
+    const noWinner = await genNoProvider(ctxFor(), { reference: undefined, out: "game/assets/sprites/x.png" });
+    assert.match(noWinner.content, /provider is required/, "unset and no winner: still required");
+  });
+  await withLab(async () => {
+    const ctx = ctxFor();
+    recordAnchorWinner(statePaths(ctx.runsDir).gallery, ANCHOR, "pixellab", "r", "bake-off");
+    assert.equal(JSON.parse((await genNoProvider(ctx)).content).provider, "pixellab", "default retrodiffusion does not beat the pixellab winner");
+  }, { env: { ART_DEFAULT_PROVIDER: "retrodiffusion" } });
+});
+
+test("T39b: explicit pixellab with default comfy uses pixellab, and T35's floor still applies", async () => {
+  await withLab(async (f) => {
+    const out = JSON.parse((await genNoProvider(ctxFor(), { provider: "pixellab" })).content);
+    assert.equal(out.provider, "pixellab");
+    assert.equal(f.plPosts(), 1);
+  }, { generations: 5000, env: { ART_DEFAULT_PROVIDER: "comfy", PIXELLAB_MIN_REMAINING: "1000" } });
+  await withLab(async (f) => {
+    const out = JSON.parse((await genNoProvider(ctxFor(), { provider: "pixellab" })).content);
+    assert.equal(out.pixellab_floor.reason, "at_floor");
+    assert.equal(out.provider, "comfy", "the floor moved it to comfy");
+    assert.equal(f.plPosts(), 0);
+  }, { generations: 900, env: { ART_DEFAULT_PROVIDER: "comfy", PIXELLAB_MIN_REMAINING: "1000" } });
+});
+
+test("T39b/R45: the operator-only CLI commands refuse a process an agent started (ANYCO_AGENT, set by game_exec)", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "guards-agentcli-"));
+  const prev = { agent: process.env.ANYCO_AGENT, gallery: process.env.ART_GALLERY_FILE, ledger: process.env.STUDIO_LEDGER_FILE, providers: process.env.ART_PROVIDERS_FILE };
+  process.env.ART_GALLERY_FILE = path.join(dir, "art-gallery.json");
+  process.env.STUDIO_LEDGER_FILE = path.join(dir, "ledger.jsonl");
+  process.env.ART_PROVIDERS_FILE = path.join(dir, "art-providers.json");
+  try {
+    process.env.ANYCO_AGENT = "art-director";
+    const redo = runCommand(["redo", "game/assets/anchors/reaper.png", "--why", "I would like more tries please"]);
+    assert.equal(redo.exitCode, 2);
+    assert.match(String(redo.json.error), /operator command .* started by agent "art-director"/);
+    assert.deepEqual(readGallery(process.env.ART_GALLERY_FILE).redos, {}, "no self-granted redo");
+    assert.equal(readLedger(process.env.STUDIO_LEDGER_FILE).length, 0, "no fake operator intervention");
+    markExhausted(process.env.ART_PROVIDERS_FILE, "pixellab", { reason: "402" });
+    assert.equal(runCommand(["providers", "--clear", "pixellab"]).exitCode, 2);
+    assert.equal(runCommand(["providers"]).exitCode, 0, "the read-only listing still works for agents");
+    delete process.env.ANYCO_AGENT;
+    assert.equal(runCommand(["redo", "game/assets/anchors/reaper.png", "--why", "Ty signed off the reaper redo"]).exitCode, 0, "the operator's own shell works");
+  } finally {
+    for (const [k, v] of [["ANYCO_AGENT", prev.agent], ["ART_GALLERY_FILE", prev.gallery], ["STUDIO_LEDGER_FILE", prev.ledger], ["ART_PROVIDERS_FILE", prev.providers]] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});
+
+test("T39b-fix (R46): with the studio default comfy, an EXPLICIT comfy (lab down) or RD (exhausted) never falls into pixellab", async () => {
+  const closed = await fakes();
+  const dead = closed.base;
+  await closed.close();
+  await withLab(async (f) => {
+    const ctx = ctxFor();
+    const r = await genNoProvider(ctx, { provider: "comfy" });
+    const out = JSON.parse(r.content);
+    assert.equal(out.fallback, "procedural", r.content);
+    assert.match(out.next, /^comfy default: lab unreachable; pass provider pixellab explicitly/);
+    assert.match(out.notes.join(" "), /no fallback into a paid provider this call did not name \(asked for comfy\)/);
+    assert.equal(f.requests(), 0, "explicit comfy + lab down: zero PixelLab requests");
+  }, { env: { ART_DEFAULT_PROVIDER: "comfy", COMFY_BASE_URL: dead } });
+  await withLab(async (f) => {
+    const ctx = ctxFor();
+    markExhausted(statePaths(ctx.runsDir).providers, "retrodiffusion", { reason: "test" });
+    const out = JSON.parse((await genNoProvider(ctx, { provider: "retrodiffusion" })).content);
+    assert.equal(out.fallback, "procedural");
+    assert.match(out.notes.join(" "), /asked for retrodiffusion/);
+    assert.equal(f.requests(), 0, "explicit RD exhausted: zero PixelLab requests");
+  }, { env: { ART_DEFAULT_PROVIDER: "comfy" } });
+  // unset (studio 1): unchanged, RD exhausted still falls back to pixellab once
+  await withLab(async (f) => {
+    const ctx = ctxFor();
+    markExhausted(statePaths(ctx.runsDir).providers, "retrodiffusion", { reason: "test" });
+    const out = JSON.parse((await genNoProvider(ctx, { provider: "retrodiffusion" })).content);
+    assert.equal(out.provider, "pixellab");
+    assert.equal(out.fallback_from, "retrodiffusion");
+    assert.equal(f.plPosts(), 1);
   });
 });
