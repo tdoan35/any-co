@@ -184,12 +184,16 @@ async function writeImages(workspace: string, out: string, images: Uint8Array[][
 export async function generate(input: GenerateInput, opts: GenerateOptions): Promise<GenerateResult> {
   if (!/\.png$/i.test(input.out)) throw new Error(`out must end in .png, got "${input.out}"`);
   resolveInside(opts.workspace, input.out); // refuse path escapes before spending money
+  // Default deadline is configurable: PixelLab Tier 1 runs one job at a time and portraits took over 180 s on Nov 7;
+  // a job that times out still runs (and counts) on the provider side, so a short deadline wastes generations.
+  const envTimeout = Number((opts.env ?? process.env).ART_GENERATE_TIMEOUT_MS);
+  const defaultTimeout = Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : 180_000;
   if (opts.pollIntervalMs === undefined || opts.timeoutMs === undefined) {
-    opts = { pollIntervalMs: 2000, timeoutMs: 180_000, ...opts };
+    opts = { pollIntervalMs: 2000, timeoutMs: defaultTimeout, ...opts };
   }
   const env = opts.env ?? process.env;
   const fetchImpl = opts.fetchImpl ?? fetch;
-  const deadline = Date.now() + (opts.timeoutMs ?? 180_000);
+  const deadline = Date.now() + (opts.timeoutMs ?? defaultTimeout);
 
   const sleep = (ms: number) => {
     const { promise, resolve } = Promise.withResolvers<void>();
