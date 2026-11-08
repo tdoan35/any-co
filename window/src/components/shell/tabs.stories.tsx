@@ -80,7 +80,7 @@ export const MultipleTabsNavigate: Story = {
 
     await user.click(canvas.getByRole("button", { name: "New tab" }));
     // Two tabs now: Weave (carried over) and the new one, which is active on "/".
-    const weave = canvas.getByRole("tab", { name: "Weave" });
+    const weave = canvas.getByRole("tab", { name: "Studio" });
     const fresh = canvas.getByRole("tab", { name: "New thread" });
     expect(weave.querySelector(".lucide-spool")).not.toBeNull();
     expect(fresh.querySelector(".lucide-square-pen")).not.toBeNull();

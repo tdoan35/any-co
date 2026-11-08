@@ -1,5 +1,5 @@
-// Studio screen stories: one Teams chart. ?team= opens a department, ?agent= opens a
-// person. Legacy ?view= drops that param and shows the chart.
+// Studio screen stories: Teams chart and the Flow tab. ?team= opens a department,
+// ?agent= opens a person. ?view=flow is the work order. Any other ?view= lands on Teams.
 //
 // State → story inventory:
 //   /agents                              → AgentsViewIsDefault
@@ -45,15 +45,16 @@ const routes = [{ path: "/agents", element: <StudioScreen /> }];
 const panelWithPattern = (root: HTMLElement, fragment: string) =>
   Array.from(root.querySelectorAll("div")).find((d) => d.className.includes(fragment));
 
-/** /agents is the chart: Studio header, no view switch, both departments. */
+/** /agents is the chart: Studio header, Teams selected, both departments. */
 export const AgentsViewIsDefault: Story = {
   name: "Teams chart is the studio page",
   parameters: { router: { routes, initialEntries: ["/agents"] } },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
 
-    expect(canvas.getByText("Studio")).toBeInTheDocument();
-    expect(canvas.queryByRole("tab", { name: "Agents" })).toBeNull();
+    expect(canvas.getByText("Agents")).toBeInTheDocument();
+    expect(canvas.getByRole("tab", { name: "Teams" })).toHaveAttribute("aria-selected", "true");
+    expect(canvas.getByRole("tab", { name: "Flow" })).toHaveAttribute("aria-selected", "false");
     expect(canvas.queryByRole("button", { name: /Create / })).toBeNull();
 
     await waitFor(() => expect(canvas.getByRole("heading", { name: /Teams/ })).toBeInTheDocument());
@@ -110,10 +111,34 @@ export const TeamsViewDeepLink: Story = {
     const canvas = within(canvasElement);
 
     await waitFor(() => expect(storyRouter()!.state.location.search).toBe(""));
-    expect(canvas.queryByRole("tab", { name: "Teams" })).toBeNull();
+    expect(canvas.getByRole("tab", { name: "Teams" })).toHaveAttribute("aria-selected", "true");
     await waitFor(() => expect(canvas.getByRole("heading", { name: /Teams/ })).toBeInTheDocument());
     expect(canvas.getByRole("button", { name: /Research Team/ })).toBeInTheDocument();
     expect(canvas.getByRole("button", { name: /Product Team/ })).toBeInTheDocument();
+  },
+};
+
+/** Flow shows the work order. A portrait opens that person and stays on the Flow tab. */
+export const FlowTab: Story = {
+  name: "Flow tab shows the work order",
+  parameters: { router: { routes, initialEntries: ["/agents"] } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const user = userEvent.setup();
+    const router = storyRouter();
+    if (!router) throw new Error("studio screen play: no active story router");
+
+    await user.click(canvas.getByRole("tab", { name: "Flow" }));
+    await waitFor(() => expect(router.state.location.search).toBe("?view=flow"));
+    expect(canvas.getByRole("heading", { name: "Who picks the game" })).toBeInTheDocument();
+    expect(canvas.getByRole("heading", { name: "Who builds" })).toBeInTheDocument();
+    expect(canvas.getByRole("heading", { name: "Who ships" })).toBeInTheDocument();
+    expect(canvas.getByRole("button", { name: "Market Analyst" })).toBeInTheDocument();
+    expect(canvas.getByText("Approve the itch upload")).toBeInTheDocument();
+    expect(canvas.getByText("Sign off the art")).toBeInTheDocument();
+
+    await user.click(canvas.getByRole("button", { name: "Market Analyst" }));
+    await waitFor(() => expect(router.state.location.search).toBe("?view=flow&agent=market-analyst"));
   },
 };
 
