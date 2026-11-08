@@ -16,7 +16,7 @@ import { studioStatusTools } from "./studio-status.ts";
 import { decodePng, encodePng, type RgbaImage } from "../../tools/art/png.ts";
 import { addOutline, contactSheet, lockPalette, snapToGrid, splitStrip, upscaleNearest } from "../../tools/art/ops.ts";
 import { runGate } from "../../tools/art/gate.ts";
-import { ChargedFailure, DEFAULT_CANDIDATES, MAX_CANDIDATES, ProviderExhausted, balance as providerBalance, generate, type Balance, isAnimation, quote as providerQuote, type GenerateResult, type ProviderName } from "../../tools/art/generate.ts";
+import { ChargedFailure, DEFAULT_CANDIDATES, MAX_CANDIDATES, ProviderExhausted, ProviderUnavailable, balance as providerBalance, generate, type Balance, isAnimation, quote as providerQuote, type GenerateResult, type ProviderName } from "../../tools/art/generate.ts";
 import {
   LOW_GENERATIONS, MAX_REGENERATIONS, PROVIDERS, anchorWinner, countGeneration, generationCount, isExhausted, markExhausted, other, readCredits, readGallery,
   readProviders, recordAnchorWinner, recordCredit, statePaths,
@@ -986,7 +986,7 @@ async function applyArtPostprocess(
   return steps;
 }
 
-const providerEnum = z.enum(["pixellab", "retrodiffusion"]);
+const providerEnum = z.enum(["pixellab", "retrodiffusion", "comfy"]);
 
 /** Log a reported balance; write ONE ledger note per low threshold per provider per day. */
 function noteCredits(
@@ -1051,10 +1051,13 @@ const artGenerate: ToolImpl = {
     `Each asset gets one generation plus ${MAX_REGENERATIONS} regenerations. Animation (frames or rd_animation/rd_advanced_animation styles) needs justify. Quote batches with art_quote first. ` +
     "A PixelLab job that timed out or lost its poll keeps running and is billed: the error names its job_id; never regenerate, call again with the same inputs plus resume_job_id to collect it for free. " +
     `max_candidates (default ${DEFAULT_CANDIDATES}, max ${MAX_CANDIDATES}) caps the images kept per call to keep the gallery reviewable; it does not save generations. ` +
-    "PixelLab results report generations_used (subscription balance before vs after).",
+    "PixelLab results report generations_used (subscription balance before vs after). " +
+    "provider comfy = the local lab ComfyUI (frozen IP-Adapter recipe on `reference`, seed = identity, default 42): free (cost 0, cost_source local), stills only, " +
+    "always 768x768 with an opaque background, so pass postprocess (snap/lock/outline) to reach the manifest size and palette. Use it when the task or the anchor " +
+    "winner names comfy; when the lab is down the call falls back to pixellab once and comfy is tried again next call.",
   input: z
     .object({
-      provider: providerEnum.optional().describe("omit to use the anchor-winning provider of `reference` (art_anchor_winner)"),
+      provider: providerEnum.optional().describe("omit to use the anchor-winning provider of `reference` (art_anchor_winner); comfy = the local lab (free, stills, 768x768)"),
       prompt: z.string().min(1).max(2000),
       width: z.number().int().min(12).max(792),
       height: z.number().int().min(12).max(792),
@@ -1064,6 +1067,7 @@ const artGenerate: ToolImpl = {
       frames: z.number().int().optional().describe("animation frames. retrodiffusion: frames_duration 4|6|8|10|12|16. pixellab: 4-16 even (4|6|8|10|12|14|16); animates `reference` (required, the start frame, at most 256x256, width/height = its size) with `prompt` as the action; w*h*frames <= 524288. Output: one horizontal strip (frames x width, 1 row)"),
       transparent: z.boolean().optional().describe("transparent background (default true)"),
       style: z.string().max(120).optional().describe("Retro Diffusion prompt_style id"),
+      negative: z.string().max(2000).optional().describe("comfy only: negative prompt (default empty)"),
       max_candidates: z.number().int().min(1).max(MAX_CANDIDATES).default(DEFAULT_CANDIDATES).describe(`keep at most this many returned images (default ${DEFAULT_CANDIDATES}); extras are discarded unwritten. Keeps the gallery reviewable; it does NOT save generations (the provider bills what it made)`),
       justify: z.string().min(10).max(300).optional().describe("required for animation: why the cheaper ladder steps (cutout parts, in-engine motion) won't do"),
       resume_job_id: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/).optional().describe("PixelLab only: after a timeout or poll failure, the error names a job_id. Call again with the SAME inputs plus resume_job_id to collect that job: no new generation, no charge, no regeneration count"),
@@ -1095,6 +1099,7 @@ const artGenerate: ToolImpl = {
     }
 
     const exhausted: ProviderName[] = [];
+    const unavailable: ProviderName[] = []; // transient (comfy down): skipped this call only, never persisted
     const notes: string[] = [];
     let result: GenerateResult | null = null;
     let credits: ReturnType<typeof noteCredits> | null = null;
@@ -1108,7 +1113,7 @@ const artGenerate: ToolImpl = {
         notes.push("pixellab animates only from a reference still, and none was given, so there is no animation fallback");
         continue;
       }
-      if (p !== requested) notes.push(`${requested} is exhausted; tried ${p} once instead (same prompt and size)`);
+      if (p !== requested) notes.push(`${requested} is ${unavailable.includes(requested) ? "unavailable" : "exhausted"}; tried ${p} once instead (same prompt and size)`);
       try {
         const { justify: _j, postprocess: _p, max_candidates, ...gen } = i;
         // PixelLab: read the (free) balance before and after, so the result says what the call used
@@ -1122,6 +1127,11 @@ const artGenerate: ToolImpl = {
           exhausted.push(p);
           continue;
         }
+        if (e instanceof ProviderUnavailable) {
+          notes.push(e.message);
+          unavailable.push(p);
+          continue;
+        }
         if (e instanceof ChargedFailure) {
           countGeneration(paths.gallery, i.out); // it billed
           return { content: errText(e), is_error: true, cost_micro_usd: e.cost_micro_usd };
@@ -1133,16 +1143,19 @@ const artGenerate: ToolImpl = {
       const all = PROVIDERS.every((p) => exhausted.includes(p));
       return {
         content: JSON.stringify({
-          exhausted: all ? "all" : exhausted, fallback: "procedural", cost_micro_usd: 0, notes,
+          exhausted: all ? "all" : exhausted, ...(unavailable.length ? { unavailable } : {}), fallback: "procedural", cost_micro_usd: 0, notes,
           next: "Take the fallback ladder's floor: simple shapes animated in engine (bob, flash, squash-and-stretch, particles). Log it with log_decision (topic art.provider_fallback). This is a guaranteed outcome, not a failure.",
         }),
         cost_micro_usd: 0,
       };
     }
     const generation = countGeneration(paths.gallery, i.out);
-    const after: Balance | null = typeof result.metadata.remaining_balance === "number"
-      ? { remaining: result.metadata.remaining_balance as number, unit: "usd", total: null }
-      : await providerBalance(result.provider, {}).catch(() => null);
+    // comfy is local: no balance read and no credits line
+    const after: Balance | null = result.provider === "comfy"
+      ? null
+      : typeof result.metadata.remaining_balance === "number"
+        ? { remaining: result.metadata.remaining_balance as number, unit: "usd", total: null }
+        : await providerBalance(result.provider, {}).catch(() => null);
     // generations used: the balance delta (T21); else the job's own usage when it reports generations
     const usage = result.metadata.usage as { type?: string; generations?: number } | null | undefined;
     const used = before && after && before.unit === "generations" && after.unit === "generations"
