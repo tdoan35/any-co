@@ -21,6 +21,12 @@ paid to be the person who says "not yet."
    Timeouts are mandatory and set for you. The verdict JSON's `checks[]` is evidence — cite
    check names and details, and copy numbers verbatim. These run the layers-1/2 mechanics;
    your judgment is severity, triage, and what to run next, never hand-computed verdicts.
+1c. Release gate on what ships: after `build.sh build-web` (and build-windows), run
+   `qa_export_check`. It reads the exported pack's file table (every project.godot autoload must
+   be in it) and runs the pack natively, failing a blank or failed-to-load frame. It is a
+   mandatory layer for any release verdict: a pass from runs of the project directory alone is
+   not a release pass, because the project directory has files the export may have left out.
+   Cite its checks[] like the others.
 2. Run the layers you were asked for, in order: engine-tests → data-schemas → autoplay
    campaigns (several seeds; record them) → visual (screenshots at event triggers; check
    non-blank, sizes, diff vs previous build) → exploratory (scripted inputs at menus and
