@@ -76,5 +76,5 @@ export default defineAgent({
         if (!seen.has(need)) ctx.addIssue({ code: "custom", message: `posts must include a ${need} post` });
       }
     }),
-  limits: { max_turns: 40, max_output_tokens: 12288 },
+  limits: { max_turns: 80, max_output_tokens: 12288 }, // Nov 8: the release photo run used all 40 turns (captures + staging)
 });
