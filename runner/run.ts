@@ -8,6 +8,7 @@ import { z } from "zod";
 import { ROOT, outputJsonSchema, specHash } from "./load.ts";
 import type { AgentSpec, Permission } from "./spec.ts";
 import type { CapabilityName } from "./tools/registry.ts";
+import { append as ledgerAppend } from "../tools/ledger/ledger.ts";
 import { IMPLS, TOOL_INDEX, clip, type ToolContext } from "./tools/impl.ts";
 import { SpendLedger, killSwitchOn, limitsFor } from "./spend.ts";
 import { checkpointGameClone } from "./checkpoint.ts";
@@ -351,9 +352,20 @@ async function callTool(
   const parsed = impl.input.safeParse(use.input);
   if (!parsed.success) return err(`invalid input: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
   if (perm === "ask") {
-    const ok = await approver({ agent: spec.name, run_id: runId, tool: use.name, input: parsed.data });
-    event("approval", { name: use.name, input: parsed.data, approved: ok });
-    if (!ok) return err("a human declined this action");
+    // A rehearsal (the tool's dryRunField parsed to exactly true) sends nothing: no human wait,
+    // but the ledger still records the auto decision. Every other call goes through the gate.
+    const dryRun = impl.dryRunField !== undefined && (parsed.data as Record<string, unknown>)[impl.dryRunField] === true;
+    if (dryRun) {
+      ledgerAppend({
+        kind: "approval", ts: new Date().toISOString(), request_id: `dry-run:${runId}:${use.id}`, agent: spec.name, run_id: runId, tool: use.name,
+        decision: "approved", who: "auto (dry run: no approval needed)", input_summary: clip(JSON.stringify(parsed.data), 500),
+      }, ctx.ledgerFile);
+      event("approval", { name: use.name, input: parsed.data, approved: true, auto: "dry run" });
+    } else {
+      const ok = await approver({ agent: spec.name, run_id: runId, tool: use.name, input: parsed.data });
+      event("approval", { name: use.name, input: parsed.data, approved: ok });
+      if (!ok) return err("a human declined this action");
+    }
   }
   const t0 = Date.now();
   const out = await impl.run(parsed.data, ctx);

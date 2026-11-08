@@ -16,4 +16,12 @@
 - No default grants: a capability reaches an agent only through its spec's `tools`.
 - `outward: true` capabilities granted `"allow"` fail spec validation. Every call goes through the approval gate and the ledger. The core sends (`itch_push`, `email_send`, `site_deploy`) are outward too.
 
+## Dry runs skip the approval wait (T27)
+An outward tool can declare `dryRunField: "dry_run"` on its `ToolImpl`. That must be a boolean input with
+`.default(true)`, so an omitted field means a dry run; load refuses any other shape. When the parsed value is
+exactly `true`, an `"ask"` grant runs the call without an approval request, and the ledger gets an auto
+`approval` line (`who: "auto (dry run: no approval needed)"`). `dry_run: false` goes through the full gate.
+The tool's `run()` must really send nothing when the field is true. Core: `itch_push` (butler `--dry-run`).
+`site_deploy` and `email_send` have no dry-run mode, so every call asks. Lane tools use the same field.
+
 Lanes: `marketing` (Joyce: Marketing & Distribution).

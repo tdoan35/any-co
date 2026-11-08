@@ -87,3 +87,15 @@ test("a lane capability must declare outward explicitly (R25: a forgotten marker
   const silent: LaneModule = { CAPABILITIES: { reddit_post_x: { summary: "posts", naive: [], local: true } as any }, IMPLS: { reddit_post_x: { reddit_post_x: tool("x") } } };
   assert.throws(() => mergeCapabilities(CORE_CAPABILITIES, { silent }), /must declare outward/);
 });
+
+test("T27: dryRunField must be a boolean defaulting to true, for core and lane tools", () => {
+  const ping = { summary: "x", naive: [], local: true, outward: true };
+  const withField = (field: z.ZodType, name = "dry_run"): ToolImpl => ({ ...tool("x"), input: z.object({ [name]: field }).strict(), dryRunField: "dry_run" });
+  const lane = (impl: ToolImpl): LaneModule => ({ CAPABILITIES: { send_cap: ping }, IMPLS: { send_cap: { send_tool: impl } } });
+  assert.doesNotThrow(() => mergeImpls(coreImpls, { ok: lane(withField(z.boolean().default(true))) }));
+  assert.throws(() => mergeImpls(coreImpls, { bad: lane(withField(z.boolean().default(false))) }), /must be a boolean that defaults to true/);
+  assert.throws(() => mergeImpls(coreImpls, { bad: lane(withField(z.boolean().optional())) }), /must be a boolean that defaults to true/);
+  assert.throws(() => mergeImpls(coreImpls, { bad: lane(withField(z.boolean().default(true), "rehearse")) }), /has no such field/);
+  // the core declarer: itch_push's dry_run passed the same check at load
+  assert.equal(IMPLS.itch_push.itch_push.dryRunField, "dry_run");
+});
