@@ -14,7 +14,7 @@ import { fullDayLabel, greeting, shortDayLabel, TODAY } from "./format";
 import { Inbox } from "./inbox";
 import { ItemDetail } from "./item-detail";
 import { ColumnHeader } from "./parts";
-import { CollapsedStrip, PANE_LIMITS, PaneHandle, PaneToggle, usePaneWidths } from "./pane-resize";
+import { COLLAPSED_PX, CollapsedStrip, PANE_LIMITS, PaneHandle, PaneToggle, usePaneWidths } from "./pane-resize";
 import { Pulse, type PulseFilter } from "./pulse";
 import { quietScroll, useEdgeFade } from "./use-edge-fade";
 
@@ -38,6 +38,27 @@ function usePanelWidth<T extends HTMLElement>() {
     return () => ro.disconnect();
   }, []);
   return [ref, width] as const;
+}
+
+/**
+ * One layer of a side column: pinned to its outer edge at a fixed width (the column's border excluded),
+ * so the column's own width animates over it like a drawer. Hidden layers fade out and go inert.
+ */
+function Layer({ side, width, shown, children }: { side: "left" | "right"; width: number; shown: boolean; children: React.ReactNode }) {
+  return (
+    <div
+      inert={!shown}
+      aria-hidden={!shown || undefined}
+      style={{ width: `calc(${width}px - 1px)` }}
+      className={cn(
+        "absolute inset-y-0 flex flex-col transition-opacity duration-200 motion-reduce:transition-none",
+        side === "left" ? "left-0" : "right-0",
+        shown ? "opacity-100" : "pointer-events-none opacity-0",
+      )}
+    >
+      {children}
+    </div>
+  );
 }
 
 const FILTERS = [{ value: "highlights", label: "Highlights" }, { value: "everything", label: "Everything" }] as const;
@@ -145,6 +166,14 @@ export function WeaveScreen() {
   const inboxCollapsed = cols > 1 && panes.collapsed.inbox;
   const railCollapsed = cols === 3 && panes.collapsed.rail;
   const needsYou = inboxGroups(state).needs.length;
+  const inbox = (onCollapse: (() => void) | undefined) => (
+    <Inbox
+      state={state} selectedId={selectedId} focusId={selectedId ?? focusId} onOpen={open}
+      snoozeFor={snoozeFor} setSnoozeFor={setSnoozeFor}
+      showDone={showDone} onToggleDone={() => setShowDone((v) => !v)}
+      onCollapse={onCollapse}
+    />
+  );
   const working = state.presence.filter((p) => p.state === "working").length;
 
   return (
@@ -166,6 +195,7 @@ export function WeaveScreen() {
           "relative grid h-full rounded-2xl border border-foreground/10 bg-background/20 shadow-sm backdrop-blur-xl",
           cols === 1 ? "grid-cols-1 overflow-y-auto" : "overflow-hidden",
           panelWidth === 0 && "grid-cols-[300px_minmax(0,1fr)_288px]",
+          panes.animating && "transition-[grid-template-columns] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none",
           quietScroll,
         )}>
           {template && !inboxCollapsed && (
@@ -183,18 +213,18 @@ export function WeaveScreen() {
             />
           )}
           <section aria-label="Inbox" className={cn(
-            "flex min-h-0 flex-col border-foreground/10 bg-background/40",
-            cols === 1 ? "max-h-[60vh] border-b" : "border-r",
+            "relative flex min-h-0 flex-col border-foreground/10 bg-background/40",
+            cols === 1 ? "max-h-[60vh] border-b" : "overflow-hidden border-r",
           )}>
-            {inboxCollapsed
-              ? <CollapsedStrip side="left" label="Inbox" name="inbox" count={needsYou} countTone="bg-warn-soft text-warn"
+            {cols === 1 ? inbox(undefined) : <>
+              {/* Drawer: the inbox keeps its open width and the column edge slides over it, so nothing
+                  reflows mid-animation; it crossfades with the strip. Both stay mounted. */}
+              <Layer side="left" width={panes.open.inbox} shown={!inboxCollapsed}>{inbox(() => panes.toggle("inbox"))}</Layer>
+              <Layer side="left" width={COLLAPSED_PX} shown={inboxCollapsed}>
+                <CollapsedStrip side="left" label="Inbox" name="inbox" count={needsYou} countTone="bg-warn-soft text-warn"
                   countLabel={`${needsYou} waiting on you`} onExpand={() => panes.toggle("inbox")} />
-              : <Inbox
-                  state={state} selectedId={selectedId} focusId={selectedId ?? focusId} onOpen={open}
-                  snoozeFor={snoozeFor} setSnoozeFor={setSnoozeFor}
-                  showDone={showDone} onToggleDone={() => setShowDone((v) => !v)}
-                  onCollapse={cols > 1 ? () => panes.toggle("inbox") : undefined}
-                />}
+              </Layer>
+            </>}
           </section>
           <section aria-label={selected ? selected.title : "Pulse"} className="flex min-h-0 scroll-mt-4 flex-col">
             <ColumnHeader className="px-5">
@@ -217,21 +247,25 @@ export function WeaveScreen() {
                 >
                   {selected
                     ? <ItemDetail item={selected} st={state.status[selected.id]} last={state.last} />
-                    : <Pulse state={state} filter={filter} onFilter={setFilter} onSelectItem={open} scrollTo={scrollTo} animateLayout={!resizing} />}
+                    : <Pulse state={state} filter={filter} onFilter={setFilter} onSelectItem={open} scrollTo={scrollTo} animateLayout={!resizing && !panes.animating} />}
                 </motion.div>
               </AnimatePresence>
             </div>
           </section>
-          <aside aria-label="Today" className={cn("min-h-0 flex-col border-l border-foreground/10 bg-background/40", cols === 3 ? "flex" : "hidden")}>
-            {railCollapsed
-              ? <CollapsedStrip side="right" label="Today" name="day rail" count={working} countTone="bg-run-soft text-run"
-                  countLabel={`${working} working`} onExpand={() => panes.toggle("rail")} />
-              : <ColumnHeader className="pr-2">
-                  {todayTitle}
-                  <PaneToggle side="right" collapsed={false} label="day rail" onToggle={() => panes.toggle("rail")} className="ml-auto" />
-                </ColumnHeader>}
-            {/* Stays mounted while collapsed: the edge-fade observers attach once, on mount. */}
-            <div ref={railRef} style={railFade} className={cn("min-h-0 flex-1 overflow-y-auto", railCollapsed && "hidden", quietScroll)}>{rail}</div>
+          <aside aria-label="Today" className={cn("relative min-h-0 overflow-hidden border-l border-foreground/10 bg-background/40", cols === 3 ? "block" : "hidden")}>
+            {/* Same drawer as the inbox, anchored right. The rail body stays mounted (its edge-fade
+                observers attach once, on mount). */}
+            <Layer side="right" width={panes.open.rail} shown={!railCollapsed}>
+              <ColumnHeader className="pr-2">
+                {todayTitle}
+                <PaneToggle side="right" collapsed={false} label="day rail" onToggle={() => panes.toggle("rail")} className="ml-auto" />
+              </ColumnHeader>
+              <div ref={railRef} style={railFade} className={cn("min-h-0 flex-1 overflow-y-auto", quietScroll)}>{rail}</div>
+            </Layer>
+            <Layer side="right" width={COLLAPSED_PX} shown={railCollapsed}>
+              <CollapsedStrip side="right" label="Today" name="day rail" count={working} countTone="bg-run-soft text-run"
+                countLabel={`${working} working`} onExpand={() => panes.toggle("rail")} />
+            </Layer>
           </aside>
         </div>
       </div>

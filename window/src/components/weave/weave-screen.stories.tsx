@@ -222,7 +222,7 @@ export const MidThreeColumn: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const aside = canvasElement.querySelector('aside[aria-label="Today"]')!;
-    await waitFor(() => expect(getComputedStyle(aside).display).toBe("flex"));
+    await waitFor(() => expect(getComputedStyle(aside).display).not.toBe("none"));
     expect(canvas.queryByRole("button", { name: "Your day" })).toBeNull();
   },
 };
