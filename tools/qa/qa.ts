@@ -1,13 +1,14 @@
-// QA CLI: npm run qa -- <smoke|check|determinism|export-check> ... (see tools/qa/README.md).
+// QA CLI: npm run qa -- <smoke|check|determinism|export-check|ui-lint> ... (see tools/qa/README.md).
 // Exit codes: 0 pass, 1 invariant failure (incl. an unclean process end), 2 harness/usage error.
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { launch, resetIds, waitReady, type Driver, type RunEnd } from "./driver.ts";
 import { firstDifference, runInvariants, type Check, type InvariantOptions, type RunFiles } from "./invariants.ts";
 import { exportCheck, type ExportCheckOptions } from "./export.ts";
+import { uiLint, type UiLintResult } from "./ui-lint.ts";
 
 export interface Cli {
-  sub: "smoke" | "check" | "determinism";
+  sub: "smoke" | "check" | "determinism" | "ui-lint";
   cmd?: string; // JSON argv array, e.g. '["godot","--path","."]'
   dir: string; // game dir (smoke/determinism) or qa dir (check)
   seed: number;
@@ -20,6 +21,9 @@ export interface Cli {
   readyTimeoutMs: number;
   endWaitMs?: number; // bound on the wait for a natural end before quit/kill; default ack*2+60s
   stepFrames: number;
+  viewport?: [number, number];
+  minTextPx?: number;
+  gridPx?: number;
 }
 
 export const CLI_DEFAULTS: Omit<Cli, "sub"> = {
@@ -42,6 +46,7 @@ function usage(): never {
       "       qa check --dir <qa dir> [--max-entities N] [--identical-dumps N] [--tick-rate N]",
       "       qa determinism --cmd '<json argv>' --dir <game dir> --seed N --ticks N [same options as smoke]",
       "       qa export-check --dir <game dir> [--dist <dist dir, default <dir>/dist>] [--frames N] [--timeout-ms N] [--run true|false] [--save-frames N --save-dir <dir>]",
+      "       qa ui-lint --dir <qa dir> [--viewport WxH] [--min-text-px N] [--grid-px N]",
     ].join("\n"),
   );
   process.exit(2);
@@ -55,7 +60,7 @@ function num(v: string): number {
 
 export function parseArgv(argv: string[]): Cli {
   const sub = argv[0] as Cli["sub"];
-  if (sub !== "smoke" && sub !== "check" && sub !== "determinism") usage();
+  if (sub !== "smoke" && sub !== "check" && sub !== "determinism" && sub !== "ui-lint") usage();
   const cli: Cli = { sub, ...CLI_DEFAULTS };
   for (let i = 1; i < argv.length; i += 2) {
     const k = argv[i];
@@ -74,11 +79,14 @@ export function parseArgv(argv: string[]): Cli {
       case "--ack-timeout-ms": cli.ackTimeoutMs = num(v); break;
       case "--ready-timeout-ms": cli.readyTimeoutMs = num(v); break;
       case "--end-wait-ms": cli.endWaitMs = num(v); break;
+      case "--viewport": { const [w, h] = String(v).split("x").map(Number); if (!Number.isFinite(w) || !Number.isFinite(h)) usage(); cli.viewport = [w, h]; break; }
+      case "--min-text-px": cli.minTextPx = num(v); break;
+      case "--grid-px": cli.gridPx = num(v); break;
       default: usage();
     }
   }
   if ((cli.sub === "smoke" || cli.sub === "determinism") && !cli.cmd) usage();
-  if (cli.sub === "check" && cli.cmd) usage();
+  if ((cli.sub === "check" || cli.sub === "ui-lint") && cli.cmd) usage();
   return cli;
 }
 
@@ -312,6 +320,27 @@ function summarizeEnd(end: RunEnd, forced?: "quit" | "kill"): QaResult["end"] {
   return { ...rest, stderrTail: stderr.slice(-2000), ...(forced ? { forced } : {}) };
 }
 
+/** `ui-lint`: layout checks over ui[] of the dumps in a qa dir (tools/qa/ui-lint.ts).
+ *  Absent ui[] => status not-implemented, exit 0 with the marker (release gate only when present). */
+export function uiLintCheck(opts: { dir: string; viewport?: [number, number]; minTextPx?: number; gridPx?: number }): (QaResult & { ui?: UiLintResult }) {
+  const qaDir = path.resolve(opts.dir);
+  let dumps: unknown[] = [];
+  try {
+    dumps = [JSON.parse(readFileSync(path.join(qaDir, "state.json"), "utf8"))];
+  } catch (e) {
+    return { ok: false, exitCode: 2, error: `ui-lint: unreadable ${path.join(qaDir, "state.json")}: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  const ui = uiLint(dumps, { viewport: opts.viewport, minTextPx: opts.minTextPx, gridPx: opts.gridPx });
+  if (ui.status === "not-implemented") {
+    return { ok: true, exitCode: 0, checks: [{ name: "ui_lint_not_implemented", pass: true, detail: "no ui[] in the dump; gate layer not applicable" }], ui: ui };
+  }
+  const byCheck = new Map<string, number>();
+  for (const f of ui.findings) byCheck.set(f.check, (byCheck.get(f.check) ?? 0) + 1);
+  const checks = [...byCheck.entries()].map(([check, n]) => ({ name: `ui_${check}`, pass: false, detail: `${n} finding(s) on ${ui.dumpsChecked} dump(s)` }));
+  const pass = checks.every((c) => c.pass);
+  return { ok: pass, exitCode: pass ? 0 : 1, checks: checks.length > 0 ? checks : [{ name: "ui_lint", pass: true, detail: `no findings on ${ui.dumpsChecked} dump(s)` }], ui };
+}
+
 /** `export-check`: the release gate on the exported packs (tools/qa/export.ts). */
 export function parseExportArgv(argv: string[]): ExportCheckOptions {
   const o: ExportCheckOptions = { gameDir: "." };
@@ -332,7 +361,29 @@ export function parseExportArgv(argv: string[]): ExportCheckOptions {
   return { ...o, gameDir: path.resolve(o.gameDir), ...(o.distDir ? { distDir: path.resolve(o.distDir) } : {}) };
 }
 
+function parseUiLintArgv(argv: string[]): { dir: string; viewport?: [number, number]; minTextPx?: number; gridPx?: number } {
+  const o: { dir: string; viewport?: [number, number]; minTextPx?: number; gridPx?: number } = { dir: "." };
+  for (let i = 0; i < argv.length; i += 2) {
+    const [k, v] = [argv[i], argv[i + 1]];
+    if (v === undefined) usage();
+    switch (k) {
+      case "--dir": o.dir = v; break;
+      case "--viewport": { const [w, h] = v.split("x").map(Number); if (!Number.isFinite(w) || !Number.isFinite(h)) usage(); o.viewport = [w, h]; break; }
+      case "--min-text-px": o.minTextPx = num(v); break;
+      case "--grid-px": o.gridPx = num(v); break;
+      default: usage();
+    }
+  }
+  return { ...o, dir: path.resolve(o.dir) };
+}
+
 async function main(): Promise<void> {
+  if (process.argv[2] === "ui-lint") {
+    const o = parseUiLintArgv(process.argv.slice(3));
+    const result = uiLintCheck(o);
+    console.log(JSON.stringify(result, null, 2));
+    process.exit(result.exitCode);
+  }
   if (process.argv[2] === "export-check") {
     const result = await exportCheck(parseExportArgv(process.argv.slice(2)));
     console.log(JSON.stringify(result, null, 2));
