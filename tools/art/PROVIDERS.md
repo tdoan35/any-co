@@ -170,6 +170,20 @@ called. The `art_generate` capability (runner/tools/impl.ts over tools/art/credi
   refused). One generation + 2 regenerations per asset (counted in the gallery). Animation
   (frames, `rd_animation__*`, `rd_advanced_animation__*`) needs `justify`. `art_quote` returns
   RD's free check_cost quote (PixelLab: price table) × count against the remaining balance.
+- **PixelLab floor (T35, `PIXELLAB_MIN_REMAINING`)**: PixelLab is ONE generations balance shared by every
+  studio, so a reserve is enforced in code, not by people watching. With the env set (integer generations),
+  art_generate reads the live balance (free `GET /v2/balance`, no cache) before EVERY pixellab call, regens and
+  animations included. It refuses the call, with no PixelLab request, when `remaining <= floor` or when
+  `remaining - estimate < floor` (the call itself would cross it). `estimate` = the most generations one pixellab
+  call has used in `art-credits.jsonl` (T21 `generations_used`), else 30. A balance that can't be read fails
+  closed while the floor is set. A USD (credits, not subscription) balance is outside the floor. A refused call
+  is treated like an exhausted provider for that call only: comfy next (stills, if the lab answers), then the
+  rest of the chain, then `{exhausted: "all", fallback: "procedural"}`. The result carries `pixellab_floor`
+  ({reason at_floor | would_cross | unreadable, remaining, floor, estimate}) and says "PixelLab floor reached
+  (remaining R <= MIN): use provider comfy with your reference image, or stop and report". It is never written
+  to art-providers.json (the floor is per studio and the balance can rise); only a real 402 marks pixellab
+  exhausted. ONE ledger decision per day (topic `spend.pixellab_floor`, refs `pixellab-floor:<day>`). A
+  malformed value is an error on every call, never a silently missing floor.
 - **PixelLab subscription (T21)**: art_generate reads the free balance before and after every
   PixelLab call and reports `generations_used` (the delta) in the result and in art-credits.jsonl.
   Generation balances use absolute thresholds: ONE ledger note at <= 400 remaining and one at 0

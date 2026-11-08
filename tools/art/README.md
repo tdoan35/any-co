@@ -91,6 +91,9 @@ of regenerating: no new generation or charge. If a strip can't be built, the raw
 trials (PROVIDERS.md "Credits"): `art_generate`, `art_quote` (free cost check), `art_anchor_winner`,
 `art_providers` (read-only state). State: `runs/art-providers.json`, `runs/art-credits.jsonl`,
 `runs/art-gallery.json` (env `ART_PROVIDERS_FILE` / `ART_CREDITS_FILE` / `ART_GALLERY_FILE`).
+PixelLab floor: set `PIXELLAB_MIN_REMAINING` (generations) and every pixellab call checks the live balance first;
+at or below the floor, or if the call's estimate would cross it, the call goes to comfy or the procedural floor
+without a PixelLab request (PROVIDERS.md "PixelLab floor").
 
 
 `art_tools` (runner/tools/registry.ts) exposes `art_lock`, `art_snap`, `art_outline`,

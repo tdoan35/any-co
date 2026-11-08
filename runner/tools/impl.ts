@@ -18,7 +18,7 @@ import { addOutline, contactSheet, lockPalette, snapToGrid, splitStrip, upscaleN
 import { runGate } from "../../tools/art/gate.ts";
 import { ChargedFailure, DEFAULT_CANDIDATES, MAX_CANDIDATES, ProviderExhausted, ProviderUnavailable, balance as providerBalance, generate, type Balance, isAnimation, quote as providerQuote, type GenerateResult, type ProviderName } from "../../tools/art/generate.ts";
 import {
-  LOW_GENERATIONS, MAX_REGENERATIONS, PROVIDERS, anchorWinner, countGeneration, generationCount, isExhausted, markExhausted, other, readCredits, readGallery,
+  LOW_GENERATIONS, MAX_REGENERATIONS, PROVIDERS, anchorWinner, checkPixellabFloor, pixellabCallEstimate, pixellabFloor, type FloorVerdict, countGeneration, generationCount, isExhausted, markExhausted, other, readCredits, readGallery,
   readProviders, recordAnchorWinner, recordCredit, statePaths,
 } from "../../tools/art/credits.ts";
 import { capture as mediaCapture, POLICY as MEDIA_POLICY, type CaptureMode } from "../../tools/media/capture.ts";
@@ -1014,6 +1014,19 @@ function noteCredits(
 }
 const LOW_PCT = 20;
 
+/** ONE ledger decision per day when the PixelLab floor stops a call (deduplicated by its refs key, like the low notes). */
+function noteFloor(ctx: ToolContext, v: FloorVerdict): void {
+  const ledgerFile = ctx.ledgerFile ?? LEDGER_FILE;
+  const ref = `pixellab-floor:${new Date().toISOString().slice(0, 10)}`;
+  if (ledgerRead(ledgerFile).some((e) => e.kind === "decision" && e.topic === "spend.pixellab_floor" && (e.refs ?? []).includes(ref))) return;
+  ledgerAppend({
+    kind: "decision", ts: new Date().toISOString(), agent: ctx.agent ?? "art_generate", run_id: ctx.run_id ?? "unknown", topic: "spend.pixellab_floor",
+    decision: `PixelLab floor stops pixellab generation: remaining ${v.remaining ?? "unreadable"}, floor ${v.floor} (PIXELLAB_MIN_REMAINING), call estimate ${v.estimate}`,
+    rationale: "PixelLab is one generations balance shared across studios; the floor keeps a reserve. Calls go to comfy or the procedural floor until the balance is above floor + estimate.",
+    refs: [ref],
+  }, ledgerFile);
+}
+
 /**
  * Collect a PixelLab background job that an earlier call submitted (and was billed for) but stopped
  * waiting on: poll it, write the result exactly like a fresh call. No submit, no new generation, no
@@ -1052,6 +1065,8 @@ const artGenerate: ToolImpl = {
     "A PixelLab job that timed out or lost its poll keeps running and is billed: the error names its job_id; never regenerate, call again with the same inputs plus resume_job_id to collect it for free. " +
     `max_candidates (default ${DEFAULT_CANDIDATES}, max ${MAX_CANDIDATES}) caps the images kept per call to keep the gallery reviewable; it does not save generations. ` +
     "PixelLab results report generations_used (subscription balance before vs after). " +
+    "With PIXELLAB_MIN_REMAINING set, pixellab is refused (no request) at or below that floor, or when this call's estimate would cross it; the call moves to comfy " +
+    "or the procedural floor and the result's pixellab_floor says so: then use provider comfy with your reference image, or stop and report. " +
     "provider comfy = the local lab ComfyUI (frozen IP-Adapter recipe on `reference`, seed = identity, default 42): free (cost 0, cost_source local), stills only, " +
     "always 768x768 with an opaque background, so pass postprocess (snap/lock/outline) to reach the manifest size and palette. Use it when the task or the anchor " +
     "winner names comfy; when the lab is down the call falls back to pixellab once and comfy is tried again next call.",
@@ -1104,20 +1119,47 @@ const artGenerate: ToolImpl = {
     let result: GenerateResult | null = null;
     let credits: ReturnType<typeof noteCredits> | null = null;
     let before: Balance | null = null;
-    for (const p of [requested, other(requested)]) {
+    let floored: FloorVerdict | null = null; // T35: the PixelLab floor stopped pixellab for this call (never persisted)
+    let floor: number | null;
+    try {
+      floor = pixellabFloor();
+    } catch (e) {
+      return { content: errText(e), is_error: true };
+    }
+    const chain: ProviderName[] = [requested, other(requested)];
+    for (let k = 0; k < chain.length; k++) {
+      const p = chain[k];
       if (isExhausted(paths.providers, p)) {
         exhausted.push(p);
         continue;
+      }
+      if (p === "pixellab" && floor !== null) {
+        // the live balance before EVERY pixellab call (free GET /v2/balance), never a cached one
+        before = await providerBalance("pixellab", {}).catch(() => null);
+        const v = checkPixellabFloor(before, floor, pixellabCallEstimate(paths.credits));
+        if (v.blocked) {
+          floored = v;
+          notes.push(v.message);
+          noteFloor(ctx, v);
+          // like an exhausted provider for this call only: no request; comfy next (stills), then the rest of the chain
+          if (i.frames === undefined && !chain.includes("comfy")) chain.splice(k + 1, 0, "comfy");
+          else if (i.frames !== undefined) notes.push("comfy makes stills only, so there is no comfy fallback for an animation");
+          continue;
+        }
       }
       if (p !== requested && i.frames !== undefined && p === "pixellab" && !i.reference) {
         notes.push("pixellab animates only from a reference still, and none was given, so there is no animation fallback");
         continue;
       }
-      if (p !== requested) notes.push(`${requested} is ${unavailable.includes(requested) ? "unavailable" : "exhausted"}; tried ${p} once instead (same prompt and size)`);
+      if (p !== requested) {
+        const why = floored && requested === "pixellab" ? "at its floor" : unavailable.includes(requested) ? "unavailable" : "exhausted";
+        notes.push(`${requested} is ${why}; tried ${p} once instead (same prompt and size)`);
+      }
       try {
         const { justify: _j, postprocess: _p, max_candidates, ...gen } = i;
-        // PixelLab: read the (free) balance before and after, so the result says what the call used
-        before = p === "pixellab" ? await providerBalance("pixellab", {}).catch(() => null) : null;
+        // PixelLab: read the (free) balance before and after, so the result says what the call used (already read when a floor is set)
+        if (p === "pixellab" && floor === null) before = await providerBalance("pixellab", {}).catch(() => null);
+        else if (p !== "pixellab") before = null;
         result = await generate({ ...gen, provider: p, maxCandidates: max_candidates }, { workspace: ctx.workspace });
         break;
       } catch (e) {
@@ -1140,11 +1182,13 @@ const artGenerate: ToolImpl = {
       }
     }
     if (!result) {
-      const all = PROVIDERS.every((p) => exhausted.includes(p));
+      const all = PROVIDERS.every((p) => exhausted.includes(p) || (p === "pixellab" && floored !== null));
       return {
         content: JSON.stringify({
-          exhausted: all ? "all" : exhausted, ...(unavailable.length ? { unavailable } : {}), fallback: "procedural", cost_micro_usd: 0, notes,
-          next: "Take the fallback ladder's floor: simple shapes animated in engine (bob, flash, squash-and-stretch, particles). Log it with log_decision (topic art.provider_fallback). This is a guaranteed outcome, not a failure.",
+          exhausted: all ? "all" : exhausted, ...(unavailable.length ? { unavailable } : {}), ...(floored ? { pixellab_floor: floored } : {}), fallback: "procedural", cost_micro_usd: 0, notes,
+          next: floored
+            ? `${floored.message}. Otherwise take the fallback ladder's floor: simple shapes animated in engine (bob, flash, squash-and-stretch, particles); log it with log_decision (topic art.provider_fallback).`
+            : "Take the fallback ladder's floor: simple shapes animated in engine (bob, flash, squash-and-stretch, particles). Log it with log_decision (topic art.provider_fallback). This is a guaranteed outcome, not a failure.",
         }),
         cost_micro_usd: 0,
       };
@@ -1162,7 +1206,7 @@ const artGenerate: ToolImpl = {
       ? Math.round((before.remaining - after.remaining) * 1000) / 1000
       : usage?.type === "generations" && typeof usage.generations === "number" ? usage.generations : null;
     credits = noteCredits(ctx, result.provider, after, "generation", used);
-    const extra = { generation: `${generation} of ${1 + MAX_REGENERATIONS}`, credits, ...(used !== null ? { generations_used: used } : {}), ...(result.provider !== requested ? { fallback_from: requested } : {}), ...(notes.length ? { notes } : {}) };
+    const extra = { generation: `${generation} of ${1 + MAX_REGENERATIONS}`, credits, ...(used !== null ? { generations_used: used } : {}), ...(result.provider !== requested ? { fallback_from: requested } : {}), ...(floored ? { pixellab_floor: floored } : {}), ...(notes.length ? { notes } : {}) };
     try {
       let postprocess: Record<string, unknown> | null = null;
       if (i.postprocess && (i.postprocess.snap || i.postprocess.lock || i.postprocess.outline))
