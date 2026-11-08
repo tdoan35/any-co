@@ -1050,6 +1050,31 @@ function noteCredits(
 }
 const LOW_PCT = 20;
 
+/**
+ * Collect a PixelLab background job that an earlier call submitted (and was billed for) but stopped
+ * waiting on: poll it, write the result exactly like a fresh call. No submit, no new generation, no
+ * charge, no regeneration count, no justify; postprocess applies as usual.
+ */
+async function collectJob(i: any, ctx: ToolContext): Promise<ToolOutput> {
+  const provider = i.provider ?? "pixellab";
+  if (provider !== "pixellab") return { content: "resume_job_id collects PixelLab background jobs only", is_error: true };
+  const { justify: _j, postprocess: _p, max_candidates, resume_job_id, ...gen } = i;
+  let result: GenerateResult;
+  try {
+    result = await generate({ ...gen, provider, maxCandidates: max_candidates, resumeJobId: resume_job_id }, { workspace: ctx.workspace });
+  } catch (e) {
+    return { content: errText(e), is_error: true, cost_micro_usd: 0 };
+  }
+  try {
+    let postprocess: Record<string, unknown> | null = null;
+    if (i.postprocess && (i.postprocess.snap || i.postprocess.lock || i.postprocess.outline))
+      postprocess = await applyArtPostprocess(ctx.workspace, i.postprocess, result.images);
+    return { content: JSON.stringify({ ...result, postprocess, collected: resume_job_id, generation: "not counted (collected an earlier job)" }), cost_micro_usd: 0 };
+  } catch (e) {
+    return { content: `collected ${result.images.join(", ")} but postprocess failed: ${errText(e)}`, is_error: true, cost_micro_usd: 0 };
+  }
+}
+
 const artGenerate: ToolImpl = {
   description:
     "Generate pixel art with a paid provider (PixelLab or Retro Diffusion) and write PNGs into the workspace. " +
@@ -1060,6 +1085,7 @@ const artGenerate: ToolImpl = {
     "style bible's outline color. The manifest must be locked (game_clone) before postprocess can run. " +
     `Credits are free-trial and never topped up: omit provider to use the reference anchor's winning provider; an exhausted provider falls back to the other once; with both gone the result is {exhausted:"all", fallback:"procedural"} at no cost. ` +
     `Each asset gets one generation plus ${MAX_REGENERATIONS} regenerations. Animation (frames or rd_animation/rd_advanced_animation styles) needs justify. Quote batches with art_quote first. ` +
+    "A PixelLab job that timed out or lost its poll keeps running and is billed: the error names its job_id; never regenerate, call again with the same inputs plus resume_job_id to collect it for free. " +
     `max_candidates (default ${DEFAULT_CANDIDATES}, max ${MAX_CANDIDATES}) caps the images kept per call to keep the gallery reviewable; it does not save generations. ` +
     "PixelLab results report generations_used (subscription balance before vs after).",
   input: z
@@ -1076,6 +1102,7 @@ const artGenerate: ToolImpl = {
       style: z.string().max(120).optional().describe("Retro Diffusion prompt_style id"),
       max_candidates: z.number().int().min(1).max(MAX_CANDIDATES).default(DEFAULT_CANDIDATES).describe(`keep at most this many returned images (default ${DEFAULT_CANDIDATES}); extras are discarded unwritten. Keeps the gallery reviewable; it does NOT save generations (the provider bills what it made)`),
       justify: z.string().min(10).max(300).optional().describe("required for animation: why the cheaper ladder steps (cutout parts, in-engine motion) won't do"),
+      resume_job_id: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/).optional().describe("PixelLab only: after a timeout or poll failure, the error names a job_id. Call again with the SAME inputs plus resume_job_id to collect that job: no new generation, no charge, no regeneration count"),
       postprocess: z
         .object({
           snap: z.boolean().optional().describe("downscale to the manifest entry's full size (size × frames) by majority vote"),
@@ -1087,6 +1114,7 @@ const artGenerate: ToolImpl = {
     })
     .strict(),
   async run(i, ctx) {
+    if (i.resume_job_id) return collectJob(i, ctx);
     const paths = statePaths(ctx.runsDir);
     const done = generationCount(paths.gallery, i.out);
     if (done >= 1 + MAX_REGENERATIONS)

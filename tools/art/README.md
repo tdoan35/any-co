@@ -78,6 +78,8 @@ Animation: `art_generate` with `frames`. Retro Diffusion uses animation styles (
 4|6|8|10|12|16). PixelLab animates a reference still with the prompt as the action
 (animate-with-text-v3: 4–16 even frames, ≤ 256 px per side, w×h×frames ≤ 524,288; width/height = the
 reference's size). Both write one horizontal strip per animation (N·w × h), the layout `gate` checks.
+After a PixelLab timeout, the error names a `job_id`. Collect that job with `resume_job_id` (same inputs) instead
+of regenerating: no new generation or charge. If a strip can't be built, the raw frames are saved as `<name>.frame-<i>.png`.
 
 `art_generate` (generate.ts + credits.ts) is credit-aware because both providers run on free
 trials (PROVIDERS.md "Credits"): `art_generate`, `art_quote` (free cost check), `art_anchor_winner`,

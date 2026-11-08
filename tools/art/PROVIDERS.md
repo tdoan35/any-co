@@ -91,6 +91,13 @@ PixelLab OpenAPI `https://api.pixellab.ai/v2/openapi.json` + `llms.txt`, and Ret
   is a placeholder estimate of $0.10 per animation until a live call measures it. Other endpoints
   (`/animate-with-text-v2`, `/animate-pixminimax`, the skeleton and character/object flows) need Pro,
   keypoints, or a character id, or are beta, so we don't use them.
+- **Never lose a billed job (T23b)**: animations default to a 600 s deadline (`ART_GENERATE_TIMEOUT_MS`
+  overrides; stills stay 180 s). A timeout or poll failure after submit raises a ChargedFailure that
+  carries the `job_id`; the job keeps running and is billed. Calling `art_generate` again with the same
+  inputs plus `resume_job_id` polls `GET /v2/background-jobs/<id>` and writes the result exactly like a
+  fresh call, with no submit, no charge, and no regeneration count (stills and animations). If the strip
+  can't be built (mixed frame sizes etc.), every returned frame is saved byte-for-byte as
+  `<out dir>/<name>.frame-<i>.png` before the error, and the error names the files.
 - **Out of balance**: `402` "Insufficient credits" on `/generate-image-v2` (and the pixflux/pixen
   endpoints; "Insufficient generations" on character endpoints). The spec documents no body
   schema or code for it, so any 402 counts as exhausted.
