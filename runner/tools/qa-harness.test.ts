@@ -21,6 +21,9 @@ function workspace(mode: string): { ws: string; clone: string } {
   return { ws, clone };
 }
 const ctx = (ws: string) => ({ workspace: ws, naive: null });
+// Caps only, never waited on in a passing run: generous so full-suite CPU load can't trip them (T25).
+const ACK_MS = 30_000;
+const END_MS = 60_000;
 
 test("validateLaunchArgv: godot by name, paths in the clone; rejects shell strings and outside binaries", () => {
   const clone = mkdtempSync(path.join(tmpdir(), "qa-val-"));
@@ -38,7 +41,7 @@ test("validateLaunchArgv: godot by name, paths in the clone; rejects shell strin
 
 test("qa_smoke runs the emulator clone end to end: verdict JSON, pass on happy", async () => {
   const { ws } = workspace("happy");
-  const r = await qa_smoke.run({ cmd: ["./qa-entry.cjs"], seed: 7, ticks: 40, ack_timeout_ms: 5_000, end_wait_ms: 10_000 }, ctx(ws));
+  const r = await qa_smoke.run({ cmd: ["./qa-entry.cjs"], seed: 7, ticks: 40, ack_timeout_ms: ACK_MS, end_wait_ms: END_MS }, ctx(ws));
   const out = JSON.parse(r.content) as { ok: boolean; exitCode: number; checks: unknown[] };
   assert.equal(r.is_error, undefined, r.content);
   assert.equal(out.exitCode, 0, r.content);
@@ -48,7 +51,7 @@ test("qa_smoke runs the emulator clone end to end: verdict JSON, pass on happy",
 
 test("qa_smoke surfaces invariant failures with names (negative resource)", async () => {
   const { ws } = workspace("negative-resource");
-  const r = await qa_smoke.run({ cmd: ["./qa-entry.cjs"], seed: 7, ticks: 40, ack_timeout_ms: 5_000, end_wait_ms: 10_000 }, ctx(ws));
+  const r = await qa_smoke.run({ cmd: ["./qa-entry.cjs"], seed: 7, ticks: 40, ack_timeout_ms: ACK_MS, end_wait_ms: END_MS }, ctx(ws));
   const out = JSON.parse(r.content) as { exitCode: number; checks: Array<{ name: string; pass: boolean }> };
   assert.equal(out.exitCode, 1);
   assert.ok(out.checks.some((c) => c.name === "resources_non_negative" && !c.pass));
@@ -63,16 +66,16 @@ test("qa_smoke without a clone is an error result the agent can read", async () 
 
 test("qa_check grades existing qa/ files inside the clone", async () => {
   const { ws } = workspace("happy");
-  await qa_smoke.run({ cmd: ["./qa-entry.cjs"], seed: 7, ticks: 40, ack_timeout_ms: 5_000, end_wait_ms: 10_000 }, ctx(ws));
+  await qa_smoke.run({ cmd: ["./qa-entry.cjs"], seed: 7, ticks: 40, ack_timeout_ms: ACK_MS, end_wait_ms: END_MS }, ctx(ws));
   const r = await qa_check.run({}, ctx(ws));
   const out = JSON.parse(r.content) as { exitCode: number };
   assert.equal(out.exitCode, 0, r.content);
 });
 
 test("qa_determinism passes for the deterministic emulator and fails with a path for the RNG one", async () => {
-  const good = await qa_determinism.run({ cmd: ["./qa-entry.cjs"], seed: 7, ticks: 40, ack_timeout_ms: 5_000, end_wait_ms: 10_000 }, ctx(workspace("happy").ws));
+  const good = await qa_determinism.run({ cmd: ["./qa-entry.cjs"], seed: 7, ticks: 40, ack_timeout_ms: ACK_MS, end_wait_ms: END_MS }, ctx(workspace("happy").ws));
   assert.equal(JSON.parse(good.content).exitCode, 0, good.content);
-  const rng = await qa_determinism.run({ cmd: ["./qa-entry.cjs"], seed: 7, ticks: 40, ack_timeout_ms: 5_000, end_wait_ms: 10_000 }, ctx(workspace("nondeterministic").ws));
+  const rng = await qa_determinism.run({ cmd: ["./qa-entry.cjs"], seed: 7, ticks: 40, ack_timeout_ms: ACK_MS, end_wait_ms: END_MS }, ctx(workspace("nondeterministic").ws));
   const out = JSON.parse(rng.content) as { exitCode: number; error?: string };
   assert.equal(out.exitCode, 1);
   assert.match(out.error!, /\$\.player\.x/);
