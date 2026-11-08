@@ -213,3 +213,65 @@ test("T28: a main merge that conflicts is aborted; the clone stays on origin's b
   assert.equal(gitIn(path.join(run2.workspace, "game"), "status", "--porcelain"), "", "no half-merged state left behind");
   assert.equal(gitIn(path.join(run2.workspace, "game"), "rev-parse", "HEAD"), gitIn(origin, "rev-parse", "agent/gameplay-engineer"));
 });
+
+// ----- T51: game_clone with two repos — card-text inference, explicit wins, clear refusals -----
+
+function makeTwoGames(): { root: string; a: string; b: string } {
+  const root = mkdtempSync(path.join(tmpdir(), "anyco-games2-"));
+  const git = (repo: string) => {
+    mkdirSync(repo);
+    execFileSync("git", ["-C", repo, "init", "--quiet", "--initial-branch", "main"], { env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" } });
+    writeFileSync(path.join(repo, "README.md"), "# x\n");
+    execFileSync("git", ["-C", repo, "-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    execFileSync("git", ["-C", repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "--quiet", "-m", "init"]);
+  };
+  const a = path.join(root, "caravan-cargo-cult");
+  const b = path.join(root, "soul-shift");
+  git(a);
+  git(b);
+  return { root, a: "caravan-cargo-cult", b: "soul-shift" };
+}
+
+const ctxOn = (root: string, cardText?: string): ToolContext => ({ ...ctxFor(root), cardText });
+
+test("T51 game_clone: explicit repo wins; card games/<slug> and bare slug each pick one; ambiguous/none refuse listing both; one repo unchanged", async () => {
+  const { root, a, b } = makeTwoGames();
+
+  // explicit repo wins even when the card names the other
+  const explicit = await IMPLS.game_repo.game_clone.run({ repo: a }, ctxOn(root, `work on ${b} please`));
+  assert.equal(JSON.parse(explicit.content).game, a); // eslint ok
+
+  // card names games/<slug>
+  const byPath = await IMPLS.game_repo.game_clone.run({}, ctxOn(root, `see games/${b} for the frame`));
+  assert.equal(JSON.parse(byPath.content).game, b);
+
+  // bare slug mention (whole word)
+  const byBare = await IMPLS.game_repo.game_clone.run({}, { ...ctxOn(root, `the soul-shift loop needs polish`), agent: "sprite-artist" });
+  assert.equal(JSON.parse(byBare.content).game, "soul-shift");
+
+  // both mentioned: ambiguous refusal naming both
+  const both = await IMPLS.game_repo.game_clone.run({}, ctxOn(root, `port the soul-shift hud into caravan-cargo-cult`));
+  assert.equal(both.is_error, true);
+  void both;
+  assert.match(both.content, /caravan-cargo-cult.*soul-shift|soul-shift.*caravan-cargo-cult/);
+  assert.match(both.content, /pass repo/);
+
+  // nothing mentioned: refusal lists every slug
+  const none = await IMPLS.game_repo.game_clone.run({}, ctxOn(root, `add a pause menu`));
+  assert.equal(none.is_error, true);
+  assert.match(none.content, /caravan-cargo-cult.*soul-shift|soul-shift.*caravan-cargo-cult/);
+
+  // substring must not count: "soul-shifter" is not soul-shift -> no match, refusal again
+  const sub = await IMPLS.game_repo.game_clone.run({}, ctxOn(root, `the soul-shifter variant`));
+  assert.equal(sub.is_error, true);
+  assert.match(sub.content, /several game repos/);
+});
+
+test("T51 game_clone: one repo keeps the old no-cardText behaviour", async () => {
+  const { root } = makeGamesRoot();
+  const solo = await IMPLS.game_repo.game_clone.run({}, ctxFor(root));
+  assert.equal(JSON.parse(solo.content).game, "testgame");
+  // and with a cardText that names it, still fine
+  const named = await IMPLS.game_repo.game_clone.run({}, { ...ctxFor(root), cardText: "games/testgame" });
+  assert.equal(JSON.parse(named.content).game, "testgame");
+});

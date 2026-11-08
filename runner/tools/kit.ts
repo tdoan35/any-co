@@ -19,6 +19,9 @@ export interface ToolContext {
   gameRepoRoot?: string; // where games/ lives (game_repo); defaults to <repo>/games
   agentsDir?: string; // where agents/ lives (board_create assignee check); defaults to <repo>/agents
   board?: Board; // the studio board for board_* tools; unset → those tools answer an error
+  /** T51: this run's card title + body, threaded by the dispatcher so game_clone can infer the
+   *  repo when games/ holds several. Optional; older callers omit it. */
+  cardText?: string;
 }
 
 export interface ToolOutput {

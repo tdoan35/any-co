@@ -460,6 +460,7 @@ export class Dispatcher {
         approver: this.opts.approver ?? denyAll,
         runsDir,
         board, // so board_* tools work inside dispatched runs (real hand-offs)
+        cardText: [card.title, card.body ?? ""].filter(Boolean).join("\n"),
         log: (l) => this.opts.log?.(`  ${l}`),
       });
     } catch (e) {

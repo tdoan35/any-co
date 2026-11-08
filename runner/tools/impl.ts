@@ -515,8 +515,10 @@ function gameRepoDir(root: string, name: string): string | null {
   return existsSync(path.join(dir, ".git")) ? dir : null;
 }
 
-/** The one game repo the run works on: games/<name> (a git repo with >=1 commit). */
-export function resolveGameRepo(root: string, repo?: string): { name: string; dir: string } {
+/** The one game repo the run works on: games/<name> (a git repo with >=1 commit).
+ *  T51: with several repos, `cardText` disambiguates — "games/<slug>" or a whole-word slug mention,
+ *  exactly one distinct match wins; none/ambiguous refuses naming every slug. No env default. */
+export function resolveGameRepo(root: string, repo?: string, cardText?: string): { name: string; dir: string } {
   if (repo !== undefined) {
     if (!GAME_REPO_NAME.test(repo)) throw new Error(`invalid repo name "${repo}": use the bare name under games/ (lowercase letters, digits, "-")`);
     const dir = gameRepoDir(root, repo);
@@ -529,11 +531,23 @@ export function resolveGameRepo(root: string, repo?: string): { name: string; di
   } catch {
     entries = [];
   }
+  const list = (n: string[]) => n.map((x) => `"${x}"`).join(" | ");
+  if (entries.length > 1 && cardText?.trim()) {
+    const text = cardText.toLowerCase();
+    const mentioned = entries.filter((name) => {
+      const low = name.toLowerCase();
+      return text.includes(`games/${low}`) || new RegExp(`(^|[^a-z0-9-])${low}([^a-z0-9-]|$)`).test(text);
+    });
+    const distinct = [...new Set(mentioned)];
+    if (distinct.length === 1) return { name: distinct[0]!, dir: gameRepoDir(root, distinct[0]!)! };
+    if (distinct.length > 1)
+      throw new Error(`several game repos match the card (${distinct.join(", ")}); pass repo: ${list(entries)} explicitly`);
+  }
   if (entries.length !== 1)
     throw new Error(
       entries.length === 0
         ? `no game repo under ${path.basename(root)}/ yet; nothing to work on`
-        : `several game repos (${entries.join(", ")}); pass the repo name`,
+        : `several game repos (${entries.join(", ")}); pass repo: ${list(entries)} — or name one in the card (games/<slug>)`,
     );
   return { name: entries[0], dir: path.join(root, entries[0]) };
 }
@@ -546,7 +560,7 @@ export function resolveGameRepo(root: string, repo?: string): { name: string; di
  * branch stays at origin's tip, with a note. `base` says which start was used (T28).
  */
 async function gameCloneDir(ctx: ToolContext, repo?: string): Promise<{ clone: string; branch: string; src: { name: string; dir: string }; base: string }> {
-  const src = resolveGameRepo(ctx.gameRepoRoot ?? path.join(ROOT, "games"), repo);
+  const src = resolveGameRepo(ctx.gameRepoRoot ?? path.join(ROOT, "games"), repo, ctx.cardText);
   const clone = path.join(ctx.workspace, "game");
   const branch = `agent/${ctx.agent ?? "unknown"}`;
   let base = "existing clone (unchanged)";
@@ -593,7 +607,7 @@ const gameClone: ToolImpl = {
     "Clone the studio's game repo into this run (idempotent) on your own agent branch, and return the clone's path and branch. " +
     "Your branch continues from origin's agent/<you> when earlier runs pushed it (with origin/main merged in), so `git push origin HEAD` fast-forwards; `base` says which start was used. " +
     "Read/write/run there with game_read, game_write, game_exec. You never touch the main repo directly; the Tech Lead merges branches.",
-  input: z.object({ repo: z.string().min(1).max(80).optional().describe("Repo name under games/; omit when the studio has exactly one") }).strict(),
+  input: z.object({ repo: z.string().min(1).max(80).optional().describe("Repo name under games/; with several, omit and name it in the card (games/<slug>) or it is inferred from the card text; with exactly one, omit") }).strict(),
   async run({ repo }, ctx) {
     try {
       const { clone, branch, src, base } = await gameCloneDir(ctx, repo);
