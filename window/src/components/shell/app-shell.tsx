@@ -1,6 +1,6 @@
 import { Link, useLocation } from "react-router";
 import { useEffect, useRef, useState } from "react";
-import { Briefcase, CalendarClock, ChevronRight, Folder, FolderOpen, Gamepad2, Hammer, Archive, Moon, MoreHorizontal, Sun, Pin, PinOff, Trash2, PanelLeftClose, PanelLeftOpen, Search, Settings, Spool, SquareKanban, SquarePen } from "lucide-react";
+import { Briefcase, CalendarClock, ChevronRight, Folder, FolderOpen, Gamepad2, Hammer, Archive, ImageIcon, Moon, MoreHorizontal, Sun, Pin, PinOff, Trash2, PanelLeftClose, PanelLeftOpen, Search, Settings, Spool, SquareKanban, SquarePen } from "lucide-react";
 import {
   Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarInset,
   SidebarMenu, SidebarMenuAction, SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem, SidebarMenuSub, SidebarMenuSubButton, SidebarMenuSubItem, SidebarProvider, useSidebar,
@@ -33,6 +33,7 @@ const nav = [
   { href: "/agents", label: "Agents", icon: Hammer, match: (p: string) => p.startsWith("/agents") },
   { href: "/schedule", label: "Schedule", icon: CalendarClock, match: (p: string) => p.startsWith("/schedule") },
   { href: "/work", label: "Work", icon: Briefcase, match: (p: string) => p.startsWith("/work") || p.startsWith("/runs") || p.startsWith("/reports") },
+  { href: "/gallery", label: "Gallery", icon: ImageIcon, match: (p: string) => p.startsWith("/gallery") },
 ];
 
 /** Asks waiting on you in Weave. Amber, never red: urgent without being loud. Collapsed, it shrinks to a dot on the icon. */

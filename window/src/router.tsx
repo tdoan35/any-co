@@ -6,6 +6,7 @@ import { AgentsPage } from "@/routes/agents";
 import { WeavePage } from "@/routes/weave";
 import { runRedirectLoader } from "@/routes/run";
 import { WorkPage, workLoader, workShouldRevalidate } from "@/routes/work";
+import { GalleryPage, galleryLoader } from "@/routes/gallery";
 import { TaskPage, taskLoader } from "@/routes/task";
 import { SchedulePageRoute, scheduleLoader, scheduleShouldRevalidate } from "@/routes/schedule";
 import { ReportPage, reportLoader } from "@/routes/report";
@@ -26,6 +27,7 @@ export const createRouter = () => createBrowserRouter([
           // Old Teams links land on the studio chart.
           { path: "teams", loader: () => redirect("/agents") },
           { path: "work", element: <WorkPage />, loader: workLoader, shouldRevalidate: workShouldRevalidate },
+          { path: "gallery", element: <GalleryPage />, loader: galleryLoader },
           { path: "schedule", element: <SchedulePageRoute />, loader: scheduleLoader, shouldRevalidate: scheduleShouldRevalidate },
           { path: "work/:taskId", element: <TaskPage />, loader: taskLoader },
           // Runs are a task's loops now; old links redirect to the task.
