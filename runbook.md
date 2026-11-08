@@ -3,13 +3,28 @@
 For overnight operations. Fill in as the harness takes shape.
 
 ## Start the studio
-`npm run studio` — the dispatcher polls the studio board and runs local agents on due cards:
-one card per agent at a time, `blocked_by` for order, `--max-parallel N` (default 2),
-`--poll-s S` (default 10), `--once` for a single pass (cron), `--approve-all` to pass the ask-gate.
-Board backend: `STUDIO_BOARD=local` (default; `runs/board.jsonl`, override `STUDIO_BOARD_FILE`) or
-`STUDIO_BOARD=naive` (needs `NAIVE_API_KEY` + `STUDIO_BOARD_REF` = the Studio Head agent's `brd_`/`agt_`
-id). Cards come from the Studio Head (`board_create`) or by hand; done notes carry run id and spend.
-Restart-safe: on startup a `doing` card with no live run is requeued to `todo` with a comment.
+Overnight command (two terminals, from the repo root):
+```
+npm run studio -- --head-every-min 120 --max-parallel 2 --approval-timeout-min 30
+npm run window:live          # operator view + chat; same board, read-only cards
+```
+- The dispatcher polls the board (`--poll-s`, default 10) and runs local agents on due cards: one card
+  per agent, `blocked_by` for order, `--max-parallel` runs at once. Done notes carry run id and spend.
+- Studio Head cycle: every `--head-every-min` minutes one `studio-head` turn (single-flight) reads the
+  board, runs, spend and ledger, then unblocks, cuts or assigns next work as cards, logging each steering
+  decision. It also runs once at start when the board is empty and the ledger has a `greenlight.pick`,
+  so work begins after the pick with no human. Off without the flag.
+- Approvals: `ask` tools in dispatched runs wait on the queue — decide with
+  `npm run approvals -- list | approve <id> | deny <id> --note "..."`; unanswered requests expire after
+  `--approval-timeout-min`. `--approve-all` is for tests only (ledgered as auto).
+- One loop per runs dir: `runs/studio.lock` (pid+host) refuses a second `npm run studio` while the first
+  lives. If the holder died, the next start takes the lock over; on another host, remove the file by hand.
+- Board backend: `STUDIO_BOARD=local` (default; `runs/board.jsonl`, override `STUDIO_BOARD_FILE`) or
+  `STUDIO_BOARD=naive` (`NAIVE_API_KEY` + `STUDIO_BOARD_REF` = the Studio Head agent's `brd_`/`agt_` id).
+- Restart-safe: a `doing` card whose claiming process is dead is requeued to `todo` with a comment; a card
+  whose finished run could not be closed is left for a manual close (comment `dispatcher: close failed`).
+- Stop: `touch runs/KILL` (no new dispatches; in-flight runs stop at their next call, cards requeue).
+
 ## Check health (what "fine" looks like)
 - `npm run runs -- orphans` prints `no orphaned runs`: every run at status "running" has a live
   pid on this host and a heartbeat under 10 min old (`STUDIO_ORPHAN_AFTER_MIN` to change).

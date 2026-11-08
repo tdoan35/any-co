@@ -9,6 +9,7 @@ import { FakeProvider } from "../../runner/providers.ts";
 import type { ToolUseBlock } from "../../runner/types.ts";
 import { ago, plainText } from "./chat.ts";
 import { startServer } from "./index.ts";
+import { LocalBoard } from "../../runner/board/local.ts";
 
 const use = (name: string, input: Record<string, unknown>, id: string): ToolUseBlock => ({ type: "tool_use", id, name, input });
 const POST = (body: unknown, headers: Record<string, string> = {}) => ({ method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
@@ -210,4 +211,33 @@ test("plainText: strips markdown the chat window would show literally, keeps rea
   assert.equal(plainText("see [docs](https://x.example/a) now"), "see docs (https://x.example/a) now");
   assert.equal(plainText("2 * 3 = 6 and snake_case_name stay"), "2 * 3 = 6 and snake_case_name stay");
   assert.equal(plainText("- already a list\n- fine"), "- already a list\n- fine");
+});
+
+test("chat: a Studio Head turn reaches the same board the loop uses (board_list sees the loop's card)", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "window-chat-board-"));
+  const board = new LocalBoard(path.join(dir, "board.jsonl"));
+  const { card } = await board.create({ title: "Seeded by the loop", assignee: "market-analyst" });
+  const provider = new FakeProvider([
+    { content: [use("board_list", {}, "call-b")] },
+    { content: [{ type: "text", text: "One card." }] },
+  ]);
+  const srv = await startServer({ runsDir: dir, port: 0, providerFor: () => provider, ledgerFile: path.join(dir, "l.jsonl"), board });
+  const base = `http://127.0.0.1:${srv.port}/api`;
+  try {
+    const { sessionId } = await (await fetch(`${base}/sessions`, POST({ agentId: "studio-head" }))).json() as { sessionId: string };
+    const f = await follow(`${base}/sessions/${sessionId}/stream`);
+    await fetch(`${base}/sessions/${sessionId}/messages`, POST({ clientMessageId: crypto.randomUUID(), text: "what is on the board?" }));
+    await f.waitFor(() => f.events().some((e) => e.type === "agent.message"), "the answer");
+    const done = f.events().find((e) => e.type === "tool.completed")!.payload as { result: string; error?: boolean };
+    assert.equal(done.error, undefined);
+    assert.match(done.result, new RegExp(card.id));
+    // and the weave shows the same board
+    await board.update(card.id, { status: "doing" });
+    const weave = await (await fetch(`${base}/weave`)).json() as { presence: Array<{ agentId: string; state: string }> };
+    assert.equal(weave.presence.find((x) => x.agentId === "market-analyst")?.state, "working");
+    f.stop();
+  } finally {
+    await srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
