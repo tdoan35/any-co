@@ -196,3 +196,17 @@ test("runs carry their game: the clone origin's basename, else a games/<slug> me
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("board cards carry their game: games/<slug>, else one whole-word slug, else an import sidecar, else null", async () => {
+  const { gameOfCard, countsByGame, boardCards } = await import("./board-summary.ts");
+  const games = ["caravan-cargo-cult", "soul-shift"];
+  const imported = new Map([["crd_imp", "soul-shift"]]);
+  const card = (id: string, title: string, body = "") => ({ id, title, body });
+  assert.equal(gameOfCard(card("a", "Fix HUD", "work in games/caravan-cargo-cult"), games, imported), "caravan-cargo-cult");
+  assert.equal(gameOfCard(card("b", "soul-shift: new cover"), games, imported), "soul-shift");
+  assert.equal(gameOfCard(card("c", "compare caravan-cargo-cult and soul-shift"), games, imported), null, "two games named: ambiguous");
+  assert.equal(gameOfCard(card("crd_imp", "Ghost sprites"), games, imported), "soul-shift", "sidecar");
+  assert.equal(gameOfCard(card("d", "Plan the next cycle"), games, imported), null);
+  const views = boardCards([{ id: "x", title: "games/soul-shift art", body: "", status: "done", assignee: "sprite-artist", blocked_by: [], note: null, created_at: "2026-11-08T00:00:00Z" } as any], games, imported);
+  assert.deepEqual(countsByGame(views), { "soul-shift": { todo: 0, doing: 0, blocked: 0, done: 1 } });
+});

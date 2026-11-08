@@ -14,6 +14,7 @@ import type { Provider } from "../../runner/types.ts";
 import { ChatEngine, ChatError } from "./chat.ts";
 import { boardFromEnv } from "../../runner/board/index.ts";
 import type { Board } from "../../runner/board/index.ts";
+import { boardCards, countsByGame, importedCardGames, knownGames, summarizeBoard } from "./board-summary.ts";
 import { buildRegistry, PROJECT } from "./registry.ts";
 import { galleryRoute } from "./gallery.ts";
 import { gameOfRun, mapRun, parseTranscript, type MappedRun } from "./runs.ts";
@@ -144,6 +145,12 @@ export async function startServer(opts: ServerOptions = {}) {
     if (a === "art-gallery") return galleryRoute(seg.slice(2), gamesRoot); // seg = ["api", "art-gallery", <repo>?, ...]
     if (a === "registry" && !b) return ok(buildRegistry(specs, new Set(runs().filter((r) => r.run.status === "running").map((r) => r.agent)), engine.list()));
     if (a === "interventions" && !b) return ok(engine.interventions());
+    if (a === "board-summary" && !b) {
+      const cards = await board.list();
+      const views = boardCards(cards, knownGames(gamesRoot), importedCardGames(runsDir));
+      return ok({ ...summarizeBoard(cards, runs().filter((r) => !r.chat).map((r) => ({ agent: r.agent, running: r.run.status === "running" }))), byGame: countsByGame(views) });
+    }
+    if (a === "board-cards" && !b) return ok(boardCards(await board.list(), knownGames(gamesRoot), importedCardGames(runsDir)));
     if (a === "weave" && !b) return ok(buildWeave(runs(), specs.map((s) => s.name), approvalsFile, runsDir, await board.list()));
     if (a === "projects" && !b) return ok([PROJECT]);
     if (a === "tasks") {
