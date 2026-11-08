@@ -8,9 +8,13 @@ export default defineAgent({
   description: "Art: tilesets, UI panels, and capsule art generated from the locked style; declares manifest entries and gates them.",
   dept: "art",
   runner: "local",
-  model: "z-ai/glm-5.3",
-  budget: { cap_usd: 12, max_task_usd: 4, period: "day" },
-  tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", art_tools: "allow", art_generate: "allow", studio_ledger: "allow" },
+  model: "anthropic/claude-opus-5.5", // Naïve catalogue id, used if this agent is ever hosted
+  // Nov 7 batch art: local runs on Opus 5.5 via the Neon gateway (as art-director, 2e161c8): generations are the scarce
+  // resource (PixelLab subscription, no top-ups), so the artist that spends them should be the most reliable tool user,
+  // and image_view needs the OpenAI-compatible path (the Naïve proxy rejects image blocks).
+  provider: { kind: "openai_compatible", model: "claude-opus-5-5", base_url_env: "NEON_AI_BASE_URL", api_key_env: "NEON_AI_API_KEY", usd_per_mtok: { input: 4, output: 20 } },
+  budget: { cap_usd: 40, max_task_usd: 12, period: "day" }, // Opus via Neon; PixelLab spend is in generations, tracked by art_generate
+  tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", art_tools: "allow", art_generate: "allow", image_view: "allow", studio_ledger: "allow" },
   output_schema: z
     .object({
       generated: z
@@ -36,5 +40,5 @@ export default defineAgent({
       notes: z.string().max(400),
     })
     .strict(),
-  limits: { max_turns: 40, max_output_tokens: 8192 },
+  limits: { max_turns: 90, max_output_tokens: 12288 },
 });
