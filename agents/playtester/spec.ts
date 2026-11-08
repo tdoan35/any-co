@@ -56,5 +56,5 @@ export default defineAgent({
       suggestions: z.array(z.string().max(200)).max(5).describe("Smallest changes that would most help; the Director decides"),
     })
     .strict(),
-  limits: { max_turns: 60, max_output_tokens: 12288 },
+  limits: { max_turns: 90, max_output_tokens: 12288 }, // Nov 8: last run used all 60 turns
 });
