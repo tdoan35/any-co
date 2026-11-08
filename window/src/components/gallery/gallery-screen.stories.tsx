@@ -41,8 +41,8 @@ export const FiltersNarrowTheGrid: Story = {
     await userEvent.click(canvas.getByRole("button", { name: /^accepted$/ }));
     expect(canvas.getAllByRole("button", { name: /Open details/ })).toHaveLength(2);
     // Back to everything.
-    await userEvent.click(canvas.getAllByRole("button", { name: /^all$/ })[0]);
-    await userEvent.click(canvas.getAllByRole("button", { name: /^all$/ })[1]);
+    await userEvent.click(within(canvas.getByRole("group", { name: "Provider" })).getByRole("button", { name: "all" }));
+    await userEvent.click(within(canvas.getByRole("group", { name: "Verdict" })).getByRole("button", { name: "all" }));
     expect(canvas.getAllByRole("button", { name: /Open details/ })).toHaveLength(12);
   },
 };

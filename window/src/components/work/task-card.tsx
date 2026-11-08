@@ -13,11 +13,12 @@ import { AskFlag, FaceStack, StatePill, StepDots, card } from "./parts";
  * `lens` decides what the corner names: the team (on a project board) or the project (on a team board).
  */
 export function TaskCard({ s, lens, project }: { s: TaskSummary; lens: "project" | "team"; project?: Project }) {
-  const lead = runnerOf(s.team, s.loops.at(-1));
+  // A queued board card has no run yet: its assignee is who picks it up.
+  const lead = (s.loops.length === 0 && s.card?.assignee) || runnerOf(s.team, s.loops.at(-1));
   const state = loopState(s);
   const loopCount = s.loops.length;
   const meta: string[] = [];
-  if (s.column !== "proposed") meta.push(`rework ${s.reworkUsed}/${s.reworkBudget}`);
+  if (s.column !== "proposed" && s.reworkBudget > 0) meta.push(`rework ${s.reworkUsed}/${s.reworkBudget}`);
   if (s.etaAt && s.column !== "done" && !s.note) meta.push(`ETA ${when(s.etaAt)}`);
   return (
     <motion.article

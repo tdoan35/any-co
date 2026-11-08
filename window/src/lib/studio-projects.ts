@@ -47,18 +47,20 @@ function foldersFor(studio: Studio, repos: string[] | undefined): StudioGame[] {
 }
 
 /**
- * Every configured studio's game folders, flat and in config order — the folder list for
- * the sidebar's Projects section. Single-studio mode (no VITE_STUDIOS) derives its games
+ * Every configured studio's game folders, flat and in config order. The sidebar's Projects
+ * section uses it only for the studios that are not active (their Work data is not loaded);
+ * the active studio's projects come from the Work view itself. Single-studio mode (no VITE_STUDIOS) derives its games
  * from the single API base exactly the same way, so every launcher behaves alike. Fetches
  * run once on mount and again on a slow refresh; a failed fetch keeps the last good answer
  * (the studio label to start with) and never blocks the sidebar.
  */
-export function useStudioProjects(fetchGallery: GalleryFetcher = httpFetcher): StudioGame[] {
+export function useStudioProjects(fetchGallery: GalleryFetcher = httpFetcher, exclude?: string): StudioGame[] {
   const { studios } = useStudio();
   const list = useMemo<Studio[]>(
     // No VITE_STUDIOS: one implicit studio on the single API base, like the rest of the app.
-    () => (studios.length ? studios : [{ id: "single", label: "any-co", api: singleApiBase }]),
-    [studios],
+    // `exclude` skips a studio whose projects the caller already has (the active one).
+    () => (studios.length ? studios : [{ id: "single", label: "any-co", api: singleApiBase }]).filter((s) => s.id !== exclude),
+    [studios, exclude],
   );
   const [repos, setRepos] = useState<Record<string, string[]>>({});
 

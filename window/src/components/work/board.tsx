@@ -14,7 +14,7 @@ import { Face, agentOf } from "@/components/weave/parts";
 import { studioTeams, useRegistry } from "@/lib/registry";
 import type { StudioTeam } from "@fabric/contracts";
 import type { Project } from "@/lib/mock/sessions";
-import { api, httpMode } from "@/lib/api";
+import { STUDIO_PROJECT_ID, api, httpMode } from "@/lib/api";
 import { isActive } from "@/lib/run-state";
 import type { Run, Task } from "@/lib/types";
 import { COLUMNS, activityAt, byUrgency, leadOf, previousLoops, summarize, teamById, waitingCount, when, type Column, type TaskSummary } from "@/lib/work";
@@ -23,11 +23,12 @@ import { cn } from "@/lib/utils";
 import { PreviousLoops } from "./history";
 import { FaceStack, card } from "./parts";
 import { TaskCard } from "./task-card";
+import { ProjectGantt } from "./gantt";
 
 type Lens = "projects" | "teams";
 const LENSES = [{ value: "projects", label: "Projects" }, { value: "teams", label: "Teams" }] as const;
-type ProjectTab = "board" | "history";
-const PROJECT_TABS = [{ value: "board", label: "Board" }, { value: "history", label: "History" }] as const;
+type ProjectTab = "gantt" | "board" | "history";
+const PROJECT_TABS = [{ value: "gantt", label: "Gantt" }, { value: "board", label: "Board" }, { value: "history", label: "History" }] as const;
 
 /**
  * Work: every task as a card, current and previous loops.
@@ -51,7 +52,7 @@ export function WorkBoard({ projects, tasks, runs }: { projects: Project[]; task
   }, { replace: true });
 
   const scope: Scope = params.get("scope") === "archived" ? "archived" : "active";
-  const tab: ProjectTab = params.get("tab") === "history" ? "history" : "board";
+  const tab: ProjectTab = params.get("tab") === "history" ? "history" : params.get("tab") === "gantt" ? "gantt" : "board";
   const waitingOnYou = summaries.reduce((n, s) => n + waitingCount(s), 0);
   const inFlight = summaries.filter((s) => s.column === "in_progress" || s.column === "in_review").length;
 
@@ -73,7 +74,7 @@ export function WorkBoard({ projects, tasks, runs }: { projects: Project[]; task
           <LayoutGroup>
             {lens === "projects"
               ? focus
-                ? <ProjectBoard project={focus} summaries={summaries.filter((s) => s.task.projectId === focus.id)} tab={tab} onTab={(v) => set({ tab: v === "history" ? "history" : null })} />
+                ? <ProjectBoard project={focus} summaries={summaries.filter((s) => s.task.projectId === focus.id)} tab={tab} onTab={(v) => set({ tab: v === "board" ? null : v })} />
                 : <ProjectIndex projects={projects} summaries={summaries} scope={scope} onScope={(v) => set({ scope: v === "archived" ? "archived" : null })} />
               : <TeamsLens team={team} projects={projects} summaries={summaries} onTeam={(id) => set({ team: id })} />}
           </LayoutGroup>
@@ -129,6 +130,20 @@ const ORDERS: { value: Order; label: string }[] = [
   { value: "name", label: "Name" },
 ];
 
+const sectionHead = "mb-2 px-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground";
+const usd = (n: number) => `$${n < 100 ? n.toFixed(2) : Math.round(n).toLocaleString()}`;
+
+/** Spend and runs across a project's loops, plus its open and blocked board cards (live). */
+function projectStats(mine: TaskSummary[]) {
+  const loops = mine.flatMap((s) => s.loops);
+  return {
+    spend: loops.reduce((n, r) => n + r.costUsd, 0),
+    runs: loops.length,
+    open: mine.filter((s) => s.card && s.card.status !== "done").length,
+    blocked: mine.filter((s) => s.card?.status === "blocked").length,
+  };
+}
+
 /** Every project as one row, by default the ones waiting on you first, then the most recently active. Opening one shows its board. */
 function ProjectIndex({ projects, summaries, scope, onScope }: { projects: Project[]; summaries: TaskSummary[]; scope: Scope; onScope: (v: Scope) => void }) {
   const [order, setOrder] = useState<Order>("needs");
@@ -142,7 +157,7 @@ function ProjectIndex({ projects, summaries, scope, onScope }: { projects: Proje
     .map((p) => {
       const mine = summaries.filter((s) => s.task.projectId === p.id);
       return {
-        project: p, mine,
+        project: p, mine, ...projectStats(mine),
         waiting: mine.reduce((n, s) => n + waitingCount(s), 0),
         last: mine.map(activityAt).sort().at(-1),
       };
@@ -153,6 +168,59 @@ function ProjectIndex({ projects, summaries, scope, onScope }: { projects: Proje
       if (order === "recent") return recent;
       return b.waiting - a.waiting || recent;
     });
+  /** Rows as one card list: name and goal, the teams on it, its status bar, then what needs you and its spend. */
+  const list = (rs: typeof rows) => (
+            <ul className={cn(card, "divide-y divide-foreground/10")}>
+              {rs.map(({ project, mine, waiting, last, spend, runs, blocked, open }) => {
+                const teams = [...new Set(mine.map((s) => s.task.teamId))].map(teamById);
+                return (
+                  <li key={project.id}>
+                    <Link
+                      to={`/work?project=${project.id}`}
+                      className="group grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-5 px-4 py-3 transition-colors first:rounded-t-xl last:rounded-b-xl hover:bg-foreground/5 md:grid-cols-[minmax(0,1fr)_auto_9rem_auto]"
+                    >
+                      <span className="flex min-w-0 items-start gap-2.5">
+                        <FolderOpen className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                        <span className="min-w-0">
+                          <span className="block truncate text-sm font-semibold">{project.name}</span>
+                          <span className="block truncate text-xs text-muted-foreground">{project.goal}</span>
+                        </span>
+                      </span>
+                      <span className="hidden md:flex">
+                        {teams.length > 0 && <FaceStack ids={teams.map(leadOf)} size="size-5" />}
+                      </span>
+                      <span className="hidden md:block">
+                        {mine.length ? <StatusBar summaries={mine} /> : <span className="text-xs text-muted-foreground">No work yet</span>}
+                      </span>
+                      <span className="flex items-center justify-end gap-3">
+                        {waiting > 0 && (
+                          <span className="inline-flex items-center gap-1.5 rounded-md border border-warn/30 bg-warn-soft px-1.5 py-0.5 text-[11px] font-medium text-warn">
+                            <Hourglass className="size-3" />{waiting} waiting on you
+                          </span>
+                        )}
+                        {blocked > 0 && (
+                          <span className="inline-flex items-center rounded-md border border-warn/30 bg-warn-soft px-1.5 py-0.5 text-[11px] font-medium text-warn">{blocked} blocked</span>
+                        )}
+                        {httpMode && runs > 0 && (
+                          <span className="hidden text-right text-[11px] leading-tight tabular-nums text-muted-foreground lg:block" title={`${runs} agent runs, $${spend.toFixed(2)} of inference`}>
+                            <span className="block font-medium text-foreground/80">{usd(spend)}</span>
+                            <span className="block">{runs} runs{open > 0 ? ` · ${open} open` : ""}</span>
+                          </span>
+                        )}
+                        <span className="hidden w-14 text-right text-xs tabular-nums text-muted-foreground sm:inline">{last ? when(last) : ""}</span>
+                        <ChevronRight className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:text-foreground" />
+                      </span>
+                    </Link>
+                  </li>
+                );
+              })}
+            </ul>
+  );
+  // The studio's own work (planning cycles, Greenlight, ops, the site) is not a game: it sits in its own section.
+  const games = rows.filter((r) => r.project.id !== STUDIO_PROJECT_ID);
+  const studio = rows.filter((r) => r.project.id === STUDIO_PROJECT_ID);
+  const totalSpend = rows.reduce((n, r) => n + r.spend, 0);
+  const studioSpend = studio.reduce((n, r) => n + r.spend, 0);
   const closeSearch = () => { setQuery(""); setSearching(false); };
   return (
     <>
@@ -198,42 +266,26 @@ function ProjectIndex({ projects, summaries, scope, onScope }: { projects: Proje
             </p>
           )
           : (
-            <ul className={cn(card, "divide-y divide-foreground/10")}>
-              {rows.map(({ project, mine, waiting, last }) => {
-                const teams = [...new Set(mine.map((s) => s.task.teamId))].map(teamById);
-                return (
-                  <li key={project.id}>
-                    <Link
-                      to={`/work?project=${project.id}`}
-                      className="group grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-5 px-4 py-3 transition-colors first:rounded-t-xl last:rounded-b-xl hover:bg-foreground/5 md:grid-cols-[minmax(0,1fr)_auto_9rem_auto]"
-                    >
-                      <span className="flex min-w-0 items-start gap-2.5">
-                        <FolderOpen className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                        <span className="min-w-0">
-                          <span className="block truncate text-sm font-semibold">{project.name}</span>
-                          <span className="block truncate text-xs text-muted-foreground">{project.goal}</span>
-                        </span>
-                      </span>
-                      <span className="hidden md:flex">
-                        {teams.length > 0 && <FaceStack ids={teams.map(leadOf)} size="size-5" />}
-                      </span>
-                      <span className="hidden md:block">
-                        {mine.length ? <StatusBar summaries={mine} /> : <span className="text-xs text-muted-foreground">No work yet</span>}
-                      </span>
-                      <span className="flex items-center justify-end gap-3">
-                        {waiting > 0 && (
-                          <span className="inline-flex items-center gap-1.5 rounded-md border border-warn/30 bg-warn-soft px-1.5 py-0.5 text-[11px] font-medium text-warn">
-                            <Hourglass className="size-3" />{waiting} waiting on you
-                          </span>
-                        )}
-                        <span className="hidden w-14 text-right text-xs tabular-nums text-muted-foreground sm:inline">{last ? when(last) : ""}</span>
-                        <ChevronRight className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:text-foreground" />
-                      </span>
-                    </Link>
-                  </li>
-                );
-              })}
-            </ul>
+            <>
+              {games.length > 0 && (
+                <section aria-label="Games">
+                  {studio.length > 0 && <h2 className={sectionHead}>Games</h2>}
+                  {list(games)}
+                </section>
+              )}
+              {studio.length > 0 && (
+                <section aria-label="Studio" className={cn(games.length > 0 && "mt-8")}>
+                  <h2 className={sectionHead}>Studio</h2>
+                  <p className="mb-2.5 px-1 text-xs leading-relaxed text-muted-foreground">
+                    Work that runs the studio rather than a game: planning cycles, Greenlight picking the games, ops, and the site.
+                    {httpMode && totalSpend > 0 && (
+                      <> {usd(studioSpend)} of {usd(totalSpend)} spent here; the rest went into the games.</>
+                    )}
+                  </p>
+                  {list(studio)}
+                </section>
+              )}
+            </>
           )}
       </div>
       <NewProjectDialog open={creating} onOpenChange={setCreating} />
@@ -336,6 +388,9 @@ function ProjectBoard({ project, summaries, tab, onTab }: { project: Project; su
         </div>
         <Segmented value={tab} options={PROJECT_TABS} onChange={onTab} />
       </div>
+      {tab === "gantt"
+        ? <div className="min-h-0 flex-1"><ProjectGantt summaries={summaries} /></div>
+        : (
       <div className={panelBody}>
         {tab === "history"
           ? <div className="px-5 pb-8 pt-5"><PreviousLoops loops={loops} projects={[project]} lens="project" /></div>
@@ -370,6 +425,7 @@ function ProjectBoard({ project, summaries, tab, onTab }: { project: Project; su
               </div>
             )}
       </div>
+        )}
     </>
   );
 }

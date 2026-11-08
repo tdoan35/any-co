@@ -11,6 +11,7 @@ import {
 import { createSession, followSession, postMessage } from "@fabric/contracts";
 import { z } from "zod";
 import { currentApiBase } from "../studio";
+import { buildBoardView, type BoardCardRow, type BoardView } from "./board-view";
 
 const dev = import.meta.env.DEV;
 
@@ -60,22 +61,68 @@ const gallerySchema = z.object({ repos: z.array(z.string()), entries: z.array(ga
 const statusCountsSchema = z.object({ todo: z.number(), doing: z.number(), blocked: z.number(), done: z.number() });
 const boardSummarySchema = z.object({ byAssignee: z.record(z.string(), statusCountsSchema), runsByAgent: z.record(z.string(), z.number()).default({}) });
 export type BoardSummary = z.infer<typeof boardSummarySchema>;
+const showcaseSchema = z.array(z.object({
+  game: z.string(), name: z.string(), itchUrl: z.string().nullable(), cover: z.string().nullable(),
+  capsules: z.array(z.string()), trailer: z.string().nullable(), storeMd: z.string().nullable(),
+}));
+/** One studio-made game as the showcase presents it: store art, trailer, itch page (GET /api/showcase). */
+export type ShowcaseGame = z.infer<typeof showcaseSchema>[number];
 const decisionSchema = z.object({ ok: z.boolean(), id: z.string(), decision: z.enum(["kept", "forgotten"]) });
+
+const boardCardSchema = z.object({
+  id: z.string(), title: z.string(), status: z.enum(["todo", "doing", "blocked", "done"]), assignee: z.string().nullable(),
+  game: z.string().nullable(), created_at: z.string(), updated_at: z.string(), upstream: z.array(z.string()).optional(),
+});
+
+/**
+ * The Work view (projects per game, board cards as tasks; see board-view.ts), built from the adapter's runs,
+ * per-run tasks and board cards. One build serves every loader in a navigation (cached for a few seconds).
+ * An adapter without /board-cards still gets projects per game, with one task per run.
+ */
+let view: { at: number; base: string; promise: Promise<BoardView> } | undefined;
+let latestView: BoardView | undefined;
+function boardView(): Promise<BoardView> {
+  const base = currentApiBase();
+  if (view && view.base === base && Date.now() - view.at < 5_000) return view.promise;
+  const promise = Promise.all([
+    request<Task[]>("/tasks", z.array(TaskSchema)),
+    request<Run[]>("/runs", z.array(RunSchema)),
+    request<BoardCardRow[]>("/board-cards", z.array(boardCardSchema)).catch(() => [] as BoardCardRow[]),
+    request<Registry>("/registry", RegistrySchema),
+  ]).then(([tasks, runs, cards, registry]) => {
+    const teamOfAgent = (agent: string) => registry.teams.find((t) => t.members.some((m) => m.agentId === agent))?.id;
+    return (latestView = buildBoardView({ tasks, runs, cards, teamOfAgent }));
+  });
+  promise.catch(() => { view = undefined; });
+  view = { at: Date.now(), base, promise };
+  return promise;
+}
+/** The board card behind a live task, from the last Work view built (undefined in mock mode or for run-only tasks). */
+export const boardCardOf = (taskId: string) => latestView?.cards.get(taskId);
 
 export const httpApi = {
   /** Human interventions in the studio ledger since the event started (chat messages, logged by the adapter). */
   getInterventions: () => request<Interventions>("/interventions", interventionsSchema),
   /** Kept art candidates and contact sheets from the studio game repo(s) (T18). */
   getGallery: () => request<ArtGallery>("/art-gallery", gallerySchema),
+  /** Each game's store art, trailer and itch page; [] from an adapter without /api/showcase. */
+  getShowcase: () => request<ShowcaseGame[]>("/showcase", showcaseSchema).catch(() => [] as ShowcaseGame[]),
   getRegistry: () => request<Registry>("/registry", RegistrySchema),
   getWeave: () => request<WeaveSnapshot>("/weave", WeaveSnapshotSchema),
   /** Board card counts per assignee and status (Flow tab: where the game sits in the pipeline). */
   getBoardSummary: () => request<BoardSummary>("/board-summary", boardSummarySchema),
-  listProjects: () => request<Project[]>("/projects", z.array(ProjectSchema)),
+  /** One project per game, plus Studio (board-view.ts); the adapter's single "studio" project is not used. */
+  listProjects: async (): Promise<Project[]> => (await boardView()).projects,
   createProject: (input: { name: string; goal: string }) => request<Project>("/projects", ProjectSchema, json(input)),
-  listTasks: () => request<Task[]>("/tasks", z.array(TaskSchema)),
+  /** Board cards as tasks (holding their runs), plus one task per card-less run. */
+  listTasks: async (): Promise<Task[]> => (await boardView()).tasks,
   listRuns: () => request<Run[]>("/runs", z.array(RunSchema)),
-  getTask: (id: string) => request<Task | undefined>(`/tasks/${encodeURIComponent(id)}`, TaskSchema, undefined, true),
+  /** A card task by id, or the task now holding an adapter task's run (runs and reports link by the old id). */
+  getTask: async (id: string): Promise<Task | undefined> => {
+    const v = await boardView();
+    const held = v.taskOf.get(id) ?? id;
+    return v.tasks.find((t) => t.id === held) ?? request<Task | undefined>(`/tasks/${encodeURIComponent(id)}`, TaskSchema, undefined, true);
+  },
   getRun: (id: string) => request<Run | undefined>(`/runs/${encodeURIComponent(id)}`, RunSchema, undefined, true),
   getRunEvents: (id: string) => request<RunEvent[]>(`/runs/${encodeURIComponent(id)}/events`, z.array(RunEventSchema)),
   getSnapshots: (id: string) => request<ContextSnapshot[]>(`/runs/${encodeURIComponent(id)}/snapshots`, z.array(ContextSnapshotSchema)),

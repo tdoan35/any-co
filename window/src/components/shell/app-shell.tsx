@@ -1,9 +1,9 @@
 import { Link, useLocation } from "react-router";
 import { useEffect, useRef, useState } from "react";
-import { Briefcase, CalendarClock, ChevronRight, Folder, FolderOpen, Gamepad2, Hammer, Archive, ImageIcon, Moon, MoreHorizontal, Sun, Pin, PinOff, Trash2, PanelLeftClose, PanelLeftOpen, Search, Settings, Spool, SquareKanban, SquarePen } from "lucide-react";
+import { Briefcase, CalendarClock, ChevronRight, Gamepad2, Hammer, Archive, ImageIcon, Moon, MoreHorizontal, Sun, Pin, PinOff, Trash2, PanelLeftClose, PanelLeftOpen, Search, Settings, Spool, SquarePen } from "lucide-react";
 import {
   Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarInset,
-  SidebarMenu, SidebarMenuAction, SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem, SidebarMenuSub, SidebarMenuSubButton, SidebarMenuSubItem, SidebarProvider, useSidebar,
+  SidebarMenu, SidebarMenuAction, SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem, SidebarProvider, useSidebar,
 } from "@/components/ui/sidebar";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { AuroraBackground } from "@/components/aurora-background";
@@ -11,8 +11,8 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import type { Project, Session, SessionStatus } from "@fabric/contracts";
-import { projects, sessions, studioTeams, profileById, useRegistry } from "@/lib/registry";
+import type { Session, SessionStatus } from "@fabric/contracts";
+import { sessions, studioTeams, profileById, useRegistry } from "@/lib/registry";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { useTheme } from "@/hooks/use-theme";
 import { desktop } from "@/lib/desktop";
@@ -264,36 +264,6 @@ function SessionRow({ session, pinned, onPin, onRemove, onOpen }: {
   );
 }
 
-function ProjectFolder({ project }: { project: Project }) {
-  const [open, setOpen] = useState(project.id === "engram");
-  const items = sessions().filter((x) => x.projectId === project.id);
-  return (
-    <Collapsible open={open} onOpenChange={setOpen} asChild>
-      <SidebarMenuItem>
-        <CollapsibleTrigger asChild>
-          <SidebarMenuButton className="group/row pr-8">
-            {open ? <FolderOpen /> : <Folder />}
-            <span className="min-w-0 flex-1 truncate text-left">{project.name}</span>
-            <ChevronRight className={cn("size-4 shrink-0 text-muted-foreground opacity-0 transition group-hover/row:opacity-100 group-focus-visible/row:opacity-100", open && "rotate-90")} />
-          </SidebarMenuButton>
-        </CollapsibleTrigger>
-        <SidebarMenuAction asChild showOnHover>
-          <Link to={`/work?project=${project.id}`} aria-label={`${project.name} board`} title="Open the project's board in Work"><SquareKanban /></Link>
-        </SidebarMenuAction>
-        <CollapsibleContent>
-          <SidebarMenuSub>
-            {items.map((x) => (
-              <SidebarMenuSubItem key={x.id}>
-                <SidebarMenuSubButton asChild><Link to={sessionHref(x)}><span>{x.title}</span></Link></SidebarMenuSubButton>
-              </SidebarMenuSubItem>
-            ))}
-          </SidebarMenuSub>
-        </CollapsibleContent>
-      </SidebarMenuItem>
-    </Collapsible>
-  );
-}
-
 const SIDEBAR_MIN = 200, SIDEBAR_MAX = 420;
 
 function SidebarResizeHandle({ width, onWidth, onDragging }: { width: number; onWidth: (w: number) => void; onDragging: (d: boolean) => void }) {
@@ -371,9 +341,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </SidebarMenu>
           </SidebarGroup>
           <CollapsibleSection title="Projects" scroll="capped">
-            {httpMode
-              ? <StudioProjects />
-              : projects().filter((p) => !p.archived).map((p) => <ProjectFolder key={p.id} project={p} />)}
+            <StudioProjects />
           </CollapsibleSection>
           <CollapsibleSection title="Threads" scroll="fill">
             {ordered.map((x) => (

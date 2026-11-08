@@ -116,7 +116,9 @@ function ResultBody({ item }: { item: ResultItem }) {
 
 function Body({ item, open }: { item: InboxItem; open: boolean }) {
   switch (item.kind) {
-    case "approval": return <ApprovalBody item={item} open={open} live={httpMode} />;
+    // Live approvals come from the queue with no in-window actions: they're decided in the terminal.
+    // One that carries its own actions (the demo ask, lib/demo-inbox.ts) is decided here instead.
+    case "approval": return <ApprovalBody item={item} open={open} live={httpMode && item.actions.length === 0} />;
     case "question": return <QuestionBody item={item} />;
     case "escalation": return <EscalationBody item={item} />;
     case "proposal": return <ProposalBody item={item} />;

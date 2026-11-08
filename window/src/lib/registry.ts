@@ -5,6 +5,13 @@ import type { ChatAgent, Organization, Project, Registry, Run, Session, StudioPr
 
 const empty: Registry = { agents: [], communityAgents: [], teams: [], communityTeams: [], organizations: [], projects: [], sessions: [], personaPool: [] };
 let current: Registry = empty;
+/**
+ * Projects set by the Work view (api.listProjects: live, one per game plus Studio). They outrank the
+ * registry payload's own `projects` (the adapter's single "studio" entry): a registry refresh, which the
+ * app stream triggers on every run start/stop and chat message, must not swap them out. Swapping them
+ * emptied the sidebar's Projects list until the next root load put them back (the flicker).
+ */
+let workProjects: Project[] | undefined;
 let tasks: Task[] = [];
 let runs: Run[] = [];
 let version = 0;
@@ -14,9 +21,13 @@ const subscribe = (listener: () => void) => { listeners.add(listener); return ()
 
 export function useRegistry() { useSyncExternalStore(subscribe, () => version); return current; }
 /** Agents the API sent without art get their cast portrait (lib/cast.ts). */
-export function setRegistry(value: Registry) { current = withCastAvatars(value); notify(); }
+export function setRegistry(value: Registry) {
+  const next = withCastAvatars(value);
+  current = workProjects ? { ...next, projects: workProjects } : next;
+  notify();
+}
 export function setWorkData(nextTasks: Task[], nextRuns: Run[]) { tasks = nextTasks; runs = nextRuns; notify(); }
-export function setProjects(projects: Project[]) { current = { ...current, projects }; notify(); }
+export function setProjects(projects: Project[]) { workProjects = projects; current = { ...current, projects }; notify(); }
 
 /**
  * Restore the module-level store to its empty initial state: storybook harnesses do it so
@@ -25,6 +36,7 @@ export function setProjects(projects: Project[]) { current = { ...current, proje
  */
 export function resetRegistryStore() {
   current = empty;
+  workProjects = undefined;
   tasks = [];
   runs = [];
   notify();

@@ -36,6 +36,11 @@ export const CAST: Readonly<Record<string, SpriteAvatar>> = {
   // art / eng hands-on
   "env-ui-artist": still("env-ui-artist"),
   "sprite-artist": still("sprite-artist"),
+  // Second-lane artists and later hires reuse portraits (every portrait is taken), each from an agent
+  // that never shares a screen with them: Greenlight finished before the build, and the toy reporter
+  // never shows on Flow, Work or presence.
+  "env-ui-artist-b": still("megan"),
+  "sprite-artist-b": still("toy-catalog-reporter"),
   "gameplay-engineer-a": still("gameplay-engineer"),
   "gameplay-engineer-b": still("gameplay-engineer-b"),
   "level-content-designer": still("level-content-designer"),
@@ -43,6 +48,7 @@ export const CAST: Readonly<Record<string, SpriteAvatar>> = {
   // marketing / ops
   "marketing-lead": still("nikhil"),
   "social-media-manager": still("social-media-manager"),
+  "short-form-video-producer": still("carlos"),
   "community-outreach": still("nadine"),
   "finance-compliance": still("rosa"),
   "studio-historian": still("yuki"),

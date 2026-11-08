@@ -22,7 +22,7 @@ import { projectThread } from "@fabric/contracts";
 import { resetSessionStreams } from "@/lib/chat/session-stream";
 import { mockAssistant } from "../mock/chat";
 import type { ContextSnapshot, Report, Run, RunEvent, Task } from "../types";
-import type { ArtGallery } from "./http";
+import type { ArtGallery, ShowcaseGame } from "./http";
 import type { BoardSummary, Interventions } from "./http";
 
 /** Mock board: early stages finished, Engineering mid-build, QA queued, Ship not started. */
@@ -96,6 +96,7 @@ function mockAppend(session: MockSession, type: string, payload: unknown): Sessi
 export const mockApi = {
   getRegistry: (): Promise<Registry> => delay(registry),
   getGallery: (): Promise<ArtGallery> => delay(galleryFixture),
+  getShowcase: (): Promise<ShowcaseGame[]> => delay([]),
   getInterventions: (): Promise<Interventions> => delay(interventionsFixture),
   getWeave: (): Promise<WeaveSnapshot> => delay(weaveSnapshot),
   getBoardSummary: (): Promise<BoardSummary> => delay(mockBoardSummary),

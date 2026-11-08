@@ -2,6 +2,7 @@ import { useSyncExternalStore } from "react";
 import { WEAVE_NOW, inboxSeed as fixtureItems, presenceSeed, pulseSeed, calendarEvents as fixtureCalendar, dayMarkers as fixtureMarkers, type InboxItem, type ItemKind, type Presence, type PulseEntry, type UpdateEntry } from "./mock/weave";
 import type { CalendarEvent, WeaveSnapshot } from "@fabric/contracts";
 import { api, httpMode } from "./api";
+import { DEMO_INBOX, DEMO_NEW_GAME_ID, demoNewGameItem } from "./demo-inbox";
 
 /**
  * Weave's state lives in a module-level store rather than in the page, so the sidebar's
@@ -62,7 +63,9 @@ function set(next: WeaveState) {
   state = next;
   listeners.forEach((l) => l());
 }
-export function setWeaveSnapshot(next: WeaveSnapshot) {
+export function setWeaveSnapshot(snap: WeaveSnapshot) {
+  // Live demo: the hardcoded new-game ask rides along with the adapter's items (lib/demo-inbox.ts).
+  const next = httpMode && DEMO_INBOX ? { ...snap, items: [...snap.items.filter((i) => i.id !== DEMO_NEW_GAME_ID), demoNewGameItem()] } : snap;
   const prior = state.status;
   const serverIds = new Set(next.pulse.map((e) => e.id));
   inboxSeed = next.items;

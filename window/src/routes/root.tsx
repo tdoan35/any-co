@@ -3,7 +3,7 @@ import { useEffect, useRef } from "react";
 import { AppShell } from "@/components/shell/app-shell";
 import { api, httpMode, streamUrl } from "@/lib/api";
 import { currentApiBase, useStudio } from "@/lib/studio";
-import { resetRegistryStore, setRegistry, setWorkData } from "@/lib/registry";
+import { resetRegistryStore, setProjects, setRegistry, setWorkData } from "@/lib/registry";
 import { setWeaveSnapshot } from "@/lib/weave-store";
 import { AppEventSchema } from "@fabric/contracts";
 import { publishSessionDesktop, publishSessionMessage, publishStreamConnected } from "@/lib/chat/events";
@@ -22,10 +22,12 @@ export async function rootLoader() {
     resetRegistryStore();
     setWeaveSnapshot({ items: [], pulse: [], presence: [], calendar: [] });
   }
-  const [registry, tasks, runs, weave] = await Promise.all([
-    api.getRegistry(), api.listTasks(), api.listRuns(), api.getWeave(),
+  const [registry, tasks, runs, weave, projects] = await Promise.all([
+    api.getRegistry(), api.listTasks(), api.listRuns(), api.getWeave(), api.listProjects(),
   ]);
   setRegistry(registry);
+  // The Work view's projects (live: one per game plus Studio), so the sidebar lists what Work does.
+  setProjects(projects);
   setWorkData(tasks, runs);
   setWeaveSnapshot(weave);
   return null;

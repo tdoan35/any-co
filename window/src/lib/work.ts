@@ -1,6 +1,6 @@
 import { WEAVE_NOW, WEAVE_TZ, type InboxItem } from "./mock/weave";
 import { studioTeams, workRuns, workTasks } from "./registry";
-import { httpMode } from "./api";
+import { boardCardOf, httpMode, type CardStatus } from "./api";
 import type { StudioTeam } from "@fabric/contracts";
 import { isActive, stagesAt, type StageState } from "./run-state";
 import { isAsk, weaveItems, type WeaveState } from "./weave-store";
@@ -13,7 +13,9 @@ import { danaErrandOwner } from "./errand-owner";
  */
 export type Column = "proposed" | "in_progress" | "in_review" | "done";
 export const COLUMNS: { id: Column; label: string; hint: string }[] = [
-  { id: "proposed", label: "Proposed", hint: "The Studio Head proposed it. Nothing runs until you say yes." },
+  httpMode
+    ? { id: "proposed", label: "Queued", hint: "On the studio board, waiting for its agent or for the cards it depends on." }
+    : { id: "proposed", label: "Proposed", hint: "The Studio Head proposed it. Nothing runs until you say yes." },
   { id: "in_progress", label: "In progress", hint: "A team is working through its steps." },
   { id: "in_review", label: "In review", hint: "At the team's review step, which can send work back." },
   { id: "done", label: "Done", hint: "Accepted, or stopped. Every loop can be replayed." },
@@ -42,6 +44,8 @@ export interface TaskSummary {
   outcome?: { kind: Outcome; text: string };
   /** A line that replaces the usual meta when a decision changed the card. */
   note?: string;
+  /** Live: the studio board card behind this task, and its status there (it decides the column). */
+  card?: { status: CardStatus; assignee: string | null; createdAt: string; updatedAt: string; upstream: string[] };
   reworkUsed: number;
   reworkBudget: number;
   startedAt?: string;
@@ -117,6 +121,28 @@ export function summarize(task: Task, runs: Run[], weave: WeaveState): TaskSumma
     }
   }
 
+  // Live: the board card's status decides the column; its runs fill in the steps and timing.
+  const card = httpMode ? boardCardOf(task.id) : undefined;
+  if (card) {
+    s.card = { status: card.status, assignee: card.assignee, createdAt: card.created_at, updatedAt: card.updated_at, upstream: card.upstream ?? [] };
+    s.startedAt ??= card.created_at;
+    if (card.status === "done") {
+      s.column = "done";
+      if (s.outcome?.kind !== "accepted") s.outcome = { kind: "accepted", text: latest?.outcome ?? "Done on the board" };
+      s.endedAt ??= card.updated_at;
+    } else {
+      s.outcome = undefined;
+      s.endedAt = undefined;
+      if (card.status === "todo") {
+        s.column = "proposed";
+        s.note = loops.length ? `Back in the queue after ${loops.length} ${loops.length === 1 ? "run" : "runs"}` : "Queued on the board";
+      } else if (s.column === "done" || s.column === "proposed") {
+        s.column = "in_progress";
+      }
+      if (card.status === "blocked") s.note = "Blocked on the board: waiting on another card or a decision";
+    }
+  }
+
   // A decision you made in Weave moves the card on.
   for (const item of items) {
     const st = weave.status[item.id];
@@ -141,6 +167,7 @@ export function summarize(task: Task, runs: Run[], weave: WeaveState): TaskSumma
 }
 
 export function loopState(s: TaskSummary): LoopState {
+  if (s.card?.status === "blocked") return "blocked";
   if (s.outcome) return s.outcome.kind;
   if (s.column === "proposed") return "proposed";
   if (s.latest?.status === "blocked" && !s.note) return "blocked";

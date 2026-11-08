@@ -137,9 +137,15 @@ export interface GalleryScreenProps {
   /** Game repos with a gallery index; names come from the API, never from code. */
   repos: string[];
   entries: GalleryEntry[];
+  /** Inside the Showcase's Art tab: no page header of its own; the counts sit in the filter row. */
+  embedded?: boolean;
 }
 
-export function GalleryScreen({ repos, entries }: GalleryScreenProps) {
+/** The game repo an entry came from: the adapter serves each file under /api/art-gallery/<repo>/file/. */
+export const repoOf = (e: GalleryEntry) => /\/art-gallery\/([^/]+)\/file\//.exec(e.url)?.[1] ?? "";
+
+export function GalleryScreen({ repos, entries, embedded = false }: GalleryScreenProps) {
+  const [game, setGame] = useState("all");
   const [provider, setProvider] = useState("all");
   const [verdict, setVerdict] = useState("all");
   const [family, setFamily] = useState("all");
@@ -147,6 +153,7 @@ export function GalleryScreen({ repos, entries }: GalleryScreenProps) {
 
   const providers = useMemo(() => [...new Set(entries.map((e) => e.provider))].sort(), [entries]);
   const shown = entries.filter((e) =>
+    (game === "all" || repoOf(e) === game) &&
     (provider === "all" || e.provider === provider) &&
     (verdict === "all" || e.verdict === verdict) &&
     (family === "all" || familyOf(e.asset) === family));
@@ -161,21 +168,24 @@ export function GalleryScreen({ repos, entries }: GalleryScreenProps) {
     return [...by.entries()].sort(([a], [b]) => a.localeCompare(b));
   }, [shown]);
 
+  const counts = <span className="text-xs text-muted-foreground">{groups.length} assets · {shown.length} candidates</span>;
   return (
     <div className="flex h-full flex-col">
-      <PageHeader
+      {!embedded && <PageHeader
         right={<>
           {repos.length > 0 && <span className="font-mono text-[11px] text-muted-foreground">{repos.join(" · ")}</span>}
           <span className="text-xs text-muted-foreground">{groups.length} assets · {shown.length} candidates</span>
         </>}
       >
         <span className="text-sm font-medium">Gallery</span>
-      </PageHeader>
+      </PageHeader>}
       <div className="min-h-0 flex-1 overflow-y-auto p-4 pt-3">
         <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+          {repos.length > 1 && <FilterGroup label="Game" options={repos} value={game} onChange={setGame} />}
           <FilterGroup label="Provider" options={providers} value={provider} onChange={setProvider} />
           <FilterGroup label="Verdict" options={["accepted", "rejected"]} value={verdict} onChange={setVerdict} />
           <FilterGroup label="Family" options={FAMILIES} value={family} onChange={setFamily} />
+          {embedded && <span className="ml-auto">{counts}</span>}
         </div>
         {entries.length === 0 ? (
           <div className="grid h-full place-items-center px-6 text-center">
