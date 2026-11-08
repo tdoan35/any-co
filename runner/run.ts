@@ -362,6 +362,20 @@ async function callTool(
   const impl = entry.impl;
   const parsed = impl.input.safeParse(use.input);
   if (!parsed.success) return err(`invalid input: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
+  // T50: an "allow" tool can still require the gate for one call (e.g. a paid run over a threshold).
+  let gateReason: string | null = null;
+  if (perm === "allow" && impl.approvalWhen) {
+    try {
+      gateReason = await impl.approvalWhen(parsed.data, ctx);
+    } catch (e) {
+      gateReason = `approval check failed (${e instanceof Error ? e.message : String(e)})`;
+    }
+  }
+  if (gateReason) {
+    const ok = await approver({ agent: spec.name, run_id: runId, tool: use.name, input: { ...(parsed.data as Record<string, unknown>), approval_reason: gateReason } });
+    event("approval", { name: use.name, input: parsed.data, approved: ok, reason: gateReason });
+    if (!ok) return err(`a human declined this action (${gateReason})`);
+  }
   if (perm === "ask") {
     // A rehearsal (the tool's dryRunField parsed to exactly true) sends nothing: no human wait,
     // but the ledger still records the auto decision. Every other call goes through the gate.

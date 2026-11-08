@@ -10,9 +10,10 @@ import { z } from "zod";
 import type { CORE_CAPABILITIES, CapabilityName } from "./registry.ts";
 import { LANES } from "./lanes/index.ts";
 import { mergeImpls } from "./lanes/merge.ts";
-import { MAX_RESULT_CHARS, clip, errText, lstatOk, realOrNull, resolveInWorkspace, type ToolContext, type ToolImpl, type ToolOutput } from "./kit.ts";
+import { MAX_RESULT_CHARS, blockedHost, clip, errText, lstatOk, realOrNull, resolveInWorkspace, type ToolContext, type ToolImpl, type ToolOutput } from "./kit.ts";
 import type { NaiveClient } from "../providers.ts";
 import { studioStatusTools } from "./studio-status.ts";
+import { monidTools } from "./monid.ts";
 import { decodePng, encodePng, type RgbaImage } from "../../tools/art/png.ts";
 import { addOutline, contactSheet, downscaleNearest, lockPalette, scaleToFit, snapToGrid, splitStrip, upscaleNearest } from "../../tools/art/ops.ts";
 import { runGate } from "../../tools/art/gate.ts";
@@ -287,16 +288,6 @@ const ledgerTools: Record<string, ToolImpl> = {
 };
 
 // ---------- web_fetch ----------
-function blockedHost(host: string): boolean {
-  const h = host.toLowerCase().replace(/^\[|\]$/g, "");
-  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal")) return true;
-  if (isIP(h) === 4) {
-    const [a, b] = h.split(".").map(Number);
-    return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
-  }
-  if (isIP(h) === 6) return h === "::1" || h.startsWith("fc") || h.startsWith("fd") || h.startsWith("fe80");
-  return false;
-}
 
 export function htmlToText(html: string): string {
   return html
@@ -2267,6 +2258,7 @@ const CORE_IMPLS: Record<keyof typeof CORE_CAPABILITIES, Record<string, ToolImpl
   workspace_read: { workspace_read: workspaceRead },
   workspace_write: { workspace_write: workspaceWrite },
   image_view: { art_view: artView },
+  monid: monidTools,
   game_repo: gameRepoTools,
   qa_harness: qaHarnessTools,
   art_tools: artTools,

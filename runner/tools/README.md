@@ -26,3 +26,12 @@ The tool's `run()` must really send nothing when the field is true. Core: `itch_
 (load refuses it, R31): the gate trusts the declaration, so a skip needs core review. Lane sends always ask.
 
 Lanes: `marketing` (Joyce: Marketing & Distribution).
+
+## Paid providers: Monid (T50)
+`monid` (core, `monid.ts`) wraps monid.ai's HTTP API: `monid_discover`, `monid_inspect` (free), `monid_run` (paid),
+`monid_run_get`, `monid_upload` (workspace media → temporary URL via Monid's free `sfs` storage), `monid_download`
+(an output URL → workspace media). Env: `MONID_API_KEY` (only ever in the API's Authorization header; results are
+redacted), `MONID_CAP_USD` (per studio per day, default 25), `MONID_APPROVAL_USD` (default 3), `MONID_API_BASE_URL`
+(tests). Grant it `"allow"`: a run estimated over the approval threshold still goes through the gate (`approvalWhen`
+on `ToolImpl`, which can only add a gate, never skip one). State: runs/spend.jsonl (`monid_*` lines) and
+runs/monid-runs.json (what each Monid run was charged, so polling never double-charges).

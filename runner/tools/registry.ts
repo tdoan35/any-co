@@ -100,6 +100,12 @@ export const CORE_CAPABILITIES = {
     local: true,
     note: "Local only: sends an image block to the model; the PNG is copied content-addressed into the run dir. Hosted equivalent not set up.",
   },
+  monid: {
+    summary: "Monid tool marketplace (monid.ai, runner/tools/monid.ts): discover/inspect endpoints (video generation and more), run paid ones, check runs, upload workspace media for a URL input, download outputs into the workspace",
+    naive: [],
+    local: true,
+    note: "Spend is capped in code, not per-call approved: MONID_CAP_USD per studio per day (default 25) over the monid_* lines in runs/spend.jsonl; a run estimated over MONID_APPROVAL_USD (default 3) goes through the approval gate (approvalWhen) even on an allow grant; reported cost charged to the run budget; ledger decisions at 80% and at the cap. Key only from env (MONID_API_KEY), never in results. Hosted setup not done.",
+  },
   // ----- gated sends (T7): every send is ask-gated by the spec and ledgered via the approval gate -----
   itch_push: {
     outward: true,
