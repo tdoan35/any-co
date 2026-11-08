@@ -105,7 +105,7 @@ export async function startServer(opts: ServerOptions = {}) {
     const runs = () => allRuns();
     if (a === "registry" && !b) return ok(buildRegistry(specs, new Set(runs().filter((r) => r.run.status === "running").map((r) => r.agent)), engine.list()));
     if (a === "interventions" && !b) return ok(engine.interventions());
-    if (a === "weave" && !b) return ok(buildWeave(runs(), specs.map((s) => s.name), approvalsFile));
+    if (a === "weave" && !b) return ok(buildWeave(runs(), specs.map((s) => s.name), approvalsFile, runsDir));
     if (a === "projects" && !b) return ok([PROJECT]);
     if (a === "tasks") {
       const tasks = runs().map((r) => r.task);

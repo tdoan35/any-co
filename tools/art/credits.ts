@@ -17,8 +17,10 @@ export const other = (p: ProviderName): ProviderName => (p === "retrodiffusion" 
 
 /** Regenerations allowed per asset after its first generation (a 4th paid call is refused). */
 export const MAX_REGENERATIONS = 2;
-/** A provider is "low" below this share of the first balance seen that day. */
+/** A usd balance is "low" below this share of the first usd reading that day. */
 export const LOW_SHARE = 0.2;
+/** A generations balance (PixelLab subscription) is "low" at or below this many remaining. */
+export const LOW_GENERATIONS = 400;
 
 export interface ArtStatePaths { providers: string; credits: string; gallery: string }
 export function statePaths(runsDir?: string, env: Record<string, string | undefined> = process.env): ArtStatePaths {
@@ -69,7 +71,18 @@ export function clearProvider(file: string, p: ProviderName): ProvidersFile {
 
 // ---------- credits log + low-balance notes ----------
 
-export interface CreditLine { ts: string; provider: ProviderName; remaining: number; run_id: string; source: string }
+export type CreditUnit = "usd" | "generations";
+export interface CreditLine {
+  ts: string;
+  provider: ProviderName;
+  remaining: number;
+  /** "generations" for a PixelLab subscription, else "usd". Lines written before T21 have no unit (usd). */
+  unit?: CreditUnit;
+  total?: number | null;
+  generations_used?: number | null;
+  run_id: string;
+  source: string;
+}
 
 export function readCredits(file: string): CreditLine[] {
   if (!existsSync(file)) return [];
@@ -82,7 +95,7 @@ export function readCredits(file: string): CreditLine[] {
   });
 }
 
-export interface LowNote { provider: ProviderName; threshold: "low20" | "zero"; day: string; remaining: number; first_today: number; ref: string }
+export interface LowNote { provider: ProviderName; threshold: "low20" | "low400" | "zero"; unit: CreditUnit; day: string; remaining: number; first_today: number; ref: string }
 
 /**
  * Append one reported balance. Returns the low-balance thresholds this line crosses that have
@@ -92,15 +105,17 @@ export function recordCredit(file: string, line: CreditLine, alreadyNoted: (ref:
   mkdirSync(path.dirname(file), { recursive: true });
   appendFileSync(file, JSON.stringify(line) + "\n");
   const day = line.ts.slice(0, 10);
-  const today = readCredits(file).filter((c) => c.provider === line.provider && c.ts.slice(0, 10) === day);
+  const unit: CreditUnit = line.unit ?? "usd";
+  const today = readCredits(file).filter((c) => c.provider === line.provider && c.ts.slice(0, 10) === day && (c.unit ?? "usd") === unit);
   const first = today[0]?.remaining ?? line.remaining;
   const notes: LowNote[] = [];
   const crossed: Array<LowNote["threshold"]> = [];
   if (line.remaining <= 0) crossed.push("zero");
-  if (first > 0 && line.remaining < first * LOW_SHARE) crossed.push("low20");
+  if (unit === "generations" ? line.remaining <= LOW_GENERATIONS : first > 0 && line.remaining < first * LOW_SHARE)
+    crossed.push(unit === "generations" ? "low400" : "low20");
   for (const threshold of crossed) {
     const ref = `art-credits:${line.provider}:${day}:${threshold}`;
-    if (!alreadyNoted(ref)) notes.push({ provider: line.provider, threshold, day, remaining: line.remaining, first_today: first, ref });
+    if (!alreadyNoted(ref)) notes.push({ provider: line.provider, threshold, unit, day, remaining: line.remaining, first_today: first, ref });
   }
   return notes;
 }

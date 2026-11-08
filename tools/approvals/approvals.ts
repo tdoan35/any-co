@@ -14,7 +14,9 @@ import { orphanStatus } from "../../runner/liveness.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const APPROVALS_FILE = process.env.STUDIO_APPROVALS_FILE ?? path.join(ROOT, "runs", "approvals.jsonl");
-const RUNS_DIR = path.join(ROOT, "runs");
+// Same env override as the runner's runs dir (runner/run.ts RUNS_DIR), so the CLI sweep, resume
+// and the window read run.json from the same place when the layout moves.
+const RUNS_DIR = process.env.STUDIO_RUNS_DIR ? path.resolve(process.env.STUDIO_RUNS_DIR) : path.join(ROOT, "runs");
 
 export type ApprovalEvent =
   | { event: "requested"; id: string; ts: string; agent: string; run_id: string; tool: string; input: unknown }

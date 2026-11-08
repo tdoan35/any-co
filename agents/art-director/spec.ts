@@ -10,9 +10,12 @@ export default defineAgent({
   description: "Art: locks the style bible and manifest grid/palette before any generation, makes anchor sheets, approves or rejects every asset on art_gate numbers, runs the fallback ladder.",
   dept: "art",
   runner: "local",
-  model: "z-ai/glm-5.3",
-  budget: { cap_usd: 12, max_task_usd: 4, period: "day" },
-  tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", art_tools: "allow", art_generate: "allow", studio_ledger: "allow" },
+  model: "anthropic/claude-opus-5.5", // Naïve catalogue id, used if this agent is ever hosted
+  // Local runs on Opus 5.5 via the Neon gateway: the Naïve Messages proxy rejects image blocks (art_view, Nov 7),
+  // and the OpenAI-compatible path carries tool images in a following user message (T8-fix). Price = Anthropic list (estimate).
+  provider: { kind: "openai_compatible", model: "claude-opus-5-5", base_url_env: "NEON_AI_BASE_URL", api_key_env: "NEON_AI_API_KEY", usd_per_mtok: { input: 4, output: 20 } },
+  budget: { cap_usd: 30, max_task_usd: 8, period: "day" }, // Opus via Neon + art API spend
+  tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", art_tools: "allow", art_generate: "allow", image_view: "allow", studio_ledger: "allow" },
   output_schema: z
     .object({
       style_bible: z.string().min(3).max(200).describe("Repo path of the style bible (docs/style-bible.md)"),

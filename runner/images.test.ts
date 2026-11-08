@@ -65,7 +65,7 @@ test("art_view: image block + size, content-addressed copy, escape and cap refus
   const upOut = await artView.run({ path: "wide.png", upscale: 8 }, { workspace, naive: null, runsDir, run_id: "r-img" });
   assert.match(upOut.content, /^600×2 PNG/); // k clamped to 1: no upscale note
   const small = await artView.run({ path: "img.png", upscale: 2 }, { workspace, naive: null, runsDir, run_id: "r-img" });
-  assert.match(small.content, /8×6 \(x2 nearest-neighbour\)/);
+  assert.match(small.content, /8×6 \(4x3, x2 nearest-neighbour\)/); // source dims stay visible (A3)
   const upBytes = readFileSync(path.join(runsDir, "r-img", "images", `${(small.image?.source as { sha256: string }).sha256}.png`));
   const decoded = decodePng(upBytes);
   assert.equal(decoded.width, 8);
@@ -79,6 +79,15 @@ test("art_view: image block + size, content-addressed copy, escape and cap refus
   const capped = await artView.run({ path: "big.png" }, { workspace, naive: null, runsDir, run_id: "r-img" });
   assert.equal(capped.is_error, true);
   assert.match(capped.content, /too large/);
+
+  // A2: a huge but small-in-bytes PNG is capped by dimensions too, unless upscaling.
+  const huge = encodePng({ width: 2000, height: 2000, data: new Uint8Array(2000 * 2000 * 4) });
+  writeFileSync(path.join(workspace, "huge.png"), huge);
+  const noScale = await artView.run({ path: "huge.png" }, { workspace, naive: null, runsDir, run_id: "r-img" });
+  assert.equal(noScale.is_error, true);
+  assert.match(noScale.content, /1024px per-side cap/);
+  const withScale = await artView.run({ path: "huge.png", upscale: 1 }, { workspace, naive: null, runsDir, run_id: "r-img" });
+  assert.equal(withScale.is_error, undefined, withScale.content);
 });
 
 test("run loop: image reaches both providers in the right wire shape; transcript keeps only refs", async () => {
@@ -114,12 +123,15 @@ test("run loop: image reaches both providers in the right wire shape; transcript
   assert.equal(ref.type, "image");
   assert.equal(ref.source.type, "ref");
 
-  // OpenAI translation: image_url data parts in the tool message; text-only results stay strings.
+  // OpenAI translation: tool messages carry text only; the image follows in a user message.
   const openai = toOpenAIMessages("sys", fake.requests[1].messages);
-  const toolMsg = openai.find((m) => m.role === "tool") as { content: Array<Record<string, unknown>> };
-  assert.equal(toolMsg.content[0].type, "text");
-  assert.equal(toolMsg.content[1].type, "image_url");
-  assert.match((toolMsg.content[1].image_url as { url: string }).url, /^data:image\/png;base64,/);
+  const toolMsg = openai.find((m) => m.role === "tool") as { content: string };
+  assert.equal(typeof toolMsg.content, "string");
+  assert.match(toolMsg.content, /\[image follows\]/);
+  const toolImages = openai.find((m) => m.role === "user" && String(m.content?.[0]?.text ?? m.content).includes("tool_call a1")) as { content: Array<Record<string, unknown>> };
+  assert.equal(toolImages.content[1].type, "image_url");
+  assert.match((toolImages.content[1].image_url as { url: string }).url, /^data:image\/png;base64,/);
+  assert.ok(openai.filter((m) => m.role === "tool").every((m) => JSON.stringify(m.content).indexOf("image_url") === -1), "no image_url in any tool message");
   assert.deepEqual(
     toOpenAIMessages("s", [{ role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "plain" }] }])[1],
     { role: "tool", tool_call_id: "t", content: "plain" },

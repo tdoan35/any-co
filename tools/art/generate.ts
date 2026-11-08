@@ -26,6 +26,8 @@ export interface GenerateInput {
   transparent?: boolean;
   /** Retro Diffusion prompt_style id (default rd_pro__default). Ignored by PixelLab. */
   style?: string;
+  /** Keep at most this many returned images (default 4, max 8); the rest are discarded unwritten. */
+  maxCandidates?: number;
 }
 
 export interface GenerateOptions {
@@ -51,6 +53,8 @@ export interface GenerateResult {
 }
 
 export const RD_FRAMES = [4, 6, 8, 10, 12, 16] as const;
+export const DEFAULT_CANDIDATES = 4;
+export const MAX_CANDIDATES = 8;
 
 /** Containment check for workspace-relative paths (mirrors the runner's workspace rule). */
 export function resolveInside(workspace: string, rel: string): string {
@@ -152,6 +156,12 @@ async function readReference(workspace: string, rel: string): Promise<{ base64: 
   return { base64: Buffer.from(bytes).toString("base64"), width: img.width, height: img.height };
 }
 
+/** Cap the candidates a call keeps (the API may return many); the rest are dropped before writing. */
+export function keepCandidates<T>(images: T[], max = DEFAULT_CANDIDATES): { kept: T[]; discarded: number } {
+  const n = Math.max(1, Math.min(MAX_CANDIDATES, Math.floor(max)));
+  return { kept: images.slice(0, n), discarded: Math.max(0, images.length - n) };
+}
+
 async function writeImages(workspace: string, out: string, images: Uint8Array[][]): Promise<string[]> {
   const outs: string[] = [];
   const multi = images.length > 1;
@@ -174,12 +184,16 @@ async function writeImages(workspace: string, out: string, images: Uint8Array[][
 export async function generate(input: GenerateInput, opts: GenerateOptions): Promise<GenerateResult> {
   if (!/\.png$/i.test(input.out)) throw new Error(`out must end in .png, got "${input.out}"`);
   resolveInside(opts.workspace, input.out); // refuse path escapes before spending money
+  // Default deadline is configurable: PixelLab Tier 1 runs one job at a time and portraits took over 180 s on Nov 7;
+  // a job that times out still runs (and counts) on the provider side, so a short deadline wastes generations.
+  const envTimeout = Number((opts.env ?? process.env).ART_GENERATE_TIMEOUT_MS);
+  const defaultTimeout = Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : 180_000;
   if (opts.pollIntervalMs === undefined || opts.timeoutMs === undefined) {
-    opts = { pollIntervalMs: 2000, timeoutMs: 180_000, ...opts };
+    opts = { pollIntervalMs: 2000, timeoutMs: defaultTimeout, ...opts };
   }
   const env = opts.env ?? process.env;
   const fetchImpl = opts.fetchImpl ?? fetch;
-  const deadline = Date.now() + (opts.timeoutMs ?? 180_000);
+  const deadline = Date.now() + (opts.timeoutMs ?? defaultTimeout);
 
   const sleep = (ms: number) => {
     const { promise, resolve } = Promise.withResolvers<void>();
@@ -328,11 +342,14 @@ async function retrodiffusion(
 
   const reportedUsd = typeof result?.balance_cost === "number" ? result.balance_cost : submittedUsd;
   let written: string[];
+  let discarded = 0;
   try {
+    // cap before decoding or downloading: discarded candidates are never fetched or written
+    const b64s = (result?.base64_images ?? []) as string[];
+    const cap = b64s.length ? keepCandidates(b64s, input.maxCandidates) : keepCandidates((result?.output_urls ?? []) as string[], input.maxCandidates);
+    discarded = cap.discarded;
     const images: Uint8Array[][] = [];
-    for (const b64 of (result?.base64_images ?? []) as string[]) images.push([new Uint8Array(Buffer.from(b64, "base64"))]);
-    if (images.length === 0)
-      for (const url of (result?.output_urls ?? []) as string[]) images.push([await download(fetchImpl, url, deadline)]);
+    for (const item of cap.kept) images.push([b64s.length ? new Uint8Array(Buffer.from(item, "base64")) : await download(fetchImpl, item, deadline)]);
     written = await writeImages(opts.workspace, input.out, images);
   } catch (e) {
     throw charged("retrodiffusion", input, (e as Error).message, reportedUsd);
@@ -350,6 +367,7 @@ async function retrodiffusion(
       remaining_balance: result?.remaining_balance,
       style,
       images_returned: ((result?.base64_images ?? []) as string[]).length + ((result?.output_urls ?? []) as string[]).length,
+      candidates_discarded: discarded,
     },
   };
 }
@@ -425,11 +443,14 @@ async function pixellab(
   const usage = (job?.usage ?? submitted.body?.usage) as { type?: string; usd?: number } | null | undefined;
   const reportedUsd = usageUsd(usage);
   let written: string[];
+  let discarded = 0;
   try {
     const b64s: string[] = [];
     collectBase64Images(job?.last_response, b64s);
     if (b64s.length === 0) throw new Error("pixellab job completed but carried no image payload");
-    written = await writeImages(opts.workspace, input.out, b64s.map((b64) => [new Uint8Array(Buffer.from(b64, "base64"))]));
+    const cap = keepCandidates(b64s, input.maxCandidates);
+    discarded = cap.discarded;
+    written = await writeImages(opts.workspace, input.out, cap.kept.map((b64) => [new Uint8Array(Buffer.from(b64, "base64"))]));
   } catch (e) {
     throw charged("pixellab", input, (e as Error).message, reportedUsd);
   }
@@ -439,7 +460,7 @@ async function pixellab(
     images: written,
     cost_micro_usd: usdToMicro(costUsd),
     cost_source: reportedUsd === undefined ? "estimated" : "reported",
-    metadata: { background_job_id: jobId, usage: usage ?? null, created_at: job?.created_at },
+    metadata: { background_job_id: jobId, usage: usage ?? null, created_at: job?.created_at, candidates_discarded: discarded },
   };
 }
 
@@ -450,6 +471,8 @@ export interface Quote {
   per_call_usd: number;
   source: "check_cost" | "price table";
   remaining_balance: number | null;
+  unit: "usd" | "generations";
+  total?: number | null;
 }
 
 /**
@@ -463,7 +486,7 @@ export async function quote(input: GenerateInput, opts: GenerateOptions): Promis
   const deadline = Date.now() + (opts.timeoutMs ?? 30_000);
   if (input.provider === "pixellab") {
     const b = await balance("pixellab", opts).catch(() => null);
-    return { provider: "pixellab", per_call_usd: PIXELLAB_ESTIMATE_USD, source: "price table", remaining_balance: b };
+    return { provider: "pixellab", per_call_usd: PIXELLAB_ESTIMATE_USD, source: "price table", remaining_balance: b?.remaining ?? null, unit: b?.unit ?? "usd", total: b?.total ?? null };
   }
   const key = requireKey(env, "RETRO_DIFFUSION_API_KEY");
   const base = (opts.baseUrl?.retrodiffusion ?? env.RETRO_DIFFUSION_BASE_URL ?? "https://api.retrodiffusion.ai").replace(/\/$/, "");
@@ -473,16 +496,34 @@ export async function quote(input: GenerateInput, opts: GenerateOptions): Promis
   if (exhaustedAnswer(r.status, r.body)) throw new ProviderExhausted("retrodiffusion", `${r.status} on check_cost`, typeof r.body?.remaining_balance === "number" ? r.body.remaining_balance : null);
   if (r.status >= 400 || typeof r.body?.balance_cost !== "number")
     throw new Error(`retrodiffusion check_cost failed (${r.status}): ${JSON.stringify(r.body).slice(0, 300)}`);
-  return { provider: "retrodiffusion", per_call_usd: r.body.balance_cost, source: "check_cost", remaining_balance: typeof r.body.remaining_balance === "number" ? r.body.remaining_balance : null };
+  return { provider: "retrodiffusion", per_call_usd: r.body.balance_cost, source: "check_cost", remaining_balance: typeof r.body.remaining_balance === "number" ? r.body.remaining_balance : null, unit: "usd" };
+}
+
+export interface Balance {
+  remaining: number;
+  /** PixelLab subscriptions count generations; prepaid credits are USD. */
+  unit: "usd" | "generations";
+  total: number | null;
+}
+
+/**
+ * PixelLab `GET /v2/balance` (verified live 2026-11-07):
+ * `{"credits":{"type":"usd","usd":0.0},"subscription":{"type":"generations","status":"active","plan":"…","generations":2000.0,"total":2000.0}}`.
+ * An active generations subscription is the balance (remaining of total); otherwise credits.usd.
+ */
+export function pixellabBalance(body: any): Balance | null {
+  const sub = body?.subscription;
+  if (sub?.status === "active" && sub?.type === "generations" && typeof sub.generations === "number")
+    return { remaining: sub.generations, unit: "generations", total: typeof sub.total === "number" ? sub.total : null };
+  const usd = body?.credits?.usd ?? (typeof body?.credits === "number" ? body.credits : undefined);
+  return typeof usd === "number" ? { remaining: usd, unit: "usd", total: null } : null;
 }
 
 /**
  * Remaining balance from the provider's read-only endpoint, or null when it doesn't say.
- * RD `GET /v2/inferences/credits` → `{credits, balance}` (USD balance). PixelLab `GET /v2/balance`
- * → `{credits, subscription}`; the sub-schema isn't in the public spec we read, so we take the
- * first number among credits.usd, credits.amount, credits (numeric), usd, balance.
+ * RD `GET /v2/inferences/credits` → `{credits, balance}` (USD balance). PixelLab: see pixellabBalance.
  */
-export async function balance(provider: ProviderName, opts: Omit<GenerateOptions, "workspace">): Promise<number | null> {
+export async function balance(provider: ProviderName, opts: Omit<GenerateOptions, "workspace">): Promise<Balance | null> {
   const env = opts.env ?? process.env;
   const fetchImpl = opts.fetchImpl ?? fetch;
   const deadline = Date.now() + (opts.timeoutMs ?? 15_000);
@@ -490,13 +531,10 @@ export async function balance(provider: ProviderName, opts: Omit<GenerateOptions
     const key = requireKey(env, "RETRO_DIFFUSION_API_KEY");
     const base = (opts.baseUrl?.retrodiffusion ?? env.RETRO_DIFFUSION_BASE_URL ?? "https://api.retrodiffusion.ai").replace(/\/$/, "");
     const r = await httpJson(fetchImpl, `${base}/v2/inferences/credits`, { headers: { "X-RD-Token": key } }, deadline);
-    return r.status < 400 && typeof r.body?.balance === "number" ? r.body.balance : null;
+    return r.status < 400 && typeof r.body?.balance === "number" ? { remaining: r.body.balance, unit: "usd", total: null } : null;
   }
   const key = requireKey(env, "PIXELLAB_API_KEY");
   const base = (opts.baseUrl?.pixellab ?? env.PIXELLAB_BASE_URL ?? "https://api.pixellab.ai").replace(/\/$/, "");
   const r = await httpJson(fetchImpl, `${base}/v2/balance`, { headers: { authorization: `Bearer ${key}` } }, deadline);
-  if (r.status >= 400) return null;
-  const b = r.body ?? {};
-  for (const v of [b.credits?.usd, b.credits?.amount, b.credits, b.usd, b.balance]) if (typeof v === "number") return v;
-  return null;
+  return r.status < 400 ? pixellabBalance(r.body) : null;
 }
