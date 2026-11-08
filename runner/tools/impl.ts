@@ -1071,6 +1071,15 @@ async function collectJob(i: any, ctx: ToolContext): Promise<ToolOutput> {
   }
 }
 
+export const ART_DEFAULTS = ["comfy", "pixellab", "retrodiffusion"] as const;
+/** ART_DEFAULT_PROVIDER (per studio): the provider for a call that names none; null when unset/empty; a typo is an error. */
+export function artDefaultProvider(env: Record<string, string | undefined> = process.env): ProviderName | null {
+  const raw = env.ART_DEFAULT_PROVIDER?.trim();
+  if (!raw) return null;
+  if (!(ART_DEFAULTS as readonly string[]).includes(raw)) throw new Error(`ART_DEFAULT_PROVIDER must be one of ${ART_DEFAULTS.join(", ")} (or unset), got "${raw}"`);
+  return raw as ProviderName;
+}
+
 /** The cap refusal names the two ways forward that a human decided, never a way for the model to reset it. */
 function capRefusal(out: string, used: number): string {
   return `refused: ${out} has had ${used} paid generations (1 + ${MAX_REGENERATIONS} regenerations is the cap). Fix the prompt/reference or cut to the ` +
@@ -1118,6 +1127,7 @@ const artGenerate: ToolImpl = {
     "PixelLab results report generations_used (subscription balance before vs after). " +
     "With PIXELLAB_MIN_REMAINING set, pixellab is refused (no request) at or below that floor, or when this call's estimate would cross it; the call moves to comfy " +
     "or the procedural floor and the result's pixellab_floor says so: then use provider comfy with your reference image, or stop and report. " +
+    "If this studio sets ART_DEFAULT_PROVIDER=comfy, a call with no provider uses comfy only (reference required) and never falls back to a paid provider: name pixellab explicitly only when a human approved paid generation. " +
     "provider comfy = the local lab ComfyUI (frozen IP-Adapter recipe on `reference`, seed = identity, default 42): free (cost 0, cost_source local), stills only, " +
     "always 768x768 with an opaque background, so pass postprocess (snap/lock/outline) to reach the manifest size and palette. Use it when the task or the anchor " +
     "winner names comfy; when the lab is down the call falls back to pixellab once and comfy is tried again next call. " +
@@ -1162,9 +1172,22 @@ const artGenerate: ToolImpl = {
       return { content: "refused: animation endpoints (frames, rd_animation__*, rd_advanced_animation__*) are the expensive ones; pass justify with why cutout parts or in-engine motion won't do", is_error: true };
     const winner = i.reference ? anchorWinner(paths.gallery, i.reference) : undefined;
     let requested: ProviderName | undefined = i.provider;
+    // T39b: the studio's default for an omitted provider, set explicitly per studio (never inferred from a reachable lab)
+    let defaultProvider: ProviderName | null;
+    try {
+      defaultProvider = artDefaultProvider();
+    } catch (e) {
+      return { content: errText(e), is_error: true };
+    }
+    if (!requested && defaultProvider === "comfy") {
+      if (!i.reference)
+        return { content: "refused: ART_DEFAULT_PROVIDER=comfy generates from a reference image (IP-Adapter): pass reference (the anchor PNG), or name a provider explicitly", is_error: true };
+      requested = "comfy";
+    }
     if (!requested) {
-      if (!winner) return { content: `provider is required: no anchor winner is recorded${i.reference ? ` for ${i.reference}` : " (no reference given)"}. Bake-offs are for anchors; record the winner with art_anchor_winner.`, is_error: true };
-      requested = winner;
+      const fallback = winner ?? defaultProvider ?? undefined; // a paid default never overrides an anchor's bake-off winner
+      if (!fallback) return { content: `provider is required: no anchor winner is recorded${i.reference ? ` for ${i.reference}` : " (no reference given)"}. Bake-offs are for anchors; record the winner with art_anchor_winner.`, is_error: true };
+      requested = fallback;
     } else if (winner && requested !== winner && PROVIDERS.includes(requested) && PROVIDERS.includes(winner) && !isExhausted(paths.providers, winner)) {
       // the bake-off lock is among PAID providers only: comfy (local, free) is always allowed (T39)
       return { content: `refused: ${i.reference}'s anchor bake-off was won by ${winner}; batch generation uses it (omit provider). Only anchors are generated on both.`, is_error: true };
@@ -1188,7 +1211,11 @@ const artGenerate: ToolImpl = {
     } catch (e) {
       return { content: errText(e), is_error: true };
     }
-    const chain: ProviderName[] = [requested, other(requested)];
+    // With the studio default comfy, the chain never falls INTO a paid provider the call did not name (R46): explicit comfy
+    // with the lab down, or explicit RD exhausted, stops instead of spending shared PixelLab generations. Free comfy may still
+    // be spliced in after a floored pixellab (T35). Unset default: unchanged.
+    const comfyStudio = defaultProvider === "comfy";
+    const chain: ProviderName[] = comfyStudio ? [requested] : [requested, other(requested)];
     for (let k = 0; k < chain.length; k++) {
       const p = chain[k];
       if (isExhausted(paths.providers, p)) {
@@ -1244,11 +1271,15 @@ const artGenerate: ToolImpl = {
       }
     }
     if (!result) {
+      if (comfyStudio) notes.push(`ART_DEFAULT_PROVIDER=comfy: no fallback into a paid provider this call did not name (asked for ${requested})`);
       const all = PROVIDERS.every((p) => exhausted.includes(p) || (p === "pixellab" && floored !== null));
       return {
         content: JSON.stringify({
           exhausted: all ? "all" : exhausted, ...(unavailable.length ? { unavailable } : {}), ...(floored ? { pixellab_floor: floored } : {}), fallback: "procedural", cost_micro_usd: 0, notes,
-          next: floored
+          ...(comfyStudio ? { default_provider: "comfy" } : {}),
+          next: comfyStudio && unavailable.includes("comfy")
+            ? "comfy default: lab unreachable; pass provider pixellab explicitly if a human approved paid generation. Otherwise stop and report, or take the fallback ladder's floor (simple shapes animated in engine) and log it with log_decision (topic art.provider_fallback)."
+            : floored
             ? `${floored.message}. Otherwise take the fallback ladder's floor: simple shapes animated in engine (bob, flash, squash-and-stretch, particles); log it with log_decision (topic art.provider_fallback).`
             : "Take the fallback ladder's floor: simple shapes animated in engine (bob, flash, squash-and-stretch, particles). Log it with log_decision (topic art.provider_fallback). This is a guaranteed outcome, not a failure.",
         }),

@@ -22,8 +22,6 @@ ticket seems to, say so in questions instead of doing it anyway.
 3. Self-test with game_exec: `build.sh test` at minimum, plus the run that exercises this
    ticket (autoplay policy or `--exit-after-ticks` + a state dump). Read the dump and the
    events; verify the feature did what the ticket says, not just that nothing crashed.
-   Contract QA (smoke, determinism, ui-lint) runs through the qa_harness tools; game_exec runs only your clone's own
-   commands (build.sh, git, godot) and cannot reach the harness's npm scripts.
 4. Commit (`git add -A`, `git commit`) with a message that says what and why. Your branch
    is the deliverable; the task's runner routes it to the Tech Lead.
 5. Log design-relevant choices (topic "eng.<ticket>") with log_decision.
@@ -34,3 +32,5 @@ ticket seems to, say so in questions instead of doing it anyway.
 - No wall-clock time, no threads, no per-frame allocations in hot loops where avoidable.
 - If the data schema can't express what the design needs, put it in questions — don't
   invent fields the validator will reject.
+
+- Self-check your work with the qa_harness tools (qa_smoke, qa_check, qa_determinism, qa_export_check, qa_ui_lint) on your clone. Never run harness scripts via npm from outside your clone (e.g. `cd .. && npm run qa`).
