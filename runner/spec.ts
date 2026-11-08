@@ -2,7 +2,7 @@
 // One folder per agent: agents/<name>/spec.ts (default export defineAgent({...})) + system.md.
 // Both runners read the same spec: the local runner directly, the Naïve runner via toNaiveAgent().
 import { z } from "zod";
-import { CAPABILITIES, type CapabilityName } from "./tools/registry.ts";
+import { CAPABILITIES, type Capability, type CapabilityName } from "./tools/registry.ts";
 
 export const Permission = z.enum(["allow", "ask", "deny"]);
 export type Permission = z.infer<typeof Permission>;
@@ -34,13 +34,26 @@ export const Provider = z.discriminatedUnion("kind", [
     .strict(),
 ]);
 
-const known = Object.keys(CAPABILITIES);
+/**
+ * Tool grants against a capability table (core + lanes): every name must exist, and a capability
+ * marked `outward` (sends or spends outside the studio) may only be granted "ask" or "deny".
+ * Returns one issue per bad grant. Grants are explicit per agent: nothing is granted by default.
+ */
+export function grantIssues(rec: Record<string, string>, caps: Record<string, Capability> = CAPABILITIES): Array<{ path: string; message: string }> {
+  const known = Object.keys(caps);
+  const issues: Array<{ path: string; message: string }> = [];
+  for (const [k, perm] of Object.entries(rec)) {
+    if (!(k in caps)) issues.push({ path: k, message: `unknown capability "${k}"; known: ${known.join(", ")}` });
+    else if (caps[k].outward && perm === "allow")
+      issues.push({ path: k, message: `capability "${k}" sends or spends outside the studio: grant it "ask" (approval gate + ledger), never "allow"` });
+  }
+  return issues;
+}
+
 const tools = z
   .record(z.string(), Permission)
   .superRefine((rec, ctx) => {
-    for (const k of Object.keys(rec)) {
-      if (!known.includes(k)) ctx.addIssue({ code: "custom", path: [k], message: `unknown capability "${k}"; known: ${known.join(", ")}` });
-    }
+    for (const i of grantIssues(rec)) ctx.addIssue({ code: "custom", path: [i.path], message: i.message });
   })
   .transform((rec) => rec as Partial<Record<CapabilityName, Permission>>);
 

@@ -7,7 +7,10 @@ import { isIP } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import type { CapabilityName } from "./registry.ts";
+import type { CORE_CAPABILITIES, CapabilityName } from "./registry.ts";
+import { LANES } from "./lanes/index.ts";
+import { mergeImpls } from "./lanes/merge.ts";
+import { MAX_RESULT_CHARS, clip, errText, lstatOk, realOrNull, resolveInWorkspace, type ToolContext, type ToolImpl, type ToolOutput } from "./kit.ts";
 import type { NaiveClient } from "../providers.ts";
 import { studioStatusTools } from "./studio-status.ts";
 import { decodePng, encodePng, type RgbaImage } from "../../tools/art/png.ts";
@@ -29,36 +32,9 @@ import type { Board } from "../board/index.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-export interface ToolContext {
-  workspace: string; // absolute; the only place workspace_* tools can touch
-  naive: NaiveClient | null;
-  agent?: string; // set by the runner, for attribution in the ledger
-  run_id?: string;
-  runsDir?: string; // where runs/ lives (studio_status); defaults to <repo>/runs
-  ledgerFile?: string; // studio ledger path (studio_ledger); defaults to <repo>/runs/ledger.jsonl
-  gameRepoRoot?: string; // where games/ lives (game_repo); defaults to <repo>/games
-  agentsDir?: string; // where agents/ lives (board_create assignee check); defaults to <repo>/agents
-  board?: Board; // the studio board for board_* tools; unset → those tools answer an error
-}
-
-export interface ToolOutput {
-  content: string;
-  /** Optional image the model must see next to the text (a ref block; no base64 here). */
-  image?: ImageBlock;
-  is_error?: boolean;
-  cost_micro_usd?: number;
-}
-
-export interface ToolImpl {
-  description: string;
-  input: z.ZodType<Record<string, unknown>>;
-  run(input: any, ctx: ToolContext): Promise<ToolOutput>;
-}
-
-const MAX_RESULT_CHARS = 40_000;
-export function clip(s: string, max = MAX_RESULT_CHARS): string {
-  return s.length <= max ? s : `${s.slice(0, max)}\n…[truncated ${s.length - max} chars]`;
-}
+// Tool types and the helpers lane modules may use live in ./kit.ts (lanes must never import this file).
+export type { ToolContext, ToolOutput, ToolImpl } from "./kit.ts";
+export { clip, errText, resolveInWorkspace } from "./kit.ts";
 
 // ---------- catalog_query: one tool per command ----------
 // One tool per command, each with only its own fields: a single tool with every optional field made
@@ -420,42 +396,7 @@ const webSearch: ToolImpl = {
 };
 
 // ---------- workspace_read / workspace_write ----------
-// Symlink-safe confinement. Returns the lexically normalised path (so `..` after a symlink is never
-// handed to the OS), after checking that what the OS would actually touch stays under the root's
-// realpath: the target's realpath when it exists, else the realpath of its deepest existing ancestor.
-// A dangling symlink anywhere on the path is refused, since a write would follow it to wherever it points.
-// Known limit: check-then-use, so a symlink swapped in between the check and the fs call is not caught.
-export function resolveInWorkspace(workspace: string, rel: string): string {
-  const p = path.resolve(workspace, rel || ".");
-  if (p !== workspace && !p.startsWith(workspace + path.sep)) throw new Error(`path escapes the workspace: ${rel}`);
-  const rootReal = realOrNull(workspace) ?? path.resolve(workspace);
-  for (let cur = p; ; cur = path.dirname(cur)) {
-    const real = realOrNull(cur);
-    if (real !== null) {
-      if (real !== rootReal && !real.startsWith(rootReal + path.sep)) throw new Error(`path escapes the workspace through a symlink: ${rel}`);
-      return p;
-    }
-    if (lstatOk(cur)) throw new Error(`path goes through a dangling symlink: ${rel}`);
-    if (cur === workspace || path.dirname(cur) === cur) return p; // root not created yet: nothing on disk to follow
-  }
-}
-
-function realOrNull(p: string): string | null {
-  try {
-    return realpathSync(p);
-  } catch {
-    return null;
-  }
-}
-
-function lstatOk(p: string): boolean {
-  try {
-    lstatSync(p);
-    return true;
-  } catch {
-    return false;
-  }
-}
+// Workspace confinement: resolveInWorkspace (kit.ts).
 
 const workspaceRead: ToolImpl = {
   description: "Read a file, or list a directory, inside your workspace. Paths are relative to the workspace root.",
@@ -588,7 +529,6 @@ export function resolveGameRepo(root: string, repo?: string): { name: string; di
   return { name: entries[0], dir: path.join(root, entries[0]) };
 }
 
-const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 async function gameCloneDir(ctx: ToolContext, repo?: string): Promise<{ clone: string; branch: string; src: { name: string; dir: string } }> {
   const src = resolveGameRepo(ctx.gameRepoRoot ?? path.join(ROOT, "games"), repo);
@@ -1824,8 +1764,8 @@ const mediaTools: Record<string, ToolImpl> = {
   },
 };
 
-/** Each capability provides one or more model-facing tools. */
-export const IMPLS: Record<CapabilityName, Record<string, ToolImpl>> = {
+/** Core implementations; lane IMPLS (runner/tools/lanes/) are merged in below. */
+const CORE_IMPLS: Record<keyof typeof CORE_CAPABILITIES, Record<string, ToolImpl>> = {
   catalog_query: catalogTools,
   gap_map: gapTools,
   steam_reviews: reviewTools,
@@ -1849,6 +1789,9 @@ export const IMPLS: Record<CapabilityName, Record<string, ToolImpl>> = {
   board: boardTools,
   media_capture: mediaTools,
 };
+
+/** Each capability provides one or more model-facing tools: core + every lane (merge.ts refuses redefinitions and shadowed tool names). */
+export const IMPLS = mergeImpls(CORE_IMPLS, LANES) as Record<CapabilityName, Record<string, ToolImpl>>;
 
 /** Model-facing tool name → its capability and implementation. */
 export const TOOL_INDEX: Record<string, { capability: CapabilityName; impl: ToolImpl }> = Object.fromEntries(
