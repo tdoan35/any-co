@@ -10,7 +10,7 @@ import { z } from "zod";
 import type { CORE_CAPABILITIES, CapabilityName } from "./registry.ts";
 import { LANES } from "./lanes/index.ts";
 import { mergeImpls } from "./lanes/merge.ts";
-import { MAX_RESULT_CHARS, clip, errText, lstatOk, realOrNull, resolveInWorkspace, type ToolContext, type ToolImpl, type ToolOutput } from "./kit.ts";
+import { MAX_RESULT_CHARS, clip, errText, lstatOk, readTextForModel, realOrNull, resolveInWorkspace, type ToolContext, type ToolImpl, type ToolOutput } from "./kit.ts";
 import type { NaiveClient } from "../providers.ts";
 import { studioStatusTools } from "./studio-status.ts";
 import { decodePng, encodePng, type RgbaImage } from "../../tools/art/png.ts";
@@ -411,7 +411,7 @@ const workspaceRead: ToolImpl = {
         const entries = await readdir(p, { withFileTypes: true });
         return { content: entries.map((e) => (e.isDirectory() ? `${e.name}/` : e.name)).join("\n") || "(empty)" };
       }
-      return { content: clip(await readFile(p, "utf8")) };
+      return await readTextForModel(p);
     } catch (e: any) {
       return { content: String(e?.message ?? e), is_error: true };
     }
@@ -630,7 +630,7 @@ const gameRead: ToolImpl = {
         const entries = await readdir(p, { withFileTypes: true });
         return { content: entries.map((e) => (e.isDirectory() ? `${e.name}/` : e.name)).join("\n") || "(empty)" };
       }
-      return { content: clip(await readFile(p, "utf8")) };
+      return await readTextForModel(p);
     } catch (e) {
       return { content: errText(e), is_error: true };
     }

@@ -46,6 +46,25 @@ export function clip(s: string, max = MAX_RESULT_CHARS): string {
   return s.length <= max ? s : `${s.slice(0, max)}\n…[truncated ${s.length - max} chars]`;
 }
 
+/**
+ * Read a file as TEXT for a model, or refuse a binary one. Nov 8: workspace_read on a PNG put ~40k chars of binary-as-UTF-8
+ * into a GLM context; it tokenizes densely and stays in every later turn (one run billed $21). A NUL byte in the first 8 KB, or
+ * more than 1% replacement characters after decoding, means binary: return a short pointer to the right tool instead.
+ */
+export async function readTextForModel(p: string): Promise<{ content: string; is_error?: true }> {
+  const { readFile } = await import("node:fs/promises");
+  const buf = await readFile(p);
+  const head = buf.subarray(0, 8192);
+  const text = buf.toString("utf8");
+  const bad = (text.match(/\uFFFD/g) ?? []).length;
+  if (head.includes(0) || (text.length > 0 && bad / text.length > 0.01)) {
+    const ext = (p.match(/\.[A-Za-z0-9]+$/)?.[0] ?? "").toLowerCase();
+    const hint = /\.(png|jpe?g|gif|webp)$/.test(ext) ? "art_view (images)" : /\.(mp4|webm|wav|ogg|mp3|avi)$/.test(ext) ? "media_probe (audio/video)" : "a tool made for that format";
+    return { content: `refused: ${ext || "this file"} is binary (${buf.length} bytes), not text; reading it as text would flood your context. Use ${hint}.`, is_error: true };
+  }
+  return { content: clip(text) };
+}
+
 export const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 // Symlink-safe confinement. Returns the lexically normalised path (so `..` after a symlink is never
