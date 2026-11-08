@@ -21,7 +21,7 @@ import {
   LOW_GENERATIONS, MAX_REGENERATIONS, PROVIDERS, anchorWinner, checkPixellabFloor, pixellabCallEstimate, pixellabFloor, type FloorVerdict, generationsUsedSinceRedo, grantRedo, outPathProblem, releaseGeneration, reserveGeneration, isExhausted, markExhausted, other, readCredits, readGallery,
   readProviders, recordAnchorWinner, recordCredit, statePaths,
 } from "../../tools/art/credits.ts";
-import { execEnv, execRefusal, scopedArgv } from "./exec-scope.ts";
+import { GAMES_DIR, execEnv, execRefusal, sandboxPrefix, scopedArgv } from "./exec-scope.ts";
 import { capture as mediaCapture, POLICY as MEDIA_POLICY, type CaptureMode } from "../../tools/media/capture.ts";
 import { edit as mediaEdit, probe as mediaProbe } from "../../tools/media/edit.ts";
 import { track as trackGroup } from "../../tools/proc/reaper.ts";
@@ -655,7 +655,7 @@ const gameExec: ToolImpl = {
       if (!existsSync(cwd)) throw new Error("no clone yet; call game_clone first");
       const refusal = execRefusal(command, cwd);
       if (refusal) return { content: `game_exec refused: ${refusal}`, is_error: true };
-      const [cmd, ...args] = scopedArgv(command, cwd);
+      const [cmd, ...args] = scopedArgv(command, [cwd, GAMES_DIR]); // sandbox allows writing the clone and pushing to games/
       const { promise, resolve } = Promise.withResolvers<{ out: string; err: string; code: number }>();
       // ANYCO_AGENT lets the game repo's pre-receive hook enforce the single-merger rule (tools/gamerepo/new-game.ts);
       // the rest of the env is an allowlist: agent-run processes never see API keys (T40).
@@ -1740,8 +1740,10 @@ async function runQa(mode: QaMode, input: Record<string, unknown>, ctx: ToolCont
       if (input["run"] === false) args.push("--run", "false");
       if (input["save_frames"] !== undefined) args.push("--save-frames", String(input["save_frames"]), "--save-dir", mediaOut(ctx.workspace, "media/export-frames"));
       const tsxLoader = fileURLToPath(import.meta.resolve("tsx"));
-      // the QA CLI runs agent-written game code (Godot): no secrets in its env (T40)
-      const proc = await execText(process.execPath, ["--import", `file://${tsxLoader}`, path.join(ROOT, "tools", "qa", "qa.ts"), "export-check", ...args], 15 * 60_000, execEnv(ctx.agent ?? "unknown", clone));
+      // the QA CLI runs agent-written game code (Godot): scrubbed env + the sandbox over the whole process tree, so the
+      // engine it spawns is confined too (writes limited to the run workspace; no .env or credential reads) (T40-fix)
+      const [cmd0, ...cmdRest] = scopedArgv([process.execPath, "--import", `file://${tsxLoader}`, path.join(ROOT, "tools", "qa", "qa.ts"), "export-check", ...args], [ctx.workspace]);
+      const proc = await execText(cmd0, cmdRest, 15 * 60_000, execEnv(ctx.agent ?? "unknown", clone));
       try {
         const result = JSON.parse(proc.out);
         // saved frames are reported workspace-relative, the paths image_view takes
@@ -1763,6 +1765,9 @@ async function runQa(mode: QaMode, input: Record<string, unknown>, ctx: ToolCont
       cli["dir"] = typeof dir === "string" ? resolveInWorkspace(ctx.workspace, path.join("game", dir)) : mode === "ui-lint" ? clone : path.join(clone, "qa");
     } else {
       const cmd = validateLaunchArgv(input["cmd"], clone);
+      // belt-and-suspenders over validateLaunchArgv: realpath-based refusal catches a clone symlink to harness/.bin (T40-fix)
+      const refusal = execRefusal(cmd, clone);
+      if (refusal) throw new Error(`launch command refused: ${refusal}`);
       cli["cmd"] = JSON.stringify(cmd);
       cli["dir"] = clone;
       cli["seed"] = numArg("seed", input["seed"] ?? 0);
@@ -1786,7 +1791,9 @@ async function runQa(mode: QaMode, input: Record<string, unknown>, ctx: ToolCont
     const args = Object.entries(cli).flatMap(([k, v]) => [`--${k}`, String(v)]);
     // tsx resolves from the cwd; the child runs in the clone, so import the loader by path.
     const tsxLoader = fileURLToPath(import.meta.resolve("tsx"));
-    const proc = await execText(process.execPath, ["--import", `file://${tsxLoader}`, path.join(ROOT, "tools", "qa", "qa.ts"), mode, ...args], 10 * 60_000, execEnv(ctx.agent ?? "unknown", path.join(ctx.workspace, "game")));
+    // scrubbed env + the sandbox over the whole tree: the game this QA run spawns is confined too (T40-fix)
+    const [cmd0, ...cmdRest] = scopedArgv([process.execPath, "--import", `file://${tsxLoader}`, path.join(ROOT, "tools", "qa", "qa.ts"), mode, ...args], [ctx.workspace]);
+    const proc = await execText(cmd0, cmdRest, 10 * 60_000, execEnv(ctx.agent ?? "unknown", path.join(ctx.workspace, "game")));
     let parsed: unknown;
     try {
       parsed = JSON.parse(proc.out);
@@ -1986,10 +1993,14 @@ const mediaTools: Record<string, ToolImpl> = {
           if (!i.exit_after_ticks) throw new Error("mode movie needs exit_after_ticks");
           mode = { kind: "movie", file: path.join(outDir, i.movie_file), exit_after_ticks: i.exit_after_ticks };
         }
+        const launch = mediaLaunch(clone, i.launch);
+        const refusal = execRefusal(launch, clone); // realpath refusal catches a clone symlink to harness (T40-fix)
+        if (refusal) throw new Error(`launch refused: ${refusal}`);
         const r = await mediaCapture({
-          gameDir: clone, launch: mediaLaunch(clone, i.launch), separator: i.separator, seed: i.seed, timeScale: i.time_scale,
+          gameDir: clone, launch, separator: i.separator, seed: i.seed, timeScale: i.time_scale,
           policy: i.policy, resolution: { w: i.width, h: i.height }, outDir, mode, timeoutMs: i.timeout_s * 1000,
           baseEnv: execEnv(ctx.agent ?? "unknown", clone), // the game is agent-written code: no secrets (T40)
+          sandboxPrefix: sandboxPrefix([ctx.workspace]), // confine the game and its children: writes limited to the run workspace (T40-fix)
         });
         const rel = (f: string) => path.relative(ctx.workspace, f);
         return {

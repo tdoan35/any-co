@@ -7,11 +7,12 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { HARNESS_ROOT, execEnv, execRefusal, packageRoot, sandboxAvailable, sandboxProfile } from "./exec-scope.ts";
+import { GIT_CONFIG_ALLOW, HARNESS_ROOT, credentialReadDenies, execEnv, execRefusal, packageRoot, sandboxAvailable, sandboxPrefix, sandboxProfile } from "./exec-scope.ts";
 import { IMPLS, type ToolContext } from "./impl.ts";
 
 /** A workspace whose game/ clone sits inside the harness tree (runs/…), as a real run's does. */
 function harnessWorkspace(): { ws: string; clone: string; cleanup: () => void } {
+  mkdirSync(path.join(HARNESS_ROOT, "runs"), { recursive: true }); // runs/ is gitignored and may be absent in a fresh checkout (R48 #7)
   const base = mkdtempSync(path.join(HARNESS_ROOT, "runs", "t40-test-"));
   const ws = path.join(base, "workspace");
   const clone = path.join(ws, "game");
@@ -75,7 +76,12 @@ test("T40 isolation: harness files, harness npm scripts (walk-up), cd above the 
       [["env", "FOO=1", "node", "../../../../tools/ledger/ledger.ts"], /harness file outside your clone/],
       [["git", "-C", "../../../..", "status"], /git -C outside your clone/],
       [["git", "--git-dir=../../../../.git", "log"], /git --git-dir outside your clone/],
-      [["git", "-c", "core.hooksPath=/dev/null", "push", "origin", "main"], /core\.hooksPath is not allowed/],
+      // R48 #3: git -c is an allowlist (only the commit identity), so none of these can run a shell or disable the hook
+      [["git", "-c", "core.hooksPath=/dev/null", "push", "origin", "main"], /git -c core\.hooksPath=\/dev\/null is not allowed/],
+      [["git", "-c", "alias.x=!sh -c 'id'", "x"], /git -c alias\.x=.* is not allowed/],
+      [["git", "-c", "core.sshCommand=/tmp/x", "fetch"], /is not allowed; only user\.name, user\.email/],
+      [["git", "-c", "core.pager=/tmp/x", "log"], /is not allowed/],
+      [["git", "-c", "credential.helper=/tmp/x", "fetch"], /is not allowed/],
       [["python3", "-c", `open("${HARNESS_ROOT}/runs/ledger.jsonl","a")`], /inline code that names a path outside your clone/],
     ];
     for (const [argv, re] of refused) {
@@ -83,10 +89,11 @@ test("T40 isolation: harness files, harness npm scripts (walk-up), cd above the 
       assert.equal(r.is_error, true, JSON.stringify(argv));
       assert.match(r.content, re, JSON.stringify(argv));
     }
-    // legitimate work in the clone still runs
-    for (const argv of [["./build.sh", "test"], ["bash", "build.sh", "test"], ["git", "--version"], ["sh", "-c", "echo agent=$ANYCO_AGENT && ls"], ["env", "FOO=1", "./build.sh", "test"]]) {
+    // legitimate work in the clone still runs, including the checkpoint's own git -c commit identity
+    for (const argv of [["./build.sh", "test"], ["bash", "build.sh", "test"], ["git", "--version"], ["git", "-c", "user.name=x", "-c", "user.email=y@z", "commit", "-m", "x"], ["sh", "-c", "echo agent=$ANYCO_AGENT && ls"], ["env", "FOO=1", "./build.sh", "test"]]) {
       assert.equal(execRefusal(argv, clone), null, JSON.stringify(argv));
     }
+    assert.deepEqual([...GIT_CONFIG_ALLOW].sort(), ["user.email", "user.name"]);
     const ok = await exec(ws, ["./build.sh", "test"]);
     assert.equal(ok.is_error, false, ok.content);
     assert.match(ok.content, /test: green/);
@@ -100,23 +107,51 @@ test("T40 isolation: harness files, harness npm scripts (walk-up), cd above the 
   }
 });
 
-test("T40 sandbox (macOS): a script the agent writes into its clone cannot write the harness tree or read its .env", { skip: !sandboxAvailable() && "sandbox-exec is macOS-only" }, async () => {
+test("T40 profile: writes under the harness are denied except the write roots; games hooks/config and credential dirs are protected", () => {
+  const profile = sandboxProfile(["/tmp/run/workspace", path.join(HARNESS_ROOT, "games")]);
+  assert.match(profile, new RegExp(`deny file-write\\* \\(subpath "${HARNESS_ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"\\)`));
+  assert.match(profile, /allow file-write\* \(subpath "[^"]*\/run\/workspace"\) \(subpath ".*\/games"\)/);
+  // R48 #6: a game repo stays writable for push objects/refs, but its hooks and config do not
+  assert.match(profile, /deny file-write\* \(regex #"\/games\/\[\^\/\]\+\/\(\\\.git\/\)\?hooks\(\/\|\$\)"\) \(regex #"\/games\/\[\^\/\]\+\/\(\\\.git\/\)\?config\$"\)/);
+  assert.match(profile, /deny file-read\* \(regex #"\^.*\/\\\.env"\)/, ".env* at the harness root is unreadable");
+  // R48 #5: the user's credential dirs cannot be read, so a planted script cannot grab gh/ssh/aws tokens
+  for (const d of [".ssh", ".config/gh", ".aws", ".netrc"]) assert.ok(credentialReadDenies("/Users/x").includes(path.join("/Users/x", d)), d);
+  assert.match(profile, /deny file-read\* \(subpath ".*\/\.ssh"\)/);
+});
+
+test("T40 sandbox (macOS): a clone script launched through QA, media, or game_exec cannot write the harness tree or forge a ledger", { skip: !sandboxAvailable() && "sandbox-exec is macOS-only" }, async () => {
   const { ws, clone, cleanup } = harnessWorkspace();
-  const probe = path.join(HARNESS_ROOT, "runs", `t40-ledger-probe-${process.pid}.jsonl`);
+  const marker = path.join(HARNESS_ROOT, "runs", `t40-probe-${process.pid}.marker`);
+  // one clone script that attempts a single harness write; every launch path must have the sandbox deny it
+  writeFileSync(path.join(clone, "probe.sh"), `#!/bin/sh\necho x > "${marker}" 2>/dev/null && echo HARNESS-WRITTEN || echo harness-write-denied\necho ok > inside.txt && echo clone-write-ok\nexit 0\n`);
+  chmodSync(path.join(clone, "probe.sh"), 0o755);
   try {
-    writeFileSync(path.join(clone, "sneaky.sh"), `#!/bin/sh\nunset ANYCO_AGENT\necho fake >> "${probe}" && echo HARNESS-WRITTEN || echo harness-write-denied\necho x > inside.txt && echo clone-write-ok\n`);
-    chmodSync(path.join(clone, "sneaky.sh"), 0o755);
-    const r = await exec(ws, ["./sneaky.sh"]);
-    assert.match(r.content, /harness-write-denied/);
-    assert.match(r.content, /clone-write-ok/);
-    assert.equal(existsSync(probe), false);
-    const profile = sandboxProfile(clone);
-    assert.match(profile, new RegExp(`deny file-write\\* \\(subpath "${HARNESS_ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"\\)`));
-    assert.match(profile, /\(allow file-write\* \(subpath ".*\/workspace\/game"\) \(subpath ".*\/games"\)\)/, "the clone and the game repos (pushes) stay writable");
-    assert.match(profile, /deny file-read\* \(regex/, ".env files at the harness root are unreadable");
+    // game_exec
+    const ge = await exec(ws, ["./probe.sh"]);
+    assert.match(ge.content, /harness-write-denied/);
+    assert.match(ge.content, /clone-write-ok/, "the clone itself stays writable");
+    assert.equal(existsSync(marker), false, "game_exec: no harness write");
+
+    // qa_smoke launch (R48 #1): the engine binary is the clone script; the sandbox wraps the whole QA subprocess tree
+    writeFileSync(path.join(clone, "project.godot"), "[application]\n");
+    const qa = await IMPLS.qa_harness.qa_smoke.run({ cmd: ["./probe.sh"], seed: 1, ticks: 1, ack_timeout_ms: 1500, end_wait_ms: 1500 }, ctxFor(ws));
+    assert.match(qa.content, /Operation not permitted|ready ack/, qa.content); // the script died denied; the QA run reports it
+    assert.equal(existsSync(marker), false, "qa_smoke launch: no harness write");
+    assert.equal(existsSync(path.join(HARNESS_ROOT, "runs", "ledger.jsonl")), false, "no forged ledger at the harness root");
   } finally {
-    rmSync(probe, { force: true });
+    rmSync(marker, { force: true });
     cleanup();
+  }
+});
+
+test("T40 media: the runner hands media_capture a sandbox prefix so the game and its children are confined", () => {
+  const prefix = sandboxPrefix(["/tmp/run/workspace"]);
+  if (sandboxAvailable()) {
+    assert.equal(prefix[0], "/usr/bin/sandbox-exec");
+    assert.equal(prefix[1], "-p");
+    assert.match(prefix[2], /allow file-write\* \(subpath "[^"]*\/run\/workspace"\)/);
+  } else {
+    assert.deepEqual(prefix, [], "no sandbox off macOS");
   }
 });
 

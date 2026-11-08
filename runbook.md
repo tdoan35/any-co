@@ -38,9 +38,11 @@ The head turn runs outside `--max-parallel`: count N dispatched runs + 1 head tu
 - Replace a stuck card (T38): create the new card with `supersedes: <old id>` (board_create). Cards waiting on the old one
   then wait on the new one, and the old card closes done "superseded by <new id>". The dispatcher finishes a half-done supersede
   on its next pass. A card replaced WITHOUT supersedes still strands its dependents: close the old one by hand.
-- game_exec is scoped (T40): minimal env (no keys), no harness files/npm scripts, sandboxed on macOS (no writes outside the
-  clone except pushes to games/). If a build fails with "Operation not permitted", read the path it names; `ANYCO_EXEC_SANDBOX=off`
-  turns the sandbox off (logged decision first). Operator CLIs (ledger intervention, approvals approve/deny, art redo) refuse agent runs.
+- Agent launches are scoped (T40/T40-fix): game_exec AND the qa_harness/media/export game launches run with a minimal env
+  (no keys), no harness files/npm scripts, and on macOS a sandbox (writes limited to the run workspace + git push to games/;
+  no reads of .env or ~/.ssh,~/.config/gh,~/.aws). If a build fails with "Operation not permitted", read the path it names;
+  `ANYCO_EXEC_SANDBOX=off` turns the sandbox off (log a decision first). Operator CLIs (ledger intervention, approvals
+  approve/deny, art redo) refuse agent runs. Linux (studio 2) has no sandbox yet — needs bubblewrap before T40 is trusted there.
 - Restart-safe: a `doing` card whose claiming process is dead is requeued to `todo` with a comment; a card
   whose finished run could not be closed is left for a manual close (comment `dispatcher: close failed`).
 - Stop: `touch runs/KILL` (no new dispatches; in-flight runs stop at their next call, cards requeue).

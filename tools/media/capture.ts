@@ -34,6 +34,8 @@ export interface CaptureOptions {
   env?: Record<string, string | undefined>;
   /** The env the game starts from (default process.env); the runner passes a scrubbed one (T40). */
   baseEnv?: Record<string, string | undefined>;
+  /** Prepended to the launch argv to confine the game and its children (sandbox-exec on macOS); the runner passes it (T40-fix). */
+  sandboxPrefix?: string[];
 }
 
 export interface Shot { file: string; tick: number; trigger: string }
@@ -83,7 +85,7 @@ async function stop(child: ChildProcess, exited: () => boolean, graceMs: number)
 }
 
 export async function capture(o: CaptureOptions): Promise<CaptureResult> {
-  const argv = launchArgv(o);
+  const argv = [...(o.sandboxPrefix ?? []), ...launchArgv(o)];
   const graceMs = o.graceMs ?? 3000;
   const deadline = Date.now() + o.timeoutMs;
   mkdirSync(o.outDir, { recursive: true });

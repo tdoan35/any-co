@@ -1,15 +1,18 @@
-// game_exec scoping (T40). Agent-run processes (game_exec, and harness spawns that run agent-written code:
-// checkpoint git, QA/export/media Godot runs) get:
+// Agent-controlled process launches (T40, hardened in T40-fix per R48). EVERY launch that runs agent-written code —
+// game_exec, the end-of-run checkpoint git (hooks are agent files), and the qa_harness / media_capture / export-check
+// game launches — goes through the same three layers:
 //   1. a minimal env by ALLOWLIST: no API keys, tokens or studio state paths reach them;
-//   2. argv checks: nothing under the harness repo outside the run's clone is executed, package managers
-//      cannot walk up from the clone to the harness package.json, shell strings cannot cd above the clone;
-//   3. on macOS, a Seatbelt sandbox (sandbox-exec): writes under the harness tree are denied except the clone and
-//      the games/ repos (pushes), and the harness .env is unreadable. This is the part a determined agent cannot
-//      talk its way around (a script it writes into its clone still runs inside the sandbox).
-// Residual risk (documented in docs/decisions.md): without the sandbox (Linux, or ANYCO_EXEC_SANDBOX=off) a script the
-// agent writes into its clone can still read files and call harness CLIs by absolute path as the same OS user; the
-// env scrub keeps secrets out of its reach and the operator CLIs refuse ANYCO_AGENT, but an `unset` defeats that.
+//   2. argv checks (execRefusal): nothing under the harness repo outside the run's clone is executed, package managers
+//      cannot walk up to the harness package.json, shell strings cannot cd above the clone, git -c is an allowlist;
+//   3. on macOS, a Seatbelt sandbox (sandbox-exec) over the whole process tree, so a game a QA run spawns is confined
+//      too: writes under the harness tree are denied except the run's workspace (and games/ for a push, minus each
+//      repo's hooks/config); the harness .env and the user's credential dirs (~/.ssh, ~/.config/gh, …) are unreadable.
+// Residual risk (documented in docs/decisions.md): where sandbox-exec is unavailable (Linux — studio 2 on ty-ubuntu —
+// or ANYCO_EXEC_SANDBOX=off), only the env scrub and argv refusals apply; a script the agent writes into its clone can
+// still read files and call harness CLIs by absolute path as the same OS user after `unset ANYCO_AGENT`. That seat
+// needs an OS sandbox (bubblewrap/landlock) or a separate user before T40's integrity guarantees hold there.
 import { existsSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -32,6 +35,9 @@ const real = (p: string): string => {
   }
 };
 const inside = (p: string, root: string) => p === root || p.startsWith(root + path.sep);
+
+/** The studio's game repos; a sandboxed agent may write here (git push), but not its hooks/config (single-merger rule). */
+export const GAMES_DIR = path.join(HARNESS_ROOT, "games");
 
 /** Env names an agent-run process may see. Everything else (keys, tokens, NAIVE_*, STUDIO_*, …) is dropped. */
 export const EXEC_ENV_ALLOW = new Set([
@@ -60,6 +66,8 @@ export function execEnv(agent: string, cwd: string, parent: NodeJS.ProcessEnv = 
   return env;
 }
 
+/** The only `git -c key=…` keys an agent run may set (the checkpoint commit identity); everything else is refused. */
+export const GIT_CONFIG_ALLOW = new Set(["user.name", "user.email"]);
 const PACKAGE_MANAGERS = new Set(["npm", "npx", "pnpm", "pnpx", "yarn", "bun", "bunx", "corepack"]);
 const INTERPRETERS = new Set(["node", "nodejs", "tsx", "ts-node", "deno", "bun", "python", "python3", "ruby", "perl", "php"]);
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish"]);
@@ -112,9 +120,12 @@ export function execRefusal(argv: string[], clone: string): string | null {
   if (base === "git") {
     for (let k = 0; k < args.length; k++) {
       const flag = args[k];
-      // -c core.hooksPath reaches the origin's receive-pack on a local push and would switch off its single-merger hook
-      if ((flag === "-c" && /^core\.hookspath=/i.test(args[k + 1] ?? "")) || /^--config-env=core\.hookspath/i.test(flag))
-        return "git -c core.hooksPath is not allowed (it would disable the game repo's hooks)";
+      // `git -c key=value` can run a shell (alias.x=!cmd, core.sshCommand, core.pager, core.fsmonitor,
+      // credential.helper) or disable the game repo's single-merger hook (core.hooksPath), so allow only two keys.
+      if (flag === "-c" || flag === "--config-env") {
+        const key = (args[k + 1] ?? "").split("=")[0]!.toLowerCase();
+        if (!GIT_CONFIG_ALLOW.has(key)) return `git -c ${args[k + 1] ?? ""} is not allowed; only ${[...GIT_CONFIG_ALLOW].join(", ")} may be set on the command line`;
+      }
       const val = /^--(git-dir|work-tree)=/.test(flag) ? flag.split("=").slice(1).join("=") : ["-C", "--git-dir", "--work-tree"].includes(flag) ? args[k + 1] : null;
       if (val && !inside(resolveArg(val), root)) return `git ${flag.split("=")[0]} outside your clone is not allowed`;
     }
@@ -173,16 +184,34 @@ export function shellRefusal(script: string, root: string): string | null {
   return null;
 }
 
-/** macOS Seatbelt profile: deny writes under the harness tree except the clone and games/ (pushes), and hide .env files at its root. */
-export function sandboxProfile(clone: string): string {
-  const q = (p: string) => JSON.stringify(p);
-  return [
+/** Credential files a sandboxed agent run may not read, so a planted script cannot grab gh/ssh/aws tokens. */
+export function credentialReadDenies(home = process.env.HOME || homedir()): string[] {
+  const h = real(home);
+  return [".ssh", ".config/gh", ".config/git", ".aws", ".netrc", ".git-credentials", ".gnupg", ".npmrc"].map((p) => path.join(h, p));
+}
+
+const sbQuote = (p: string) => JSON.stringify(p);
+const sbRegex = (literal: string) => literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * macOS Seatbelt profile for an agent-run child and its descendants (T40): writes under the harness tree are denied
+ * except `writeRoots` (the run's workspace, or the clone + games/ for a push); even within games/ a repo's hooks and
+ * config stay read-only (the single-merger hook can't be rewritten); the harness `.env*` and the user's credential
+ * directories (~/.ssh, ~/.config/gh, ~/.aws, …) are unreadable. Reads elsewhere and the writable roots are allowed.
+ */
+export function sandboxProfile(writeRoots: string[]): string {
+  const roots = writeRoots.map((r) => real(r));
+  const lines = [
     "(version 1)",
     "(allow default)",
-    `(deny file-write* (subpath ${q(HARNESS_ROOT)}))`,
-    `(allow file-write* (subpath ${q(real(clone))}) (subpath ${q(path.join(HARNESS_ROOT, "games"))}))`,
-    `(deny file-read* (regex ${q(`^${HARNESS_ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/\\.env`)}))`,
-  ].join("\n");
+    `(deny file-write* (subpath ${sbQuote(HARNESS_ROOT)}))`,
+    `(allow file-write* ${roots.map((r) => `(subpath ${sbQuote(r)})`).join(" ")})`,
+    // a game repo under games/ stays writable for push objects/refs, but its hooks and config do not (R48 #6)
+    `(deny file-write* (regex #"/games/[^/]+/(\\.git/)?hooks(/|$)") (regex #"/games/[^/]+/(\\.git/)?config$"))`,
+    `(deny file-read* (regex #"^${sbRegex(HARNESS_ROOT)}/\\.env"))`,
+    `(deny file-read* ${credentialReadDenies().map((d) => `(subpath ${sbQuote(d)})`).join(" ")})`,
+  ];
+  return lines.join("\n");
 }
 
 /** Whether to wrap agent-run children in sandbox-exec: macOS with /usr/bin/sandbox-exec, unless ANYCO_EXEC_SANDBOX=off. */
@@ -190,7 +219,16 @@ export function sandboxAvailable(env: NodeJS.ProcessEnv = process.env): boolean 
   return process.platform === "darwin" && env.ANYCO_EXEC_SANDBOX !== "off" && existsSync("/usr/bin/sandbox-exec");
 }
 
-/** The argv to spawn: sandboxed on macOS, as given elsewhere. */
-export function scopedArgv(argv: string[], clone: string, env: NodeJS.ProcessEnv = process.env): string[] {
-  return sandboxAvailable(env) ? ["/usr/bin/sandbox-exec", "-p", sandboxProfile(clone), ...argv] : argv;
+/**
+ * The argv to spawn for an agent-run child: sandbox-exec on macOS (the whole process tree is confined, so a game a QA
+ * run spawns is confined too), or the argv as given where no sandbox is available (Linux: the env scrub and argv
+ * refusals still apply; see docs/decisions.md for the residual risk). `writeRoots` are the dirs it may write.
+ */
+export function scopedArgv(argv: string[], writeRoots: string[], env: NodeJS.ProcessEnv = process.env): string[] {
+  return sandboxAvailable(env) ? ["/usr/bin/sandbox-exec", "-p", sandboxProfile(writeRoots), ...argv] : argv;
+}
+
+/** The sandbox-exec prefix to prepend to a launch argv (empty where no sandbox): for spawns the runner builds itself (media_capture). */
+export function sandboxPrefix(writeRoots: string[], env: NodeJS.ProcessEnv = process.env): string[] {
+  return sandboxAvailable(env) ? ["/usr/bin/sandbox-exec", "-p", sandboxProfile(writeRoots)] : [];
 }
