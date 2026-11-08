@@ -18,7 +18,7 @@ import { addOutline, contactSheet, lockPalette, snapToGrid, splitStrip, upscaleN
 import { runGate } from "../../tools/art/gate.ts";
 import { ChargedFailure, DEFAULT_CANDIDATES, MAX_CANDIDATES, ProviderExhausted, ProviderUnavailable, balance as providerBalance, generate, type Balance, isAnimation, quote as providerQuote, type GenerateResult, type ProviderName } from "../../tools/art/generate.ts";
 import {
-  LOW_GENERATIONS, MAX_REGENERATIONS, PROVIDERS, anchorWinner, checkPixellabFloor, pixellabCallEstimate, pixellabFloor, type FloorVerdict, generationsUsedSinceRedo, grantRedo, outPathProblem, releaseGeneration, reserveGeneration, isExhausted, markExhausted, other, readCredits, readGallery,
+  LOW_GENERATIONS, MAX_REGENERATIONS, PROVIDERS, anchorWinner, checkPixellabFloor, pixellabCallEstimate, pixellabFloor, type FloorVerdict, generationsUsedSinceRedo, grantRedo, outPathProblem, releaseGeneration, reserveGeneration, isExhausted, markExhausted, other, readCredits, readGallery, recordLocalGeneration, comfyLaneStats,
   readProviders, recordAnchorWinner, recordCredit, statePaths,
 } from "../../tools/art/credits.ts";
 import { capture as mediaCapture, POLICY as MEDIA_POLICY, type CaptureMode } from "../../tools/media/capture.ts";
@@ -952,6 +952,7 @@ async function applyArtPostprocess(
   workspace: string,
   opts: { snap?: boolean; lock?: boolean; outline?: string },
   images: string[],
+  out?: string,
 ): Promise<Record<string, unknown>> {
   const manifestFile = resolveInWorkspace(workspace, path.join("game", "assets", "manifest.json"));
   let manifest: { grid?: { w: number; h: number }; palette?: string[]; assets?: Array<{ path?: string; size?: { w: number; h: number }; frames?: number }> };
@@ -972,7 +973,9 @@ async function applyArtPostprocess(
     if (opts.snap) {
       // Snap to the whole asset (size is ONE frame × frames), never to a single grid cell.
       const repoRel = rel.replace(/^game\//, "");
-      const entry = manifest.assets?.find((a) => a.path === repoRel);
+      // candidates of one call (<out>-<i>.png, e.g. a comfy batch, T41) snap to the entry of the out they were asked for
+      const outRel = out ? path.posix.normalize(out.replace(/\\/g, "/")).replace(/^(\.\/)?game\//, "") : undefined;
+      const entry = manifest.assets?.find((a) => a.path === repoRel) ?? (outRel ? manifest.assets?.find((a) => a.path === outRel) : undefined);
       if (!entry?.size)
         throw new Error(`snap needs the manifest entry for "${repoRel}" with its size (one frame) declared first`);
       if (entry.size.w % manifest.grid.w !== 0 || entry.size.h % manifest.grid.h !== 0)
@@ -1058,7 +1061,7 @@ async function collectJob(i: any, ctx: ToolContext): Promise<ToolOutput> {
   try {
     let postprocess: Record<string, unknown> | null = null;
     if (i.postprocess && (i.postprocess.snap || i.postprocess.lock || i.postprocess.outline))
-      postprocess = await applyArtPostprocess(ctx.workspace, i.postprocess, result.images);
+      postprocess = await applyArtPostprocess(ctx.workspace, i.postprocess, result.images, i.out);
     return { content: JSON.stringify({ ...result, postprocess, collected: resume_job_id, generation: "not counted (collected an earlier job)" }), cost_micro_usd: 0 };
   } catch (e) {
     return { content: `collected ${result.images.join(", ")} but postprocess failed: ${errText(e)}`, is_error: true, cost_micro_usd: 0 };
@@ -1294,11 +1297,16 @@ const artGenerate: ToolImpl = {
       ? Math.round((before.remaining - after.remaining) * 1000) / 1000
       : usage?.type === "generations" && typeof usage.generations === "number" ? usage.generations : null;
     credits = noteCredits(ctx, result.provider, after, "generation", used);
+    if (result.provider === "comfy" && typeof result.metadata.lane === "string")
+      recordLocalGeneration(paths.credits, {
+        ts: new Date().toISOString(), provider: "comfy", unit: "local", lane: result.metadata.lane, images: result.images.length,
+        batch: typeof result.metadata.batch === "number" ? result.metadata.batch : null, run_id: ctx.run_id ?? "unknown", source: "generation",
+      });
     const extra = { generation: `${generation} of ${1 + MAX_REGENERATIONS}`, credits, ...(used !== null ? { generations_used: used } : {}), ...(result.provider !== requested ? { fallback_from: requested } : {}), ...(floored ? { pixellab_floor: floored } : {}), ...(notes.length ? { notes } : {}) };
     try {
       let postprocess: Record<string, unknown> | null = null;
       if (i.postprocess && (i.postprocess.snap || i.postprocess.lock || i.postprocess.outline))
-        postprocess = await applyArtPostprocess(ctx.workspace, i.postprocess, result.images);
+        postprocess = await applyArtPostprocess(ctx.workspace, i.postprocess, result.images, i.out);
       return { content: JSON.stringify({ ...result, postprocess, ...extra }), cost_micro_usd: result.cost_micro_usd };
     } catch (e) {
       // generation succeeded and was paid; postprocess failing must not erase the charge
@@ -1361,7 +1369,7 @@ const artProviders: ToolImpl = {
     const credits = readCredits(paths.credits);
     const latest = Object.fromEntries(PROVIDERS.map((p) => [p, credits.filter((c) => c.provider === p).at(-1) ?? null]));
     const g = readGallery(paths.gallery);
-    return { content: clip(JSON.stringify({ providers: readProviders(paths.providers), latest_balance: latest, anchors: g.anchors, generations: g.generations, max_regenerations: MAX_REGENERATIONS })) };
+    return { content: clip(JSON.stringify({ providers: readProviders(paths.providers), latest_balance: latest, comfy_lanes: comfyLaneStats(paths.credits), anchors: g.anchors, generations: g.generations, max_regenerations: MAX_REGENERATIONS })) };
   },
 };
 

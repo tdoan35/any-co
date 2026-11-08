@@ -86,11 +86,38 @@ export interface CreditLine {
   source: string;
 }
 
+/** A comfy generation (T41b): no balance, the lane that served it, so the lanes can be compared. Never feeds the low notes. */
+export interface LocalLine { ts: string; provider: "comfy"; unit: "local"; lane: string; images: number; batch: number | null; run_id: string; source: "generation" }
+
+export function recordLocalGeneration(file: string, line: LocalLine): void {
+  mkdirSync(path.dirname(file), { recursive: true });
+  appendFileSync(file, JSON.stringify(line) + "\n");
+}
+
+/** Per-lane comfy totals from the credits log (calls, images), for comparing lanes. */
+export function comfyLaneStats(file: string): Record<string, { calls: number; images: number }> {
+  const out: Record<string, { calls: number; images: number }> = {};
+  if (!existsSync(file)) return out;
+  for (const l of readFileSync(file, "utf8").split("\n")) {
+    try {
+      const line = JSON.parse(l) as Partial<LocalLine>;
+      if (line.unit !== "local" || typeof line.lane !== "string") continue;
+      const s = (out[line.lane] ??= { calls: 0, images: 0 });
+      s.calls++;
+      s.images += line.images ?? 0;
+    } catch {
+      /* torn line */
+    }
+  }
+  return out;
+}
+
 export function readCredits(file: string): CreditLine[] {
   if (!existsSync(file)) return [];
   return readFileSync(file, "utf8").split("\n").filter(Boolean).flatMap((l) => {
     try {
-      return [JSON.parse(l) as CreditLine];
+      const line = JSON.parse(l) as CreditLine | LocalLine;
+      return line.unit === "local" ? [] : [line as CreditLine]; // balance readers never see comfy lines
     } catch {
       return [];
     }

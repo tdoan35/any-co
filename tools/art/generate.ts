@@ -692,7 +692,36 @@ const COMFY_SAVE_NODE = "7";
 
 /** COMFY_BASE_URL (or the lab default), refusing the production port and non-http(s) URLs. */
 export function comfyBaseUrl(opts: Pick<GenerateOptions, "baseUrl">, env: Record<string, string | undefined>): string {
-  const raw = (opts.baseUrl?.comfy?.trim() || env.COMFY_BASE_URL?.trim() || COMFY_DEFAULT_BASE_URL).replace(/\/+$/, ""); // empty = unset (.env.example)
+  return validComfyUrl(opts.baseUrl?.comfy?.trim() || env.COMFY_BASE_URL?.trim() || COMFY_DEFAULT_BASE_URL); // empty = unset (.env.example)
+}
+
+/** One lab lane: its base URL and the most images one call may batch there. */
+export interface ComfyLane { url: string; maxBatch: number }
+
+/**
+ * The lanes (T41b): COMFY_BASE_URLS, a comma list of `url` or `url|maxBatch` (e.g.
+ * `http://100.96.19.87:8191|4,http://100.96.19.87:8190|4`); else the single COMFY_BASE_URL (or an explicit
+ * baseUrl option, or the lab default) as one lane. A lane without its own batch gets COMFY_MAX_BATCH. Every entry
+ * goes through the same URL rules (production :8188 refused). Listed order breaks queue-length ties.
+ */
+export function comfyLanes(opts: Pick<GenerateOptions, "baseUrl">, env: Record<string, string | undefined>): ComfyLane[] {
+  const fallbackBatch = comfyMaxBatch(env);
+  const list = opts.baseUrl?.comfy ? "" : env.COMFY_BASE_URLS?.trim() ?? "";
+  if (!list) return [{ url: comfyBaseUrl(opts, env), maxBatch: fallbackBatch }];
+  const lanes = list.split(",").map((e) => e.trim()).filter(Boolean).map((entry) => {
+    const [rawUrl, rawBatch, extra] = entry.split("|").map((x) => x.trim());
+    if (extra !== undefined) throw new Error(`COMFY_BASE_URLS entry "${entry}" has more than one "|"`);
+    return { url: validComfyUrl(rawUrl), maxBatch: rawBatch === undefined ? fallbackBatch : comfyMaxBatch({ COMFY_MAX_BATCH: rawBatch }) };
+  });
+  if (lanes.length === 0) throw new Error("COMFY_BASE_URLS is set but lists no lane");
+  const urls = lanes.map((l) => l.url);
+  const dup = urls.find((u, i) => urls.indexOf(u) !== i);
+  if (dup) throw new Error(`COMFY_BASE_URLS lists ${dup} twice`);
+  return lanes;
+}
+
+function validComfyUrl(input: string): string {
+  const raw = input.replace(/\/+$/, "");
   let url: URL;
   try {
     url = new URL(raw);
@@ -705,14 +734,47 @@ export function comfyBaseUrl(opts: Pick<GenerateOptions, "baseUrl">, env: Record
   return raw;
 }
 
+/** A lane's queue depth (GET /queue: running + pending), or the reason it's unusable for this call. */
+async function probeLane(fetchImpl: typeof fetch, lane: ComfyLane, deadline: number): Promise<{ lane: ComfyLane; depth: number } | { lane: ComfyLane; error: string }> {
+  try {
+    const r = await fetchImpl(`${lane.url}/queue`, { signal: AbortSignal.timeout(Math.max(1, Math.min(COMFY_PROBE_MS, deadline - Date.now()))) });
+    const text = await r.text().catch(() => "");
+    if (!r.ok) return { lane, error: `${lane.url}/queue answered ${r.status}` };
+    const body = JSON.parse(text || "{}");
+    const n = (v: unknown) => (Array.isArray(v) ? v.length : 0);
+    return { lane, depth: n(body.queue_running) + n(body.queue_pending) };
+  } catch (e) {
+    return { lane, error: `${lane.url}/queue: ${(e as Error).message}${(e as any)?.cause?.code ? ` (${(e as any).cause.code})` : ""}` };
+  }
+}
+
 /** The recipe as a ComfyUI API graph; with `reference` (an uploaded image name) the model goes through IP-Adapter. */
-export function comfyGraph(o: { prompt: string; negative: string; seed: number; reference?: string; prefix: string }): Record<string, { class_type: string; inputs: Record<string, unknown> }> {
+/**
+ * Images per comfy call (T41): max_candidates becomes the latent batch, capped by the lane's max batch (COMFY_BASE_URLS
+ * `url|N`) or COMFY_MAX_BATCH (default 4, T41b). Operator benchmark, frozen recipe 768², 30 steps: :8190 RTX 4060 batch 1
+ * 43.4 s/img, batch 2 27 s/img, batch 4 19.2 s/img (~4 GB VRAM free); :8191 RTX 3080 5.9 / 5.5 / 5.0 s/img (~5 GB free).
+ * Both measured OK at batch 4, hence the default. Concurrent prompts on one lane serialize.
+ */
+export const COMFY_DEFAULT_MAX_BATCH = 4;
+export function comfyMaxBatch(env: Record<string, string | undefined> = process.env): number {
+  const raw = env.COMFY_MAX_BATCH?.trim();
+  if (!raw) return COMFY_DEFAULT_MAX_BATCH;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > MAX_CANDIDATES) throw new Error(`COMFY_MAX_BATCH must be an integer from 1 to ${MAX_CANDIDATES}, got "${raw}"`);
+  return n;
+}
+/** The batch for one call: max_candidates (default DEFAULT_CANDIDATES), at most the cap. */
+export const comfyBatch = (maxCandidates: number | undefined, cap: number) => Math.max(1, Math.min(cap, Math.floor(maxCandidates ?? DEFAULT_CANDIDATES)));
+
+export function comfyGraph(o: { prompt: string; negative: string; seed: number; reference?: string; prefix: string; batch?: number }): Record<string, { class_type: string; inputs: Record<string, unknown> }> {
   const r = COMFY_RECIPE;
   const graph: Record<string, { class_type: string; inputs: Record<string, unknown> }> = {
     "1": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: r.checkpoint } },
     "2": { class_type: "CLIPTextEncode", inputs: { clip: ["1", 1], text: o.prompt } },
     "3": { class_type: "CLIPTextEncode", inputs: { clip: ["1", 1], text: o.negative } },
-    "4": { class_type: "EmptyLatentImage", inputs: { width: r.size, height: r.size, batch_size: 1 } },
+    // batch: one seed, N latents. The sampler's noise differs per batch index, so the N candidates vary while the
+    // seed still pins identity across calls (the same seed + batch reproduces the same N images).
+    "4": { class_type: "EmptyLatentImage", inputs: { width: r.size, height: r.size, batch_size: o.batch ?? 1 } },
     "5": {
       class_type: "KSampler",
       inputs: { model: ["1", 0], positive: ["2", 0], negative: ["3", 0], latent_image: ["4", 0], seed: o.seed, steps: r.steps, cfg: r.cfg, sampler_name: r.sampler, scheduler: r.scheduler, denoise: 1 },
@@ -748,10 +810,11 @@ async function comfyCall(fetchImpl: typeof fetch, base: string, route: string, i
 }
 
 /**
- * Stills from the lab: health probe (GET /system_stats) → reference upload (POST /upload/image) →
- * POST /prompt with the frozen graph → poll GET /history/<id> → GET /view per output image. The
- * provider never starts or stops servers. Always 768x768 and opaque: postprocess snap/lock/outline
- * brings it to the manifest grid and palette.
+ * Stills from the lab lanes (T41b): every lane's GET /queue is probed at once; the call goes to the shortest queue
+ * (running + pending; ties → the lane listed first) and, if that lane fails, to the next. Per lane: reference upload
+ * (POST /upload/image) → POST /prompt with the frozen graph → poll GET /history/<id> → GET /view per output image. Only
+ * when every lane is down is the call ProviderUnavailable (the caller's stop/fallback rules apply). The provider never
+ * starts or stops servers. Always 768x768 and opaque: postprocess snap/lock/outline brings it to the manifest grid and palette.
  */
 async function comfy(
   input: GenerateInput,
@@ -762,19 +825,47 @@ async function comfy(
   sleep: (ms: number) => Promise<void>,
 ): Promise<GenerateResult> {
   if (input.frames !== undefined) throw new Error("comfy makes stills only (frozen recipe); animate the still with pixellab (frames + reference)");
-  const base = comfyBaseUrl(opts, env);
+  const lanes = comfyLanes(opts, env); // URL and batch rules fail before any request
   const ref = input.reference ? await readReference(opts.workspace, input.reference) : null; // path safety before any request
 
-  // Health probe, short: an unreachable or unready lab moves the call elsewhere instead of hanging.
-  try {
-    const probe = await fetchImpl(`${base}/system_stats`, { signal: AbortSignal.timeout(Math.max(1, Math.min(COMFY_PROBE_MS, deadline - Date.now()))) });
-    await probe.arrayBuffer().catch(() => undefined);
-    if (!probe.ok) throw new ProviderUnavailable("comfy", `${base}/system_stats answered ${probe.status}`);
-  } catch (e) {
-    if (e instanceof ProviderUnavailable) throw e;
-    throw new ProviderUnavailable("comfy", `${base}/system_stats: ${(e as Error).message}${(e as any)?.cause?.code ? ` (${(e as any).cause.code})` : ""}`);
+  const probes = await Promise.all(lanes.map((l) => probeLane(fetchImpl, l, deadline)));
+  const order = probes
+    .map((p, i) => ({ p, i }))
+    .filter((x): x is { p: { lane: ComfyLane; depth: number }; i: number } => "depth" in x.p)
+    .sort((a, b) => a.p.depth - b.p.depth || a.i - b.i);
+  const tried: Array<{ url: string; queue?: number; error?: string }> = probes.filter((p) => "error" in p).map((p) => ({ url: p.lane.url, error: (p as { error: string }).error }));
+  let lastError: Error | null = null;
+  let allDown = true;
+  for (const { p } of order) {
+    try {
+      const r = await comfyOnLane(p.lane, input, opts, fetchImpl, deadline, sleep, ref);
+      r.metadata.lane = p.lane.url;
+      r.metadata.lane_queue = p.depth;
+      r.metadata.lanes = [...probes.map((q) => ("depth" in q ? { url: q.lane.url, queue: q.depth } : { url: q.lane.url, error: q.error }))];
+      if (tried.some((t) => t.queue !== undefined)) r.metadata.lanes_failed = tried.filter((t) => t.queue !== undefined);
+      return r;
+    } catch (e) {
+      tried.push({ url: p.lane.url, queue: p.depth, error: (e as Error).message });
+      if (!(e instanceof ProviderUnavailable)) allDown = false;
+      lastError = e as Error;
+      if (Date.now() >= deadline) break; // no time left for another lane
+    }
   }
+  if (allDown || !lastError) throw new ProviderUnavailable("comfy", `every lane is down: ${tried.map((t) => `${t.url}: ${t.error}`).join("; ")}`);
+  throw new Error(`comfy failed on every lane (${tried.map((t) => `${t.url}: ${t.error}`).join("; ").slice(0, 600)})`);
+}
 
+/** One comfy call on one lane (upload, prompt, poll, view). A connection that never reached it is ProviderUnavailable. */
+async function comfyOnLane(
+  lane: ComfyLane,
+  input: GenerateInput,
+  opts: GenerateOptions,
+  fetchImpl: typeof fetch,
+  deadline: number,
+  sleep: (ms: number) => Promise<void>,
+  ref: { base64: string } | null,
+): Promise<GenerateResult> {
+  const base = lane.url;
   let uploaded: string | undefined;
   if (ref) {
     const bytes = Buffer.from(ref.base64, "base64");
@@ -789,7 +880,8 @@ async function comfy(
   }
 
   const seed = input.seed ?? COMFY_RECIPE.seed;
-  const graph = comfyGraph({ prompt: input.prompt, negative: input.negative ?? "", seed, reference: uploaded, prefix: `anyco/${randomUUID()}` });
+  const batch = comfyBatch(input.maxCandidates, lane.maxBatch);
+  const graph = comfyGraph({ prompt: input.prompt, negative: input.negative ?? "", seed, reference: uploaded, prefix: `anyco/${randomUUID()}`, batch });
   const sub = await comfyCall(fetchImpl, base, "/prompt", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: graph, client_id: "anyco-art" }) }, deadline);
   const nodeErrors = sub.body?.node_errors && Object.keys(sub.body.node_errors).length > 0 ? sub.body.node_errors : null;
   if (sub.status >= 400 || nodeErrors || sub.body?.error)
@@ -843,7 +935,7 @@ async function comfy(
     cost_source: "local",
     metadata: {
       prompt_id: promptId, base_url: base, method: uploaded ? "ipa" : "text", seed, reference_uploaded: uploaded ?? null,
-      recipe: COMFY_RECIPE, size: { w: first.width, h: first.height }, requested_size: { w: input.width, h: input.height },
+      recipe: COMFY_RECIPE, batch, max_batch: lane.maxBatch, size: { w: first.width, h: first.height }, requested_size: { w: input.width, h: input.height },
       candidates_discarded: cap.discarded,
       notes: ["comfy renders an opaque 768x768 image (the recipe has no background removal); use postprocess snap/lock/outline to reach the manifest size and palette"],
     },
