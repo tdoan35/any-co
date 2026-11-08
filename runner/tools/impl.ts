@@ -530,18 +530,41 @@ export function resolveGameRepo(root: string, repo?: string): { name: string; di
 }
 
 
-async function gameCloneDir(ctx: ToolContext, repo?: string): Promise<{ clone: string; branch: string; src: { name: string; dir: string } }> {
+/**
+ * The run's clone on `agent/<name>`. The branch continues from origin's `agent/<name>` when one exists
+ * (earlier runs pushed there), so the agent's own pushes and the end-of-run checkpoint fast-forward;
+ * origin/main is then merged in (no-ff) so it starts current. A conflicting merge is aborted and the
+ * branch stays at origin's tip, with a note. `base` says which start was used (T28).
+ */
+async function gameCloneDir(ctx: ToolContext, repo?: string): Promise<{ clone: string; branch: string; src: { name: string; dir: string }; base: string }> {
   const src = resolveGameRepo(ctx.gameRepoRoot ?? path.join(ROOT, "games"), repo);
   const clone = path.join(ctx.workspace, "game");
   const branch = `agent/${ctx.agent ?? "unknown"}`;
+  let base = "existing clone (unchanged)";
   if (!existsSync(clone)) {
     const { code, err } = await execText("git", ["clone", "--quiet", src.dir, clone], 60_000);
     if (code !== 0) throw new Error(`git clone failed: ${err}`);
-    const b = await execText("git", ["-C", clone, "checkout", "--quiet", "-b", branch], 30_000);
+    const remote = `origin/${branch}`;
+    const reused = (await execText("git", ["-C", clone, "rev-parse", "--verify", "--quiet", `refs/remotes/${remote}`], 15_000)).code === 0;
+    const b = await execText("git", ["-C", clone, "checkout", "--quiet", "-b", branch, ...(reused ? [remote] : [])], 30_000);
     if (b.code !== 0) throw new Error(`git checkout -b failed: ${b.err}`);
+    base = "main (no earlier agent branch on origin)";
+    if (reused) {
+      const hasMain = (await execText("git", ["-C", clone, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/main"], 15_000)).code === 0;
+      if (!hasMain) base = `${remote} (no origin/main to merge)`;
+      else {
+        const id = ["-c", "user.name=any-co harness (game_clone)", "-c", "user.email=harness@any-co.invalid"];
+        const m = await execText("git", ["-C", clone, ...id, "merge", "--no-ff", "--no-edit", "-q", "-m", `Merge origin/main into ${branch} (game_clone: start current)`, "origin/main"], 60_000);
+        if (m.code === 0) base = `${remote} + origin/main merged in (your pushes fast-forward)`;
+        else {
+          await execText("git", ["-C", clone, "merge", "--abort"], 30_000);
+          base = `${remote} only: merging origin/main conflicted and was aborted, so this branch is behind main. Resolve it yourself (git merge origin/main) before relying on main's latest`;
+        }
+      }
+    }
   }
   await copyContracts(ctx.workspace);
-  return { clone, branch, src };
+  return { clone, branch, src, base };
 }
 
 /** The harness contracts (docs/contracts/) the game must implement, copied read-only into the run's workspace at
@@ -559,15 +582,16 @@ async function copyContracts(workspace: string) {
 const gameClone: ToolImpl = {
   description:
     "Clone the studio's game repo into this run (idempotent) on your own agent branch, and return the clone's path and branch. " +
+    "Your branch continues from origin's agent/<you> when earlier runs pushed it (with origin/main merged in), so `git push origin HEAD` fast-forwards; `base` says which start was used. " +
     "Read/write/run there with game_read, game_write, game_exec. You never touch the main repo directly; the Tech Lead merges branches.",
   input: z.object({ repo: z.string().min(1).max(80).optional().describe("Repo name under games/; omit when the studio has exactly one") }).strict(),
   async run({ repo }, ctx) {
     try {
-      const { clone, branch, src } = await gameCloneDir(ctx, repo);
+      const { clone, branch, src, base } = await gameCloneDir(ctx, repo);
       const head = await execText("git", ["-C", clone, "rev-parse", "--short", "HEAD"], 15_000);
       return {
         content: JSON.stringify({
-          game: src.name, clone: path.relative(ctx.workspace, clone), branch, head: head.out.trim(), main: "main",
+          game: src.name, clone: path.relative(ctx.workspace, clone), branch, base, head: head.out.trim(), main: "main",
           contracts: "contracts/ in your workspace (read with workspace_read): the harness contracts the game must implement, start at contracts/README.md. Read-only copies: implement them, never rewrite them in the game repo.",
         }),
       };
