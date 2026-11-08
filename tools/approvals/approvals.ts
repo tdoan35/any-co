@@ -7,6 +7,7 @@ import { randomBytes } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import os from "node:os";
 import { parseArgs } from "node:util";
 import { append as ledgerAppend, LEDGER_FILE, refuseAgentCli } from "../ledger/ledger.ts";
 import type { Approver } from "../../runner/run.ts";
@@ -200,8 +201,20 @@ export function expireDeadRuns(file = APPROVALS_FILE, runsDir = RUNS_DIR, ledger
 
 /** A human decision from the CLI: refuses (and expires) a request whose run has ended, so no
  *  intervention is ledgered for a call that can never run. */
+/**
+ * Who a CLI decision is recorded as: --who if given, else "operator" plus the OS user@host and whether a real terminal is
+ * attached. On a shared Mac every session is the same OS user, so "tty" (a person's terminal) vs "no-tty" (an agent's
+ * shell) is the part that tells them apart (Nov 8: a human approval was recorded only as "operator").
+ */
+export function cliApprover(explicit?: string, isTTY = Boolean(process.stdin.isTTY && process.stdout.isTTY)): string {
+  if (explicit && explicit.trim()) return explicit.trim().slice(0, 80);
+  let user = "unknown";
+  try { user = os.userInfo().username; } catch { /* keep unknown */ }
+  return `operator (${user}@${os.hostname()}, ${isTTY ? "tty" : "no-tty"})`;
+}
+
 export function decideHuman(
-  id: string, approve: boolean, note?: string, file = APPROVALS_FILE, runsDir = RUNS_DIR, ledgerFile = LEDGER_FILE,
+  id: string, approve: boolean, note?: string, file = APPROVALS_FILE, runsDir = RUNS_DIR, ledgerFile = LEDGER_FILE, who = "operator",
 ): { rec: ApprovalRecord } | { error: string } {
   const cur = get(id, file);
   if (!cur) return { error: `no approval ${id}` };
@@ -211,7 +224,7 @@ export function decideHuman(
     expireWith(id, "run ended", file, ledgerFile);
     return { error: `refused: ${dead}, so this call can never run; request ${id} expired (who "run ended")` };
   }
-  const rec = decide(id, approve, "operator", note, file, ledgerFile);
+  const rec = decide(id, approve, who, note, file, ledgerFile);
   return rec ? { rec } : { error: `approval ${id} was decided by another process first` };
 }
 
@@ -241,7 +254,7 @@ const age = (ts: string, now = Date.now()) => {
 
 /** CLI for the human side: npm run approvals -- list | show <id> | approve <id> [--note "..."] | deny <id> --note "..." */
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const { positionals, values } = parseArgs({ allowPositionals: true, options: { note: { type: "string" } } });
+  const { positionals, values } = parseArgs({ allowPositionals: true, options: { note: { type: "string" }, who: { type: "string" } } });
   const [cmd, id] = positionals;
   if (cmd === "list") {
     for (const r of expireDeadRuns()) console.log(`expired ${r.id} (${r.tool}, ${r.agent}): run ${r.run_id} ended`);
@@ -263,11 +276,11 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     if (refused) { console.error(refused); process.exit(2); }
     const note = values.note;
     if (cmd === "deny" && !note) { console.error('deny needs a note: --note "why"'); process.exit(2); }
-    const res = decideHuman(id, cmd === "approve", note);
+    const res = decideHuman(id, cmd === "approve", note, APPROVALS_FILE, RUNS_DIR, LEDGER_FILE, cliApprover(values.who));
     if ("error" in res) { console.error(res.error); process.exit(1); }
-    console.log(`${res.rec.state} ${res.rec.id}${note ? ` — ${note}` : ""}`);
+    console.log(`${res.rec.state} ${res.rec.id} by ${res.rec.who}${note ? ` — ${note}` : ""}`);
   } else {
-    console.error('usage: approvals list | show <id> | approve <id> [--note "..."] | deny <id> --note "..."');
+    console.error('usage: approvals list | show <id> | approve <id> [--note "..."] [--who name] | deny <id> --note "..." [--who name]');
     process.exit(2);
   }
 }

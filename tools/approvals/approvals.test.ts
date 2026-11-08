@@ -266,3 +266,11 @@ test("STUDIO_RUNS_DIR moves where the sweep reads run.json from (B2)", async () 
   assert.deepEqual(parsed.expired, parsed.expired); // shape only; assertions on ids below via file
   void parsed;
 });
+
+test("CLI approver: --who wins; else operator with user@host and tty/no-tty", async () => {
+  const { cliApprover } = await import("./approvals.ts");
+  assert.equal(cliApprover("Ty"), "Ty");
+  assert.match(cliApprover(undefined, true), /^operator \(.+@.+, tty\)$/);
+  assert.match(cliApprover(undefined, false), /^operator \(.+@.+, no-tty\)$/);
+  assert.match(cliApprover("  ", false), /no-tty/);
+});
