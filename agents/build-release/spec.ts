@@ -12,7 +12,7 @@ export default defineAgent({
   runner: "local",
   model: "z-ai/glm-5.3",
   budget: { cap_usd: 4, max_task_usd: 1, period: "day" },
-  tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow", web_fetch: "allow", itch_push: "ask", itch_status: "allow", site_deploy: "ask", site_status: "allow" },
+  tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow", web_fetch: "allow", itch_push: "ask", itch_status: "allow", site_deploy: "ask", site_status: "allow", vercel_deploy: "ask", vercel_status: "allow" },
   output_schema: z
     .object({
       complete: COMPLETE,

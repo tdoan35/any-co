@@ -13,6 +13,7 @@ import { mergeImpls } from "./lanes/merge.ts";
 import { MAX_RESULT_CHARS, clip, errText, lstatOk, realOrNull, resolveInWorkspace, type ToolContext, type ToolImpl, type ToolOutput } from "./kit.ts";
 import type { NaiveClient } from "../providers.ts";
 import { studioStatusTools } from "./studio-status.ts";
+import { vercelDeployTools, vercelStatusTools } from "./vercel.ts";
 import { decodePng, encodePng, type RgbaImage } from "../../tools/art/png.ts";
 import { addOutline, contactSheet, downscaleNearest, lockPalette, scaleToFit, snapToGrid, splitStrip, upscaleNearest } from "../../tools/art/ops.ts";
 import { runGate } from "../../tools/art/gate.ts";
@@ -2276,6 +2277,8 @@ const CORE_IMPLS: Record<keyof typeof CORE_CAPABILITIES, Record<string, ToolImpl
   email_send: { email_send: emailSend },
   site_deploy: { site_deploy: siteDeploy },
   site_status: { site_status: siteStatus },
+  vercel_deploy: vercelDeployTools,
+  vercel_status: vercelStatusTools,
   art_signoff: { art_signoff: artSignoff, art_redo: artRedo },
   board: boardTools,
   media_capture: mediaTools,
