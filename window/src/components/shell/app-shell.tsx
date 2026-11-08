@@ -24,6 +24,7 @@ import type { ChatAgent } from "@/lib/mock/assistant";
 import { SESSION_PARAM, sessionHref } from "@/lib/chat/session";
 import { httpMode } from "@/lib/api";
 import { TabsProvider } from "./tabs";
+import { StudioSwitcher } from "./studio-switcher";
 import { TitleBar } from "./title-bar";
 
 const nav = [
@@ -345,7 +346,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     >
       <TitleBar onOpenSettings={() => setSettingsOpen(true)} />
       <Sidebar collapsible="icon" className="top-(--titlebar-height) h-auto border-r border-white/40 dark:border-white/10 [&_[data-sidebar=sidebar]]:bg-sidebar/25 [&_[data-sidebar=sidebar]]:backdrop-blur-xl">
-        <SidebarHeader className="px-2 pt-3 pb-1"><SidebarTop /></SidebarHeader>
+        <SidebarHeader className="px-2 pt-3 pb-1"><SidebarTop /><StudioSwitcher /></SidebarHeader>
         <SidebarContent className="overflow-hidden">
           <SidebarGroup>
             <SidebarMenu>
