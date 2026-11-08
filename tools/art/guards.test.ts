@@ -348,3 +348,35 @@ test("T39b/R45: the operator-only CLI commands refuse a process an agent started
     }
   }
 });
+
+test("T39b-fix (R46): with the studio default comfy, an EXPLICIT comfy (lab down) or RD (exhausted) never falls into pixellab", async () => {
+  const closed = await fakes();
+  const dead = closed.base;
+  await closed.close();
+  await withLab(async (f) => {
+    const ctx = ctxFor();
+    const r = await genNoProvider(ctx, { provider: "comfy" });
+    const out = JSON.parse(r.content);
+    assert.equal(out.fallback, "procedural", r.content);
+    assert.match(out.next, /^comfy default: lab unreachable; pass provider pixellab explicitly/);
+    assert.match(out.notes.join(" "), /no fallback into a paid provider this call did not name \(asked for comfy\)/);
+    assert.equal(f.requests(), 0, "explicit comfy + lab down: zero PixelLab requests");
+  }, { env: { ART_DEFAULT_PROVIDER: "comfy", COMFY_BASE_URL: dead } });
+  await withLab(async (f) => {
+    const ctx = ctxFor();
+    markExhausted(statePaths(ctx.runsDir).providers, "retrodiffusion", { reason: "test" });
+    const out = JSON.parse((await genNoProvider(ctx, { provider: "retrodiffusion" })).content);
+    assert.equal(out.fallback, "procedural");
+    assert.match(out.notes.join(" "), /asked for retrodiffusion/);
+    assert.equal(f.requests(), 0, "explicit RD exhausted: zero PixelLab requests");
+  }, { env: { ART_DEFAULT_PROVIDER: "comfy" } });
+  // unset (studio 1): unchanged, RD exhausted still falls back to pixellab once
+  await withLab(async (f) => {
+    const ctx = ctxFor();
+    markExhausted(statePaths(ctx.runsDir).providers, "retrodiffusion", { reason: "test" });
+    const out = JSON.parse((await genNoProvider(ctx, { provider: "retrodiffusion" })).content);
+    assert.equal(out.provider, "pixellab");
+    assert.equal(out.fallback_from, "retrodiffusion");
+    assert.equal(f.plPosts(), 1);
+  });
+});

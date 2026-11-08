@@ -1173,12 +1173,10 @@ const artGenerate: ToolImpl = {
     } catch (e) {
       return { content: errText(e), is_error: true };
     }
-    let comfyDefault = false; // comfy chosen by ART_DEFAULT_PROVIDER: no paid fallback, ever
     if (!requested && defaultProvider === "comfy") {
       if (!i.reference)
         return { content: "refused: ART_DEFAULT_PROVIDER=comfy generates from a reference image (IP-Adapter): pass reference (the anchor PNG), or name a provider explicitly", is_error: true };
       requested = "comfy";
-      comfyDefault = true;
     }
     if (!requested) {
       const fallback = winner ?? defaultProvider ?? undefined; // a paid default never overrides an anchor's bake-off winner
@@ -1207,7 +1205,11 @@ const artGenerate: ToolImpl = {
     } catch (e) {
       return { content: errText(e), is_error: true };
     }
-    const chain: ProviderName[] = comfyDefault ? ["comfy"] : [requested, other(requested)];
+    // With the studio default comfy, the chain never falls INTO a paid provider the call did not name (R46): explicit comfy
+    // with the lab down, or explicit RD exhausted, stops instead of spending shared PixelLab generations. Free comfy may still
+    // be spliced in after a floored pixellab (T35). Unset default: unchanged.
+    const comfyStudio = defaultProvider === "comfy";
+    const chain: ProviderName[] = comfyStudio ? [requested] : [requested, other(requested)];
     for (let k = 0; k < chain.length; k++) {
       const p = chain[k];
       if (isExhausted(paths.providers, p)) {
@@ -1263,12 +1265,13 @@ const artGenerate: ToolImpl = {
       }
     }
     if (!result) {
+      if (comfyStudio) notes.push(`ART_DEFAULT_PROVIDER=comfy: no fallback into a paid provider this call did not name (asked for ${requested})`);
       const all = PROVIDERS.every((p) => exhausted.includes(p) || (p === "pixellab" && floored !== null));
       return {
         content: JSON.stringify({
           exhausted: all ? "all" : exhausted, ...(unavailable.length ? { unavailable } : {}), ...(floored ? { pixellab_floor: floored } : {}), fallback: "procedural", cost_micro_usd: 0, notes,
-          ...(comfyDefault ? { default_provider: "comfy" } : {}),
-          next: comfyDefault && unavailable.includes("comfy")
+          ...(comfyStudio ? { default_provider: "comfy" } : {}),
+          next: comfyStudio && unavailable.includes("comfy")
             ? "comfy default: lab unreachable; pass provider pixellab explicitly if a human approved paid generation. Otherwise stop and report, or take the fallback ladder's floor (simple shapes animated in engine) and log it with log_decision (topic art.provider_fallback)."
             : floored
             ? `${floored.message}. Otherwise take the fallback ladder's floor: simple shapes animated in engine (bob, flash, squash-and-stretch, particles); log it with log_decision (topic art.provider_fallback).`

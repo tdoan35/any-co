@@ -181,7 +181,9 @@ called. The `art_generate` capability (runner/tools/impl.ts over tools/art/credi
   `comfy`: a call with NO provider uses comfy only. It needs a `reference` (refused without one) and never falls back to a
   paid provider: with the lab down the result is the procedural/stop result saying "comfy default: lab unreachable; pass
   provider pixellab explicitly if a human approved paid generation". So PixelLab is used only when named, and then the
-  floor applies. `pixellab` / `retrodiffusion`: used when the call names none and no anchor winner is recorded (a winner
+  floor applies. With the comfy default set, NO call falls back into a paid provider it did not name (R46): an explicit
+  `provider: "comfy"` with the lab down, or an explicit retrodiffusion that is exhausted, stops with the same result instead
+  of reaching PixelLab (free comfy can still follow a floored pixellab). `pixellab` / `retrodiffusion`: used when the call names none and no anchor winner is recorded (a winner
   still wins). Unset: unchanged (the anchor's bake-off winner, else provider is required). An explicit `provider` always
   wins. Studio 1 leaves it unset (PixelLab-locked style); studio 2 sets `comfy`. A typo is an error on every call.
 - **PixelLab floor (T35, `PIXELLAB_MIN_REMAINING`)**: PixelLab is ONE generations balance shared by every
