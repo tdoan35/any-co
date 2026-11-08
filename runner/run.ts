@@ -90,6 +90,8 @@ export interface RunOptions {
   heartbeatMs?: number;
   /** Studio board for board_* tools, when this run should reach it (the dispatcher passes one). */
   board?: Board;
+  /** T51: the run's card title + body, threaded into ToolContext.cardText for game_repo inference. */
+  cardText?: string;
 }
 
 /** State carried over from a crashed run; only runner/resume.ts builds one. */
@@ -141,7 +143,7 @@ export async function runAgent(spec: AgentSpec, opts: RunOptions): Promise<RunRe
   // The decision ledger lives with the runs it describes (STUDIO_LEDGER_FILE still wins), so a run in a
   // temp/other runs dir never writes the repo's ledger.
   const ledgerFile = process.env.STUDIO_LEDGER_FILE ?? path.join(runsDir, "ledger.jsonl");
-  const ctx: ToolContext = { workspace, naive: opts.naive, agent: spec.name, run_id: runId, runsDir, ledgerFile, board: opts.board };
+  const ctx: ToolContext = { workspace, naive: opts.naive, agent: spec.name, run_id: runId, runsDir, ledgerFile, board: opts.board, cardText: opts.cardText };
 
   const transcript = path.join(dir, "transcript.jsonl");
   const event = (type: string, data: Record<string, unknown>) => {
