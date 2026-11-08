@@ -43,6 +43,9 @@ const SCRUB: [RegExp, string][] = [
   [/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]"],
   [/Ty Thanh Doan/gi, "the owner"],
 ];
+// The OS account name (e.g. in `ls -l` lines agents printed): replaced with "user", and a hard failure if any survives.
+const USERNAMES = [...new Set([os.userInfo().username, path.basename(os.homedir())])].filter((u) => u.length >= 3);
+for (const u of USERNAMES) SCRUB.push([new RegExp(`\\b${esc(u)}\\b`, "gi"), "user"]);
 const scrub = (s: string) => SCRUB.reduce((a, [re, to]) => a.replace(re, to), s);
 const scrubDeep = (v: unknown): unknown =>
   typeof v === "string" ? scrub(v) : Array.isArray(v) ? v.map(scrubDeep)
@@ -55,7 +58,8 @@ const envSecrets = existsSync(path.join(ROOT, ".env"))
 const TOKEN_RE = /\b(sk-[A-Za-z0-9_-]{20,}|sk-ant-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|xox[abp]-[A-Za-z0-9-]{20,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.)/;
 const leaks: string[] = [];
 const check = (file: string, text: string) => {
-  if (envSecrets.some((s) => text.includes(s)) || TOKEN_RE.test(text)) leaks.push(path.relative(OUT, file));
+  const lower = text.toLowerCase();
+  if (envSecrets.some((s) => text.includes(s)) || TOKEN_RE.test(text) || USERNAMES.some((u) => lower.includes(u.toLowerCase()))) leaks.push(path.relative(OUT, file));
 };
 
 // ---- export ---------------------------------------------------------------------------------------------------
