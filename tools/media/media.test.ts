@@ -282,3 +282,11 @@ test("T43: an engine launch may name one res:// scene that exists in the clone (
   assert.throws(() => mediaLaunch(clone, ["godot", "res://qa/driver.gd"]), /not allowed/, "a script is not a scene");
   assert.throws(() => mediaLaunch(clone, ["godot", "qa/driver.tscn"]), /not allowed/, "only the res:// form");
 });
+
+test("T43: when the run ends before a requested tick, ticks mode keeps the stills already taken and says which ticks were missed", async () => {
+  const { game, out } = tempGame();
+  const r = await capture({ ...base(game, out), env: { FAKE_MODE: "quit-at-run-end" }, mode: { kind: "ticks", ticks: [120, 300, 600, 700] } });
+  assert.deepEqual(r.shots.map((s) => s.tick), [120, 300], "the run ended at tick 400; the earlier shots survive");
+  assert.match(r.notes.join(" "), /the game exited \(its run ended\) before tick 600; 2 requested tick\(s\) not captured: 600, 700/);
+  assert.equal(r.exit.code, 0);
+});

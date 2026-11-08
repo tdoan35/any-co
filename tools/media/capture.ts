@@ -129,7 +129,7 @@ export async function capture(o: CaptureOptions): Promise<CaptureResult> {
         notes.push(`${name} is ${img.width}x${img.height}, not the requested ${o.resolution.w}x${o.resolution.h} (screenshot.md)`);
       // T43: a placeholder or blank frame (same floor as the export check) is useless for a trailer; say so
       const blank = blankIssues(frameStats(img));
-      if (blank.length) notes.push(`${name} looks blank (${blank.join("; ")}): screenshot.md wants the frame a player sees; check the game's screenshot command`);
+      if (blank.length) notes.push(`${name} looks blank (${blank.join("; ")}): screenshot.md wants the frame a player sees. In a fresh clone run the engine import first (build.sh, or godot --headless --path . --import), then check the game's screenshot command`);
     } catch (e) {
       notes.push(`${name} is not a readable PNG: ${(e as Error).message}`);
     }
@@ -155,14 +155,24 @@ export async function capture(o: CaptureOptions): Promise<CaptureResult> {
     if (o.mode.kind === "ticks") {
       await qa.send({ cmd: "pause" }, deadline);
       let tick = await currentTick();
-      for (const t of [...new Set(o.mode.ticks)].sort((a, b) => a - b)) {
+      const wanted = [...new Set(o.mode.ticks)].sort((a, b) => a - b);
+      for (const [idx, t] of wanted.entries()) {
         if (t < tick) {
           notes.push(`tick ${t} had already passed when capture paused (at ${tick}); skipped`);
           continue;
         }
-        if (t > tick) await qa.send({ cmd: "step", frames: t - tick }, deadline);
-        tick = t;
-        await shoot(t, `tick ${t}`);
+        try {
+          if (t > tick) await qa.send({ cmd: "step", frames: t - tick }, deadline);
+          tick = t;
+          await shoot(t, `tick ${t}`);
+        } catch (e) {
+          // T43: a run can end (win/loss → the game quits) before a requested tick. Keep the stills already taken.
+          for (const t0 = Date.now(); !exited() && Date.now() - t0 < 500; ) await sleep(10);
+          if (!exited()) throw e;
+          const left = wanted.slice(idx);
+          notes.push(`the game exited (its run ended) before tick ${t}; ${left.length} requested tick(s) not captured: ${left.join(", ")}. Pick earlier ticks, or another seed/policy for a longer run`);
+          break;
+        }
       }
     } else {
       const counts = new Map<number, number>();
