@@ -9,7 +9,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Balance, ProviderName } from "./generate.ts";
+import { OPENAI_IMAGE_ESTIMATE_USD, type Balance, type ProviderName } from "./generate.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 /** The paid (credit-tracked) providers; comfy is local and never exhausted. */
@@ -112,12 +112,51 @@ export function comfyLaneStats(file: string): Record<string, { calls: number; im
   return out;
 }
 
+/** One paid OpenAI image call (T44): its USD cost, so the studio's spend cap is mechanical. Never read as a balance. */
+export interface SpendLine { ts: string; provider: "openai"; unit: "usd"; kind: "spend"; cost_usd: number; images: number; model: string; run_id: string; source: "generation" }
+
+export function recordSpend(file: string, line: SpendLine): void {
+  mkdirSync(path.dirname(file), { recursive: true });
+  appendFileSync(file, JSON.stringify(line) + "\n");
+}
+
+function spendLines(file: string): SpendLine[] {
+  if (!existsSync(file)) return [];
+  return readFileSync(file, "utf8").split("\n").flatMap((l) => {
+    try {
+      const x = JSON.parse(l) as Partial<SpendLine>;
+      return x.kind === "spend" && x.provider === "openai" && typeof x.cost_usd === "number" ? [x as SpendLine] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
+/** Total USD this studio has spent on OpenAI images (all time, from the credits log). */
+export const openaiSpend = (file: string): number => spendLines(file).reduce((s, l) => s + l.cost_usd, 0);
+
+/** The most one OpenAI image has cost here (per image), else the conservative default estimate. */
+export function openaiPerImageEstimate(file: string): number {
+  const per = spendLines(file).filter((l) => l.images > 0).map((l) => l.cost_usd / l.images);
+  return per.length ? Math.max(...per) : OPENAI_IMAGE_ESTIMATE_USD;
+}
+
+/** OPENAI_IMAGE_CAP_USD (per studio, total), default 25 (Ty, 2026-11-08); a malformed value is an error. */
+export const OPENAI_IMAGE_CAP_DEFAULT_USD = 25;
+export function openaiImageCap(env: Record<string, string | undefined> = process.env): number {
+  const raw = env.OPENAI_IMAGE_CAP_USD?.trim();
+  if (!raw) return OPENAI_IMAGE_CAP_DEFAULT_USD;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) throw new Error(`OPENAI_IMAGE_CAP_USD must be a non-negative number of USD, got "${raw}"`);
+  return n;
+}
+
 export function readCredits(file: string): CreditLine[] {
   if (!existsSync(file)) return [];
   return readFileSync(file, "utf8").split("\n").filter(Boolean).flatMap((l) => {
     try {
       const line = JSON.parse(l) as CreditLine | LocalLine;
-      return line.unit === "local" ? [] : [line as CreditLine]; // balance readers never see comfy lines
+      return line.unit === "local" || (line as { kind?: string }).kind === "spend" ? [] : [line as CreditLine]; // balance readers never see comfy or spend lines
     } catch {
       return [];
     }
