@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { Worker } from "node:worker_threads";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -464,4 +465,80 @@ test("N4: two lock takers at once — exactly one wins, including over a stale l
     takeover.kill("SIGKILL");
     if (takeover.pid) rmSync(verdictFile(takeover.pid), { force: true });
   }
+});
+
+test("T20b: three-plus takers over a stale lock — exactly one winner, no lost locks", async () => {
+  // The R24 window: with the old rename/restore, B could move a LIVE lock aside while C wx-created
+  // in the gap and B's cleanup dropped it -> two winners. Barrier style as N4, stale lock preseeded,
+  // more contenders so the window is exercised, plus a final stale-takeover check.
+  for (const N of [3, 8]) {
+    const runsDir = tmpDir();
+    writeFileSync(path.join(runsDir, "studio.lock"), JSON.stringify({ pid: 99999999, host: hostname(), at: "2026-11-07T00:00:00Z" }));
+    const script = `import { writeFileSync } from "node:fs";
+      import { acquireStudioLock } from ${JSON.stringify(path.join(path.dirname(fileURLToPath(import.meta.url)), "dispatch.ts"))};
+      const runs = process.argv[1];
+      try {
+        acquireStudioLock(runs);
+        writeFileSync(runs + "/verdict-" + process.pid, "WON");
+        setInterval(() => {}, 1000);
+      } catch {
+        writeFileSync(runs + "/verdict-" + process.pid, "LOST");
+      }`;
+    const children = Array.from({ length: N }, () =>
+      spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, runsDir], { stdio: "ignore", timeout: 20_000 }),
+    );
+    const verdictFile = (pid: number) => path.join(runsDir, `verdict-${pid}`);
+    const deadline = Date.now() + 15_000;
+    let verdicts: string[] = [];
+    while (Date.now() < deadline) {
+      verdicts = children.filter((c) => c.pid && existsSync(verdictFile(c.pid))).map((c) => readFileSync(verdictFile(c.pid!), "utf8"));
+      if (verdicts.length === N) break;
+      await new Promise((r) => setImmediate(r));
+    }
+    assert.equal(verdicts.length, N, `N=${N}: every contender reported, got ${verdicts.length}: [${verdicts.join(",")}]`);
+    assert.equal(verdicts.filter((v) => v === "WON").length, 1, `N=${N}: exactly one winner, got [${verdicts.join(",")}]`);
+    for (const c of children) c.kill("SIGKILL");
+    await new Promise((r) => setImmediate(r));
+    for (const c of children) if (c.pid) rmSync(verdictFile(c.pid), { force: true });
+    // A live-holder lock must never have been lost: the winner's lock content is intact and
+    // a subsequent taker takes over the (now killed) winner's stale entry cleanly.
+    const after = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, runsDir], { stdio: "ignore", timeout: 10_000 });
+    let again = false;
+    const t0 = Date.now();
+    while (Date.now() - t0 < 8000) {
+      const pid = after.pid;
+      if (pid && existsSync(verdictFile(pid))) { again = readFileSync(verdictFile(pid), "utf8") === "WON"; break; }
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    assert.ok(again, `N=${N}: a fresh taker takes over after the killed winner`);
+    after.kill("SIGKILL");
+    if (after.pid) rmSync(verdictFile(after.pid), { force: true });
+  }
+});
+
+test("T20b: a stale takeover mutex is recovered, a live one makes takers retry", async () => {
+  const runsDir = tmpDir();
+  const mutex = path.join(runsDir, "studio.lock.takeover");
+  // stale mutex (dead pid): the next taker removes it and proceeds to win
+  writeFileSync(mutex, JSON.stringify({ pid: 99999999, host: hostname(), at: "2026-11-07T00:00:00Z" }));
+  writeFileSync(path.join(runsDir, "studio.lock"), JSON.stringify({ pid: 99999998, host: hostname(), at: "2026-11-07T00:00:00Z" }));
+  const lock = acquireStudioLock(runsDir);
+  assert.equal(existsSync(mutex), false, "stale mutex removed on the way to the lock");
+  lock.release();
+  // live mutex held by another thread, like a real takeover's critical section: a taker must wait
+  // it out — not delete it, not starve — and win once the holder clears it. The taker parks
+  // synchronously (Atomics.wait), so the holder lives on a worker thread.
+  writeFileSync(mutex, JSON.stringify({ pid: process.pid, host: hostname(), at: new Date().toISOString() }));
+  writeFileSync(path.join(runsDir, "studio.lock"), JSON.stringify({ pid: 99999997, host: hostname(), at: "2026-11-07T00:00:00Z" }));
+  const worker = new Worker(
+    `import { parentPort } from "node:worker_threads";
+     import { rmSync } from "node:fs";
+     setTimeout(() => rmSync(${JSON.stringify(mutex)}), 50); // holder clears it mid-takeover
+     parentPort.on("message", () => {});`,
+    { eval: true },
+  );
+  const second = acquireStudioLock(runsDir); // waits out the live mutex, then takes the stale lock
+  second.release();
+  await worker.terminate();
+  assert.equal(existsSync(mutex), false, "mutex cleared by its holder, not by the waiter");
 });

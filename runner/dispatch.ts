@@ -2,7 +2,7 @@
 // twin of Naïve's board clock. Same rules the hosted clock applies, so the board reads the same
 // on both backends: one doing card per assignee, blocked cards wait, done needs a note.
 // scripts/studio-loop.ts is the CLI (`npm run studio`); the logic lives here so tests drive it.
-import { linkSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import path from "node:path";
 import { RUNS_DIR, stamp, runAgent, denyAll, type Approver, type RunResult } from "./run.ts";
@@ -56,47 +56,90 @@ export interface StudioLock {
 /** Single-dispatcher lock (R2): runs/studio.lock records pid+host; a second loop refuses to
  *  start while the holder is alive, so two dispatchers can never run the same card. A lock
  *  whose holder is dead is taken over; an unreadable one is stale. */
+export const TAKEOVER_MUTEX = "studio.lock.takeover";
+
+/** A stale takeover mutex (dead holder) is removable; a live one makes us wait via retries. */
+function staleMutex(mutex: string): boolean {
+  try {
+    const held = JSON.parse(readFileSync(mutex, "utf8")) as { pid?: unknown; host?: unknown };
+    const pid = typeof held.pid === "number" ? held.pid : NaN;
+    const host = typeof held.host === "string" ? held.host : "";
+    if (host && host !== hostname()) return false;
+    return !(Number.isFinite(pid) && pidAlive(pid));
+  } catch {
+    return true; // unreadable/empty: stale
+  }
+}
+
+const MUTEX_WAIT_MS = 25;
+const MUTEX_PARK = new Int32Array(new SharedArrayBuffer(4));
+/** Sync park between attempts (Atomics.wait), so a live takeover mutex starves nobody and no
+ *  busy-spin burns CPU; works because the lock API is synchronous by contract. */
+function mutexWait(): void {
+  Atomics.wait(MUTEX_PARK, 0, 0, MUTEX_WAIT_MS);
+}
+
 export function acquireStudioLock(runsDir: string): StudioLock {
   mkdirSync(runsDir, { recursive: true });
   const file = path.join(runsDir, "studio.lock");
+  const mutex = path.join(runsDir, TAKEOVER_MUTEX);
   const mine = JSON.stringify({ pid: process.pid, host: hostname(), at: new Date().toISOString() });
   // create-exclusive (N4): two loops started at the same instant cannot both pass a check-then-write
-  for (let attempt = 0; attempt < 3; attempt++) {
+  const deadline = Date.now() + 10_000;
+  for (let attempt = 0; attempt < 100 && Date.now() < deadline; attempt++) {
     try {
       writeFileSync(file, mine, { flag: "wx" });
       return { file, release: () => { try { rmSync(file); } catch { /* already gone */ } } };
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
     }
-    let refusal: string | null = null;
+    mutexWait(); // bounded pause between attempts (sync park, no busy spin)
+
+    // Read the holder under no lock first: a live holder refuses us; unreadable/dead/pidless is stale.
     let staleText = "";
+    let stale = false;
     try {
       staleText = readFileSync(file, "utf8");
       const held = JSON.parse(staleText) as { pid?: unknown; host?: unknown };
       const pid = typeof held.pid === "number" ? held.pid : NaN;
       const host = typeof held.host === "string" ? held.host : "";
-      if (host && host !== hostname()) refusal = `pid ${pid} on ${host}`;
-      else if (Number.isFinite(pid) && pidAlive(pid)) refusal = `pid ${pid} on this host`;
+      const live = host && host !== hostname() ? true : Number.isFinite(pid) && pidAlive(pid);
+      stale = !live;
     } catch {
-      /* unreadable or vanished lock: stale */
+      stale = true; // vanished/unreadable between wx and read: treat as stale gap
     }
-    if (refusal) throw new Error(`another studio loop holds ${file} (${refusal}); refusing to start. If it is dead, remove the file.`);
-    // stale: move it aside (rename is atomic — of two takers only one moves the stale file), and
-    // check we moved the stale lock, not a fresh one another taker just wrote; then retry wx.
-    const grave = `${file}.stale-${process.pid}-${attempt}`;
-    try { renameSync(file, grave); } catch { continue; }
-    let moved = "";
-    try { moved = readFileSync(grave, "utf8"); } catch { /* gone */ }
-    if (moved !== staleText) {
-      // We moved a lock that wasn't the stale one we read (a live taker won in between):
-      // put it back where it was — create-exclusive link; if the path is taken, that lock
-      // is theirs and ours is redundant. Never drop a live holder's lock (two-winner bug).
-      try { linkSync(grave, file); } catch { /* path taken: the real holder's lock */ }
-      try { rmSync(grave); } catch { /* already gone */ }
+    if (!stale) throw new Error(`another studio loop holds ${file}; refusing to start. If it is dead, remove the file.`);
+    // Stale takeover under a mutex (R24): without it, B can rename A's just-written live lock
+    // aside while C wx-creates in the gap, and B's restore drops A's lock -> two winners.
+    let held_mutex = false;
+    try {
+      writeFileSync(mutex, mine, { flag: "wx" });
+      held_mutex = true;
+    } catch {
+      if (staleMutex(mutex)) {
+        rmSync(mutex); // dead mutex holder: recover it and retry the wx next round
+      } else {
+        mutexWait(); // live takeover in progress: park 25ms (sync), don't burn attempts
+      }
       continue;
     }
-    // The stale lock is now aside and the path is free: retry wx. If another taker wx-created a
-    // live lock meanwhile, our wx fails EEXIST and the next read sees a live pid -> refusal.
+    try {
+      // Under the mutex, re-read and re-verify; only then remove the stale lock. No rename: the
+      // unlink + wx pair is atomic wrt other takers because they hold the mutex to touch it —
+      // and takers that only wx (fast path) can't create in our gap: we wx immediately after
+      // the unlink inside the same critical section.
+      let current = "";
+      try { current = readFileSync(file, "utf8"); } catch { current = ""; }
+      if (current && current !== staleText) {
+        const held = JSON.parse(current) as { pid?: unknown };
+        const pid = typeof held.pid === "number" ? held.pid : NaN;
+        if (Number.isFinite(pid) && pidAlive(pid)) continue; // a live taker won: start over
+      }
+      try { rmSync(file); } catch { /* already gone */ }
+      try { writeFileSync(file, mine, { flag: "wx" }); return { file, release: () => { try { rmSync(file); } catch { /* already gone */ } } }; } catch { /* someone raced; retry */ }
+    } finally {
+      if (held_mutex) { try { rmSync(mutex); } catch { /* already gone */ } }
+    }
   }
   throw new Error(`could not take ${file}: another studio loop is starting at the same time`);
 }
