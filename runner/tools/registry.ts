@@ -80,7 +80,7 @@ export const CORE_CAPABILITIES = {
     summary: "Work on the studio's game repo (games/<name>): clone into your run on an agent branch, read/write files, run commands (git, build.sh, engine CLI)",
     naive: ["bash", "read", "write", "edit"],
     local: true,
-    note: "Local: per-run clone at runs/<id>/workspace/game, branch agent/<name>; only the Tech Lead merges. Hosted: the harness clones the repo into the agent's computer.",
+    note: "Local: per-run clone at runs/<id>/workspace/game, branch agent/<name>; only the Tech Lead merges. game_exec is scoped (T40, runner/tools/exec-scope.ts): allowlisted env, no harness files or harness npm scripts, sandbox-exec on macOS. Hosted: the harness clones the repo into the agent's computer.",
   },
   qa_harness: {
     summary: "Run the QA contract driver on your game clone: qa_smoke / qa_check / qa_determinism (contract flags, invariants, verdict JSON), and qa_export_check, the release gate on the exported pack (autoloads in the pack, native run, blank-frame floor)",

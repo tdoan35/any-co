@@ -7,6 +7,7 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { GAMES_DIR, execEnv, scopedArgv } from "./tools/exec-scope.ts";
 
 export interface CheckpointResult {
   checkpointed: boolean; // a commit was made
@@ -18,7 +19,9 @@ export interface CheckpointResult {
 
 function git(cwd: string, args: string[], env: NodeJS.ProcessEnv): Promise<{ code: number; out: string; err: string }> {
   return new Promise((resolve) => {
-    execFile("git", args, { cwd, env, timeout: 60_000 }, (error, stdout, stderr) => {
+    // the clone's .git/hooks are agent-written code: they run with the scrubbed env and, on macOS, in the sandbox (T40)
+    const [cmd, ...rest] = scopedArgv(["git", ...args], [cwd, GAMES_DIR]); // git may push to games/, write the clone
+    execFile(cmd, rest, { cwd, env, timeout: 60_000 }, (error, stdout, stderr) => {
       resolve({ code: error ? (typeof (error as any).code === "number" ? (error as any).code : 1) : 0, out: String(stdout).trim(), err: String(stderr).trim() });
     });
   });
@@ -28,7 +31,7 @@ function git(cwd: string, args: string[], env: NodeJS.ProcessEnv): Promise<{ cod
 export async function checkpointGameClone(workspace: string, agent: string, runId: string, status: string): Promise<CheckpointResult | null> {
   const clone = path.join(workspace, "game");
   if (!existsSync(path.join(clone, ".git"))) return null;
-  const env = { ...process.env, ANYCO_AGENT: agent };
+  const env = execEnv(agent, clone);
   const id = ["-c", "user.name=any-co harness (auto-checkpoint)", "-c", "user.email=harness@any-co.invalid"];
   try {
     let branch = (await git(clone, ["branch", "--show-current"], env)).out;

@@ -132,6 +132,16 @@ export function recategorize(opts: { file?: string; apply?: boolean; log?: (line
   return out;
 }
 
+/**
+ * Operator-only CLI commands refuse a process an agent started (T40): game_exec and the run checkpoint set ANYCO_AGENT,
+ * so an agent cannot write an "operator" intervention or decide an approval through the CLI. Agents log through
+ * log_decision, which records them as the agent.
+ */
+export function refuseAgentCli(command: string, env: NodeJS.ProcessEnv = process.env): string | null {
+  const agent = env.ANYCO_AGENT?.trim();
+  return agent ? `refused: "${command}" is an operator command and this process was started by agent "${agent}" (ANYCO_AGENT is set); agents record decisions with log_decision` : null;
+}
+
 /** CLI for the human side: node --import tsx tools/ledger/ledger.ts intervention "<action>" "<reason>" [--category ...] | recategorize [--apply] | list */
 if (import.meta.url === `file://${process.argv[1]}`) {
   const argv = process.argv.slice(2);
@@ -140,6 +150,11 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const i = argv.indexOf(name);
     return i === -1 ? undefined : argv[i + 1];
   };
+  const refused = cmd === "intervention" || (cmd === "recategorize" && argv.includes("--apply")) ? refuseAgentCli(`ledger ${cmd}`) : null;
+  if (refused) {
+    console.error(refused);
+    process.exit(2);
+  }
   if (cmd === "intervention" && a && b) {
     const raw = flag("--category") ?? "harness";
     if (!INTERVENTION_CATEGORIES.includes(raw as InterventionCategory)) {
