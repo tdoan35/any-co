@@ -1,3 +1,4 @@
+import { Gamepad2 } from "lucide-react";
 import { Face, agentOf } from "@/components/weave/parts";
 import { useRegistry } from "@/lib/registry";
 import { cn } from "@/lib/utils";
@@ -102,10 +103,16 @@ function Person({ id, onOpen }: { id: string; onOpen?: (id: string) => void }) {
   const you = id.startsWith("you");
   const name = labelOf(id);
   const job = JOB[id];
-  const tone = you ? "bg-amber-300/70" : "bg-white/70";
+  const tone = you ? "bg-[#b8e5cf]" : "bg-white/70";
   const body = (
     <>
-      <Face id={faceId(id)} size="size-10" live={!you} className="self-center" />
+      {you ? (
+        <span className="flex size-10 shrink-0 items-center justify-center self-center rounded-lg bg-foreground text-background" role="img" aria-label="any-co game studio">
+          <Gamepad2 className="size-5" />
+        </span>
+      ) : (
+        <Face id={faceId(id)} size="size-10" live className="self-center" />
+      )}
       <span className="min-w-0 flex-1">
         <span className="block truncate text-sm font-medium leading-tight">{name}</span>
         {job && <span className="mt-0.5 line-clamp-2 text-xs leading-snug text-zinc-600">{job}</span>}
@@ -125,51 +132,35 @@ function Person({ id, onOpen }: { id: string; onOpen?: (id: string) => void }) {
   );
 }
 
+const arrowStroke = { fill: "none" as const, stroke: "currentColor", strokeWidth: 1.5, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+
 function Handoff() {
   return (
-    <svg viewBox="0 0 24 36" className="my-1.5 h-9 w-6 shrink-0 text-foreground" aria-hidden fill="currentColor">
-      <path d="M9 0h6v18h7L12 36 2 18h7V0z" />
+    <svg viewBox="0 0 16 28" className="my-1 h-7 w-4 shrink-0 text-foreground/40" aria-hidden {...arrowStroke}>
+      <path d="M8 1.5V17" />
+      <path d="M4 13.5 8 21 12 13.5" />
     </svg>
   );
 }
 
-/** Filled arrow from (x1,y1) to (x2,y2). Head sits at the end so two arrows can meet without sharing a tip. */
-function arrowPath(x1: number, y1: number, x2: number, y2: number) {
-  const dx = x2 - x1;
-  const dy = y2 - y1;
-  const len = Math.hypot(dx, dy);
-  const ux = dx / len;
-  const uy = dy / len;
-  const px = -uy;
-  const py = ux;
-  const head = 14;
-  const shaft = 3.5;
-  const hx = x2 - ux * head;
-  const hy = y2 - uy * head;
-  const wing = 9;
-  const pts = [
-    [x1 + px * shaft, y1 + py * shaft],
-    [hx + px * shaft, hy + py * shaft],
-    [hx + px * wing, hy + py * wing],
-    [x2, y2],
-    [hx - px * wing, hy - py * wing],
-    [hx - px * shaft, hy - py * shaft],
-    [x1 - px * shaft, y1 - py * shaft],
-  ];
-  return `M ${pts.map(([x, y]) => `${x.toFixed(1)} ${y.toFixed(1)}`).join(" L ")} Z`;
-}
-
-/** Two w-72 chips plus the gap between them. Arrows leave each chip's center and point at the next one. */
+/** Two w-72 chips plus the gap between them. Each curve leaves a chip and arrives pointing down. */
 const PAIR = 18 * 16 * 2 + 8;
 
 function ForkArrows() {
   const mid = PAIR / 2;
-  const left = 18 * 16 / 2;
+  const left = (18 * 16) / 2;
   const right = PAIR - left;
+  const tipY = 46;
+  const lx = mid - 16;
+  const rx = mid + 16;
+  const curve = (from: number, to: number) => `M ${from} 1 Q ${to} 16 ${to} ${tipY - 8}`;
+  const head = (x: number) => `M ${x - 5} ${tipY - 9} L ${x} ${tipY} L ${x + 5} ${tipY - 9}`;
   return (
-    <svg viewBox={`0 0 ${PAIR} 56`} className="h-14 shrink-0 text-foreground" style={{ width: PAIR }} aria-hidden fill="currentColor">
-      <path d={arrowPath(left, 0, mid - 16, 54)} />
-      <path d={arrowPath(right, 0, mid + 16, 54)} />
+    <svg viewBox={`0 0 ${PAIR} 52`} className="mt-1 h-12 shrink-0 text-foreground/40" style={{ width: PAIR }} aria-hidden {...arrowStroke}>
+      <path d={curve(left, lx)} />
+      <path d={head(lx)} />
+      <path d={curve(right, rx)} />
+      <path d={head(rx)} />
     </svg>
   );
 }
