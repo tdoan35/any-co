@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { defineAgent } from "../../runner/spec.ts";
+import { COMPLETE, defineAgent } from "../../runner/spec.ts";
 
-// The content itself lives in workspace files (validated against the Game Director's schemas
+// The content itself lives in workspace files (validated against the Game Design Director's schemas
 // by QA); this output is only the manifest the studio routes and the balance rationale.
 export default defineAgent({
   name: "level-content-designer",
@@ -9,10 +9,11 @@ export default defineAgent({
   dept: "design",
   runner: "local",
   model: "z-ai/glm-5.3",
-  budget: { cap_usd: 4, max_task_usd: 0.75, period: "day" },
+  budget: { cap_usd: 10, max_task_usd: 2.5, period: "day" }, // Nov 7: $0.75 hit wrap-up (70%) before the content write landed, three rounds running
   tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow" },
   output_schema: z
     .object({
+      complete: COMPLETE,
       files: z
         .array(
           z
@@ -33,10 +34,10 @@ export default defineAgent({
         })
         .strict(),
       questions: z
-        .array(z.object({ for: z.string().max(40).describe("Agent that should answer, e.g. 'game-director'"), question: z.string().min(10).max(300) }).strict())
+        .array(z.object({ for: z.string().max(40).describe("Agent that should answer, e.g. 'game-design-director'"), question: z.string().min(10).max(300) }).strict())
         .max(5)
         .describe("Schema gaps or design-doc contradictions blocking better content; empty if none"),
     })
     .strict(),
-  limits: { max_turns: 40, max_output_tokens: 8192 },
+  limits: { max_turns: 60, max_output_tokens: 8192 },
 });

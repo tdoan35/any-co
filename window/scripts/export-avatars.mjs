@@ -23,6 +23,12 @@ const PIPELINE_STILLS = ["audio", "env-ui-artist", "gameplay-engineer", "level-c
 const STRIP = { w: 73 * 192, h: 192 }; // 73 frames of 192x192, one row
 
 /** [published path, expected size, how to make it] */
+// Hands-on staff stills arrive committed from the studio art pipeline: presence/size check only,
+// there is no local source to rebuild them from.
+const PIPELINE_STILLS = ["audio", "env-ui-artist", "gameplay-engineer", "level-content-designer", "playtester", "sprite-artist"];
+PUT 23.>23:
+  ...PERSONAS.map((p) => [`agents/${p}-happy.webp`, { w: 384, h: 384 }, { copy: `apps/web/public/agents/${p}-happy.webp` }]),
+  ...PIPELINE_STILLS.map((a) => [`agents/${a}-happy.webp`, { w: 384, h: 384 }, {}]),
 const ASSETS = [
   ...PERSONAS.map((p) => [`agents/${p}-happy.webp`, { w: 384, h: 384 }, { copy: `apps/web/public/agents/${p}-happy.webp` }]),
   ...PIPELINE_STILLS.map((a) => [`agents/${a}-happy.webp`, { w: 384, h: 384 }, {}]),

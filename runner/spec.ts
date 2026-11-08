@@ -28,6 +28,9 @@ export const Provider = z.discriminatedUnion("kind", [
       kind: z.literal("openai_compatible"),
       model: z.string().min(1), // provider's own model id
       base_url_env: z.string().regex(/^[A-Z][A-Z0-9_]*$/),
+      base_url_default: z.string().url().optional(), // used when base_url_env is unset or empty (e.g. https://api.openai.com/v1)
+      // Wire API: Chat Completions (default; every gateway) or OpenAI's Responses API (models whose tool calling requires it, e.g. gpt-6.1-*)
+      api: z.enum(["chat_completions", "responses"]).default("chat_completions"),
       api_key_env: z.string().regex(/^[A-Z][A-Z0-9_]*$/),
       usd_per_mtok: z.object({ input: z.number().nonnegative(), output: z.number().nonnegative() }).strict(),
     })
@@ -46,6 +49,8 @@ export function grantIssues(rec: Record<string, string>, caps: Record<string, Ca
     if (!(k in caps)) issues.push({ path: k, message: `unknown capability "${k}"; known: ${known.join(", ")}` });
     else if (caps[k].outward && perm === "allow")
       issues.push({ path: k, message: `capability "${k}" sends or spends outside the studio: grant it "ask" (approval gate + ledger), never "allow"` });
+    else if (caps[k].approval_only && perm === "allow")
+      issues.push({ path: k, message: `capability "${k}" is a human decision: grant it "ask" (it runs only after the operator approves), never "allow"` });
   }
   return issues;
 }
@@ -87,6 +92,15 @@ export const AgentSpecInput = z
 
 export type AgentSpecInput = z.input<typeof AgentSpecInput>;
 export type AgentSpec = z.output<typeof AgentSpecInput> & { system: string; dir: string };
+
+/**
+ * Required in the output of every agent that does ticket work (T29). The dispatcher closes the card as done
+ * only when this is true; false blocks the card with the agent's own summary, so "ran to the end" is never
+ * mistaken for "the work is done". One shared field, so the description is identical in every spec.
+ */
+export const COMPLETE_DESCRIPTION =
+  "true only if the ticket's done criteria are met and the work is committed and pushed; false if anything is left (out of budget or turns, blocked, partial, uncommitted)";
+export const COMPLETE = z.boolean().describe(COMPLETE_DESCRIPTION);
 
 /** Identity helper so spec files get type checking. Validation happens in the loader. */
 export function defineAgent(spec: AgentSpecInput): AgentSpecInput {

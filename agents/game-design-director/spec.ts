@@ -6,8 +6,8 @@ import { MUST_HOURS_BUDGET } from "../../tools/greenlight/feasibility.ts";
 // game repo (docs/design.md on the agent branch). The doc is the deliverable; this output is
 // only the manifest plus numbers copied from the task and git, so the eval can check both.
 export default defineAgent({
-  name: "game-director-design",
-  description: "Design: turns the Greenlight Chair's pick into the committed design doc (docs/design.md) — scope tiers, systems, data files, balance targets, art needs.",
+  name: "game-design-director",
+  description: "Game Design: turns the Greenlight Chair's pick into the committed design doc (docs/design.md) — scope tiers, systems, data files, balance targets, art needs.",
   dept: "design",
   runner: "local",
   model: "anthropic/claude-opus-5.5", // Naïve catalogue id, used if this agent is ever hosted
@@ -16,7 +16,7 @@ export default defineAgent({
   tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow", catalog_query: "allow" },
   output_schema: z
     .object({
-      branch: z.string().min(3).max(80).describe("Your agent branch from game_clone, e.g. agent/game-director-design"),
+      branch: z.string().min(3).max(80).describe("Your agent branch from game_clone, e.g. agent/game-design-director"),
       commit: z.string().min(7).max(40).describe("The sha of the commit that adds docs/design.md, copied from git output"),
       doc_path: z.literal("docs/design.md"),
       must: z

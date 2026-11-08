@@ -45,7 +45,8 @@ Steam can't release a new game this weekend. The store page review takes days, t
 | Greenlight | **Market Analyst** | Embeds the Steam catalog, scores gaps, checks trend momentum | Mid |
 | Greenlight | **Player Voice Analyst** | Mines reviews of comparable games for unmet wants | Fast |
 | Greenlight | **Feasibility Critic** | Scores buildability and argues against each pitch; **has veto** | Strong |
-| Design | **Game Director** | Design doc with must/should/could tiers; data schemas; balance | Strong |
+| Design | **Pitch Writer** | Three buildable pitches from the market gaps and player findings | Strong |
+| Design | **Game Design Director** | Design doc with must/should/could tiers; data schemas; balance | Strong |
 | Design | **Level/Content Designer** | Levels, enemies, and items as data files | Fast |
 | Art | **Art Director** | Style bible, anchor sheets, **approves or rejects every asset** | Strong |
 | Art | **Sprite Artist** | Characters and enemies, cutout parts, animation | Mid |

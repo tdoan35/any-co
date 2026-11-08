@@ -16,9 +16,9 @@ import { studioStatusTools } from "./studio-status.ts";
 import { decodePng, encodePng, type RgbaImage } from "../../tools/art/png.ts";
 import { addOutline, contactSheet, lockPalette, snapToGrid, splitStrip, upscaleNearest } from "../../tools/art/ops.ts";
 import { runGate } from "../../tools/art/gate.ts";
-import { ChargedFailure, DEFAULT_CANDIDATES, MAX_CANDIDATES, ProviderExhausted, balance as providerBalance, generate, type Balance, isAnimation, quote as providerQuote, type GenerateResult, type ProviderName } from "../../tools/art/generate.ts";
+import { ChargedFailure, DEFAULT_CANDIDATES, MAX_CANDIDATES, ProviderExhausted, ProviderUnavailable, balance as providerBalance, generate, type Balance, isAnimation, quote as providerQuote, type GenerateResult, type ProviderName } from "../../tools/art/generate.ts";
 import {
-  LOW_GENERATIONS, MAX_REGENERATIONS, PROVIDERS, anchorWinner, countGeneration, generationCount, isExhausted, markExhausted, other, readCredits, readGallery,
+  LOW_GENERATIONS, MAX_REGENERATIONS, PROVIDERS, anchorWinner, checkPixellabFloor, pixellabCallEstimate, pixellabFloor, type FloorVerdict, generationsUsedSinceRedo, grantRedo, outPathProblem, releaseGeneration, reserveGeneration, isExhausted, markExhausted, other, readCredits, readGallery,
   readProviders, recordAnchorWinner, recordCredit, statePaths,
 } from "../../tools/art/credits.ts";
 import { capture as mediaCapture, POLICY as MEDIA_POLICY, type CaptureMode } from "../../tools/media/capture.ts";
@@ -29,6 +29,7 @@ import { GALLERY_DIR, nextGalleryOrdinal, recordGalleryImage } from "../../tools
 import type { ImageBlock } from "../types.ts";
 import { AGENTS_DIR } from "../load.ts";
 import type { Board } from "../board/index.ts";
+import { supersede, supersedeRefusal, supersedesBody } from "../board/supersede.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -530,18 +531,41 @@ export function resolveGameRepo(root: string, repo?: string): { name: string; di
 }
 
 
-async function gameCloneDir(ctx: ToolContext, repo?: string): Promise<{ clone: string; branch: string; src: { name: string; dir: string } }> {
+/**
+ * The run's clone on `agent/<name>`. The branch continues from origin's `agent/<name>` when one exists
+ * (earlier runs pushed there), so the agent's own pushes and the end-of-run checkpoint fast-forward;
+ * origin/main is then merged in (no-ff) so it starts current. A conflicting merge is aborted and the
+ * branch stays at origin's tip, with a note. `base` says which start was used (T28).
+ */
+async function gameCloneDir(ctx: ToolContext, repo?: string): Promise<{ clone: string; branch: string; src: { name: string; dir: string }; base: string }> {
   const src = resolveGameRepo(ctx.gameRepoRoot ?? path.join(ROOT, "games"), repo);
   const clone = path.join(ctx.workspace, "game");
   const branch = `agent/${ctx.agent ?? "unknown"}`;
+  let base = "existing clone (unchanged)";
   if (!existsSync(clone)) {
     const { code, err } = await execText("git", ["clone", "--quiet", src.dir, clone], 60_000);
     if (code !== 0) throw new Error(`git clone failed: ${err}`);
-    const b = await execText("git", ["-C", clone, "checkout", "--quiet", "-b", branch], 30_000);
+    const remote = `origin/${branch}`;
+    const reused = (await execText("git", ["-C", clone, "rev-parse", "--verify", "--quiet", `refs/remotes/${remote}`], 15_000)).code === 0;
+    const b = await execText("git", ["-C", clone, "checkout", "--quiet", "-b", branch, ...(reused ? [remote] : [])], 30_000);
     if (b.code !== 0) throw new Error(`git checkout -b failed: ${b.err}`);
+    base = "main (no earlier agent branch on origin)";
+    if (reused) {
+      const hasMain = (await execText("git", ["-C", clone, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/main"], 15_000)).code === 0;
+      if (!hasMain) base = `${remote} (no origin/main to merge)`;
+      else {
+        const id = ["-c", "user.name=any-co harness (game_clone)", "-c", "user.email=harness@any-co.invalid"];
+        const m = await execText("git", ["-C", clone, ...id, "merge", "--no-ff", "--no-edit", "-q", "-m", `Merge origin/main into ${branch} (game_clone: start current)`, "origin/main"], 60_000);
+        if (m.code === 0) base = `${remote} + origin/main merged in (your pushes fast-forward)`;
+        else {
+          await execText("git", ["-C", clone, "merge", "--abort"], 30_000);
+          base = `${remote} only: merging origin/main conflicted and was aborted, so this branch is behind main. Resolve it yourself (git merge origin/main) before relying on main's latest`;
+        }
+      }
+    }
   }
   await copyContracts(ctx.workspace);
-  return { clone, branch, src };
+  return { clone, branch, src, base };
 }
 
 /** The harness contracts (docs/contracts/) the game must implement, copied read-only into the run's workspace at
@@ -559,15 +583,16 @@ async function copyContracts(workspace: string) {
 const gameClone: ToolImpl = {
   description:
     "Clone the studio's game repo into this run (idempotent) on your own agent branch, and return the clone's path and branch. " +
+    "Your branch continues from origin's agent/<you> when earlier runs pushed it (with origin/main merged in), so `git push origin HEAD` fast-forwards; `base` says which start was used. " +
     "Read/write/run there with game_read, game_write, game_exec. You never touch the main repo directly; the Tech Lead merges branches.",
   input: z.object({ repo: z.string().min(1).max(80).optional().describe("Repo name under games/; omit when the studio has exactly one") }).strict(),
   async run({ repo }, ctx) {
     try {
-      const { clone, branch, src } = await gameCloneDir(ctx, repo);
+      const { clone, branch, src, base } = await gameCloneDir(ctx, repo);
       const head = await execText("git", ["-C", clone, "rev-parse", "--short", "HEAD"], 15_000);
       return {
         content: JSON.stringify({
-          game: src.name, clone: path.relative(ctx.workspace, clone), branch, head: head.out.trim(), main: "main",
+          game: src.name, clone: path.relative(ctx.workspace, clone), branch, base, head: head.out.trim(), main: "main",
           contracts: "contracts/ in your workspace (read with workspace_read): the harness contracts the game must implement, start at contracts/README.md. Read-only copies: implement them, never rewrite them in the game repo.",
         }),
       };
@@ -835,7 +860,9 @@ const boardTools: Record<string, ToolImpl> = {
     description:
       "Create a work card on the studio board — this is how work is assigned. The dispatcher starts the " +
       "assignee's local run once the card has no open blocker and the assignee is idle. Use blocked_by with " +
-      "card ids to order work. Creating with the same key twice returns the existing card (no duplicate).",
+      "card ids to order work. Creating with the same key twice returns the existing card (no duplicate). " +
+      "Replacing a card (it blocked or ran out of turns)? Pass supersedes with the old card's id: every open card waiting on " +
+      "the old one waits on the new one instead, and the old card closes done \"superseded by <new id>\".",
     input: z
       .object({
         title: z.string().min(3).max(120).describe("What needs doing, as an instruction"),
@@ -843,6 +870,7 @@ const boardTools: Record<string, ToolImpl> = {
         assignee: z.string().min(2).max(41).describe("Agent spec name that should do the work (a folder under agents/)"),
         blocked_by: z.array(z.string().max(64)).max(10).optional().describe("Card ids this card waits on"),
         key: z.string().max(128).optional().describe("Idempotency key: re-creating with the same key returns the existing card"),
+        supersedes: z.string().min(3).max(64).optional().describe("Id of the blocked/todo card this one replaces: its dependents are re-pointed here and it closes done"),
       })
       .strict(),
     async run(i, ctx) {
@@ -860,9 +888,18 @@ const boardTools: Record<string, ToolImpl> = {
         const missing = i.blocked_by.filter((id: string) => !ids.has(id));
         if (missing.length) return { content: `unknown card id(s) in blocked_by: ${missing.join(", ")}`, is_error: true };
       }
+      if (i.supersedes) {
+        const old = (await ctx.board.list()).find((c) => c.id === i.supersedes);
+        const refusal = supersedeRefusal(old, i.supersedes);
+        if (refusal) return { content: `board_create refused: ${refusal}`, is_error: true };
+        if (i.blocked_by?.includes(i.supersedes)) return { content: `board_create refused: a replacement cannot wait on the card it supersedes (${i.supersedes})`, is_error: true };
+      }
       try {
-        const { card, created } = await ctx.board.create({ title: i.title, body: i.body, assignee: i.assignee, blocked_by: i.blocked_by, key: i.key });
-        return { content: JSON.stringify({ ...card, created }) };
+        const body = i.supersedes ? supersedesBody(i.supersedes, i.body) : i.body;
+        const { card, created } = await ctx.board.create({ title: i.title, body, assignee: i.assignee, blocked_by: i.blocked_by, key: i.key });
+        // re-point dependents, then close the old card; if this is interrupted, the dispatcher's next pass finishes it
+        const superseded = i.supersedes ? await supersede(ctx.board, i.supersedes, card.id) : undefined;
+        return { content: JSON.stringify({ ...card, created, ...(superseded ? { superseded } : {}) }) };
       } catch (e) {
         return { content: `board_create refused: ${e instanceof Error ? e.message : String(e)}`, is_error: true };
       }
@@ -962,7 +999,7 @@ async function applyArtPostprocess(
   return steps;
 }
 
-const providerEnum = z.enum(["pixellab", "retrodiffusion"]);
+const providerEnum = z.enum(["pixellab", "retrodiffusion", "comfy"]);
 
 /** Log a reported balance; write ONE ledger note per low threshold per provider per day. */
 function noteCredits(
@@ -990,6 +1027,19 @@ function noteCredits(
 }
 const LOW_PCT = 20;
 
+/** ONE ledger decision per day when the PixelLab floor stops a call (deduplicated by its refs key, like the low notes). */
+function noteFloor(ctx: ToolContext, v: FloorVerdict): void {
+  const ledgerFile = ctx.ledgerFile ?? LEDGER_FILE;
+  const ref = `pixellab-floor:${new Date().toISOString().slice(0, 10)}`;
+  if (ledgerRead(ledgerFile).some((e) => e.kind === "decision" && e.topic === "spend.pixellab_floor" && (e.refs ?? []).includes(ref))) return;
+  ledgerAppend({
+    kind: "decision", ts: new Date().toISOString(), agent: ctx.agent ?? "art_generate", run_id: ctx.run_id ?? "unknown", topic: "spend.pixellab_floor",
+    decision: `PixelLab floor stops pixellab generation: remaining ${v.remaining ?? "unreadable"}, floor ${v.floor} (PIXELLAB_MIN_REMAINING), call estimate ${v.estimate}`,
+    rationale: "PixelLab is one generations balance shared across studios; the floor keeps a reserve. Calls go to comfy or the procedural floor until the balance is above floor + estimate.",
+    refs: [ref],
+  }, ledgerFile);
+}
+
 /**
  * Collect a PixelLab background job that an earlier call submitted (and was billed for) but stopped
  * waiting on: poll it, write the result exactly like a fresh call. No submit, no new generation, no
@@ -1015,6 +1065,47 @@ async function collectJob(i: any, ctx: ToolContext): Promise<ToolOutput> {
   }
 }
 
+export const ART_DEFAULTS = ["comfy", "pixellab", "retrodiffusion"] as const;
+/** ART_DEFAULT_PROVIDER (per studio): the provider for a call that names none; null when unset/empty; a typo is an error. */
+export function artDefaultProvider(env: Record<string, string | undefined> = process.env): ProviderName | null {
+  const raw = env.ART_DEFAULT_PROVIDER?.trim();
+  if (!raw) return null;
+  if (!(ART_DEFAULTS as readonly string[]).includes(raw)) throw new Error(`ART_DEFAULT_PROVIDER must be one of ${ART_DEFAULTS.join(", ")} (or unset), got "${raw}"`);
+  return raw as ProviderName;
+}
+
+/** The cap refusal names the two ways forward that a human decided, never a way for the model to reset it. */
+function capRefusal(out: string, used: number): string {
+  return `refused: ${out} has had ${used} paid generations (1 + ${MAX_REGENERATIONS} regenerations is the cap). Fix the prompt/reference or cut to the ` +
+    `fallback ladder. A redo needs a human decision: generate to a NEW out path (e.g. ${out.replace(/\.png$/i, "-v2.png")}) when the design calls for a new ` +
+    `asset, or ask for art_redo (operator approval; grants a fresh allowance for this path).`;
+}
+
+/**
+ * Pre-call check for postprocess (T39): the snap/lock/outline steps need the manifest and the asset's entry, and a
+ * generation without them is paid for and then unusable ("snap needs the manifest entry", Nov 7). Null = fine.
+ */
+async function postprocessProblem(workspace: string, out: string, pp: { snap?: boolean; lock?: boolean; outline?: string } | undefined): Promise<string | null> {
+  if (!pp || !(pp.snap || pp.lock || pp.outline)) return null;
+  let manifest: { grid?: { w: number; h: number }; palette?: string[]; assets?: Array<{ path?: string; size?: { w: number; h: number }; frames?: number }> };
+  try {
+    manifest = JSON.parse(await readFile(resolveInWorkspace(workspace, path.join("game", "assets", "manifest.json")), "utf8"));
+  } catch {
+    return "postprocess needs the game manifest at game/assets/manifest.json (game_clone, and the Art Director locks it) before generating";
+  }
+  if ((pp.snap || pp.lock) && (!manifest.grid || !Array.isArray(manifest.palette) || manifest.palette.length === 0))
+    return "postprocess snap/lock needs grid and palette locked in game/assets/manifest.json before generating";
+  const repoRel = path.posix.normalize(out.replace(/\\/g, "/")).replace(/^game\//, "");
+  const entry = manifest.assets?.find((a) => a.path === repoRel);
+  if (!entry) return `no manifest entry for ${repoRel}: add its entry (id, type, path, size, frames, palette, anchor) to game/assets/manifest.json FIRST, then generate`;
+  if (pp.snap) {
+    if (!entry.size) return `the manifest entry for ${repoRel} has no size (one frame): snap needs it; add it first`;
+    if (manifest.grid && (entry.size.w % manifest.grid.w !== 0 || entry.size.h % manifest.grid.h !== 0))
+      return `manifest size ${entry.size.w}x${entry.size.h} for ${repoRel} is not a multiple of grid ${manifest.grid.w}x${manifest.grid.h}; fix the entry first`;
+  }
+  return null;
+}
+
 const artGenerate: ToolImpl = {
   description:
     "Generate pixel art with a paid provider (PixelLab or Retro Diffusion) and write PNGs into the workspace. " +
@@ -1027,10 +1118,17 @@ const artGenerate: ToolImpl = {
     `Each asset gets one generation plus ${MAX_REGENERATIONS} regenerations. Animation (frames or rd_animation/rd_advanced_animation styles) needs justify. Quote batches with art_quote first. ` +
     "A PixelLab job that timed out or lost its poll keeps running and is billed: the error names its job_id; never regenerate, call again with the same inputs plus resume_job_id to collect it for free. " +
     `max_candidates (default ${DEFAULT_CANDIDATES}, max ${MAX_CANDIDATES}) caps the images kept per call to keep the gallery reviewable; it does not save generations. ` +
-    "PixelLab results report generations_used (subscription balance before vs after).",
+    "PixelLab results report generations_used (subscription balance before vs after). " +
+    "With PIXELLAB_MIN_REMAINING set, pixellab is refused (no request) at or below that floor, or when this call's estimate would cross it; the call moves to comfy " +
+    "or the procedural floor and the result's pixellab_floor says so: then use provider comfy with your reference image, or stop and report. " +
+    "If this studio sets ART_DEFAULT_PROVIDER=comfy, a call with no provider uses comfy only (reference required) and never falls back to a paid provider: name pixellab explicitly only when a human approved paid generation. " +
+    "provider comfy = the local lab ComfyUI (frozen IP-Adapter recipe on `reference`, seed = identity, default 42): free (cost 0, cost_source local), stills only, " +
+    "always 768x768 with an opaque background, so pass postprocess (snap/lock/outline) to reach the manifest size and palette. Use it when the task or the anchor " +
+    "winner names comfy; when the lab is down the call falls back to pixellab once and comfy is tried again next call. " +
+    "Cost rule: comfy is free/local and needs a reference; pixellab costs 10-30 generations per call — default to comfy, spend pixellab only where it earns it, and pass max_candidates 1 with a justification when you do.",
   input: z
     .object({
-      provider: providerEnum.optional().describe("omit to use the anchor-winning provider of `reference` (art_anchor_winner)"),
+      provider: providerEnum.optional().describe("omit to use the anchor-winning provider of `reference` (art_anchor_winner); comfy = the local lab (free, stills, 768x768)"),
       prompt: z.string().min(1).max(2000),
       width: z.number().int().min(12).max(792),
       height: z.number().int().min(12).max(792),
@@ -1040,6 +1138,7 @@ const artGenerate: ToolImpl = {
       frames: z.number().int().optional().describe("animation frames. retrodiffusion: frames_duration 4|6|8|10|12|16. pixellab: 4-16 even (4|6|8|10|12|14|16); animates `reference` (required, the start frame, at most 256x256, width/height = its size) with `prompt` as the action; w*h*frames <= 524288. Output: one horizontal strip (frames x width, 1 row)"),
       transparent: z.boolean().optional().describe("transparent background (default true)"),
       style: z.string().max(120).optional().describe("Retro Diffusion prompt_style id"),
+      negative: z.string().max(2000).optional().describe("comfy only: negative prompt (default empty)"),
       max_candidates: z.number().int().min(1).max(MAX_CANDIDATES).default(DEFAULT_CANDIDATES).describe(`keep at most this many returned images (default ${DEFAULT_CANDIDATES}); extras are discarded unwritten. Keeps the gallery reviewable; it does NOT save generations (the provider bills what it made)`),
       justify: z.string().min(10).max(300).optional().describe("required for animation: why the cheaper ladder steps (cutout parts, in-engine motion) won't do"),
       resume_job_id: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/).optional().describe("PixelLab only: after a timeout or poll failure, the error names a job_id. Call again with the SAME inputs plus resume_job_id to collect that job: no new generation, no charge, no regeneration count"),
@@ -1056,39 +1155,94 @@ const artGenerate: ToolImpl = {
   async run(i, ctx) {
     if (i.resume_job_id) return collectJob(i, ctx);
     const paths = statePaths(ctx.runsDir);
-    const done = generationCount(paths.gallery, i.out);
-    if (done >= 1 + MAX_REGENERATIONS)
-      return { content: `refused: ${i.out} has had ${done} paid generations (1 + ${MAX_REGENERATIONS} regenerations is the cap). Fix the prompt/reference or cut to the fallback ladder.`, is_error: true };
+    // T39: refuse, with zero requests, a call that could not produce a usable asset
+    const outIssue = outPathProblem(i.out);
+    if (outIssue) return { content: `refused before any request: ${outIssue}`, is_error: true };
+    const ppIssue = await postprocessProblem(ctx.workspace, i.out, i.postprocess);
+    if (ppIssue) return { content: `refused before any request: ${ppIssue}`, is_error: true };
+    const done = generationsUsedSinceRedo(paths.gallery, i.out);
+    if (done >= 1 + MAX_REGENERATIONS) return { content: capRefusal(i.out, done), is_error: true };
     if (isAnimation(i) && !i.justify)
       return { content: "refused: animation endpoints (frames, rd_animation__*, rd_advanced_animation__*) are the expensive ones; pass justify with why cutout parts or in-engine motion won't do", is_error: true };
     const winner = i.reference ? anchorWinner(paths.gallery, i.reference) : undefined;
     let requested: ProviderName | undefined = i.provider;
+    // T39b: the studio's default for an omitted provider, set explicitly per studio (never inferred from a reachable lab)
+    let defaultProvider: ProviderName | null;
+    try {
+      defaultProvider = artDefaultProvider();
+    } catch (e) {
+      return { content: errText(e), is_error: true };
+    }
+    if (!requested && defaultProvider === "comfy") {
+      if (!i.reference)
+        return { content: "refused: ART_DEFAULT_PROVIDER=comfy generates from a reference image (IP-Adapter): pass reference (the anchor PNG), or name a provider explicitly", is_error: true };
+      requested = "comfy";
+    }
     if (!requested) {
-      if (!winner) return { content: `provider is required: no anchor winner is recorded${i.reference ? ` for ${i.reference}` : " (no reference given)"}. Bake-offs are for anchors; record the winner with art_anchor_winner.`, is_error: true };
-      requested = winner;
-    } else if (winner && requested !== winner && !isExhausted(paths.providers, winner)) {
+      const fallback = winner ?? defaultProvider ?? undefined; // a paid default never overrides an anchor's bake-off winner
+      if (!fallback) return { content: `provider is required: no anchor winner is recorded${i.reference ? ` for ${i.reference}` : " (no reference given)"}. Bake-offs are for anchors; record the winner with art_anchor_winner.`, is_error: true };
+      requested = fallback;
+    } else if (winner && requested !== winner && PROVIDERS.includes(requested) && PROVIDERS.includes(winner) && !isExhausted(paths.providers, winner)) {
+      // the bake-off lock is among PAID providers only: comfy (local, free) is always allowed (T39)
       return { content: `refused: ${i.reference}'s anchor bake-off was won by ${winner}; batch generation uses it (omit provider). Only anchors are generated on both.`, is_error: true };
     }
 
+    // the slot is taken before any request and given back unless the call billed (no race past the cap)
+    const slot = reserveGeneration(paths.gallery, i.out);
+    if (!slot) return { content: capRefusal(i.out, generationsUsedSinceRedo(paths.gallery, i.out)), is_error: true };
+    let billed = false;
+    try {
     const exhausted: ProviderName[] = [];
+    const unavailable: ProviderName[] = []; // transient (comfy down): skipped this call only, never persisted
     const notes: string[] = [];
     let result: GenerateResult | null = null;
     let credits: ReturnType<typeof noteCredits> | null = null;
     let before: Balance | null = null;
-    for (const p of [requested, other(requested)]) {
+    let floored: FloorVerdict | null = null; // T35: the PixelLab floor stopped pixellab for this call (never persisted)
+    let floor: number | null;
+    try {
+      floor = pixellabFloor();
+    } catch (e) {
+      return { content: errText(e), is_error: true };
+    }
+    // With the studio default comfy, the chain never falls INTO a paid provider the call did not name (R46): explicit comfy
+    // with the lab down, or explicit RD exhausted, stops instead of spending shared PixelLab generations. Free comfy may still
+    // be spliced in after a floored pixellab (T35). Unset default: unchanged.
+    const comfyStudio = defaultProvider === "comfy";
+    const chain: ProviderName[] = comfyStudio ? [requested] : [requested, other(requested)];
+    for (let k = 0; k < chain.length; k++) {
+      const p = chain[k];
       if (isExhausted(paths.providers, p)) {
         exhausted.push(p);
         continue;
+      }
+      if (p === "pixellab" && floor !== null) {
+        // the live balance before EVERY pixellab call (free GET /v2/balance), never a cached one
+        before = await providerBalance("pixellab", {}).catch(() => null);
+        const v = checkPixellabFloor(before, floor, pixellabCallEstimate(paths.credits));
+        if (v.blocked) {
+          floored = v;
+          notes.push(v.message);
+          noteFloor(ctx, v);
+          // like an exhausted provider for this call only: no request; comfy next (stills), then the rest of the chain
+          if (i.frames === undefined && !chain.includes("comfy")) chain.splice(k + 1, 0, "comfy");
+          else if (i.frames !== undefined) notes.push("comfy makes stills only, so there is no comfy fallback for an animation");
+          continue;
+        }
       }
       if (p !== requested && i.frames !== undefined && p === "pixellab" && !i.reference) {
         notes.push("pixellab animates only from a reference still, and none was given, so there is no animation fallback");
         continue;
       }
-      if (p !== requested) notes.push(`${requested} is exhausted; tried ${p} once instead (same prompt and size)`);
+      if (p !== requested) {
+        const why = floored && requested === "pixellab" ? "at its floor" : unavailable.includes(requested) ? "unavailable" : "exhausted";
+        notes.push(`${requested} is ${why}; tried ${p} once instead (same prompt and size)`);
+      }
       try {
         const { justify: _j, postprocess: _p, max_candidates, ...gen } = i;
-        // PixelLab: read the (free) balance before and after, so the result says what the call used
-        before = p === "pixellab" ? await providerBalance("pixellab", {}).catch(() => null) : null;
+        // PixelLab: read the (free) balance before and after, so the result says what the call used (already read when a floor is set)
+        if (p === "pixellab" && floor === null) before = await providerBalance("pixellab", {}).catch(() => null);
+        else if (p !== "pixellab") before = null;
         result = await generate({ ...gen, provider: p, maxCandidates: max_candidates }, { workspace: ctx.workspace });
         break;
       } catch (e) {
@@ -1098,34 +1252,49 @@ const artGenerate: ToolImpl = {
           exhausted.push(p);
           continue;
         }
+        if (e instanceof ProviderUnavailable) {
+          notes.push(e.message);
+          unavailable.push(p);
+          continue;
+        }
         if (e instanceof ChargedFailure) {
-          countGeneration(paths.gallery, i.out); // it billed
+          billed = true; // it billed: the slot stays taken
           return { content: errText(e), is_error: true, cost_micro_usd: e.cost_micro_usd };
         }
         return { content: errText(e), is_error: true };
       }
     }
     if (!result) {
-      const all = PROVIDERS.every((p) => exhausted.includes(p));
+      if (comfyStudio) notes.push(`ART_DEFAULT_PROVIDER=comfy: no fallback into a paid provider this call did not name (asked for ${requested})`);
+      const all = PROVIDERS.every((p) => exhausted.includes(p) || (p === "pixellab" && floored !== null));
       return {
         content: JSON.stringify({
-          exhausted: all ? "all" : exhausted, fallback: "procedural", cost_micro_usd: 0, notes,
-          next: "Take the fallback ladder's floor: simple shapes animated in engine (bob, flash, squash-and-stretch, particles). Log it with log_decision (topic art.provider_fallback). This is a guaranteed outcome, not a failure.",
+          exhausted: all ? "all" : exhausted, ...(unavailable.length ? { unavailable } : {}), ...(floored ? { pixellab_floor: floored } : {}), fallback: "procedural", cost_micro_usd: 0, notes,
+          ...(comfyStudio ? { default_provider: "comfy" } : {}),
+          next: comfyStudio && unavailable.includes("comfy")
+            ? "comfy default: lab unreachable; pass provider pixellab explicitly if a human approved paid generation. Otherwise stop and report, or take the fallback ladder's floor (simple shapes animated in engine) and log it with log_decision (topic art.provider_fallback)."
+            : floored
+            ? `${floored.message}. Otherwise take the fallback ladder's floor: simple shapes animated in engine (bob, flash, squash-and-stretch, particles); log it with log_decision (topic art.provider_fallback).`
+            : "Take the fallback ladder's floor: simple shapes animated in engine (bob, flash, squash-and-stretch, particles). Log it with log_decision (topic art.provider_fallback). This is a guaranteed outcome, not a failure.",
         }),
         cost_micro_usd: 0,
       };
     }
-    const generation = countGeneration(paths.gallery, i.out);
-    const after: Balance | null = typeof result.metadata.remaining_balance === "number"
-      ? { remaining: result.metadata.remaining_balance as number, unit: "usd", total: null }
-      : await providerBalance(result.provider, {}).catch(() => null);
+    billed = true;
+    const generation = slot.slot;
+    // comfy is local: no balance read and no credits line
+    const after: Balance | null = result.provider === "comfy"
+      ? null
+      : typeof result.metadata.remaining_balance === "number"
+        ? { remaining: result.metadata.remaining_balance as number, unit: "usd", total: null }
+        : await providerBalance(result.provider, {}).catch(() => null);
     // generations used: the balance delta (T21); else the job's own usage when it reports generations
     const usage = result.metadata.usage as { type?: string; generations?: number } | null | undefined;
     const used = before && after && before.unit === "generations" && after.unit === "generations"
       ? Math.round((before.remaining - after.remaining) * 1000) / 1000
       : usage?.type === "generations" && typeof usage.generations === "number" ? usage.generations : null;
     credits = noteCredits(ctx, result.provider, after, "generation", used);
-    const extra = { generation: `${generation} of ${1 + MAX_REGENERATIONS}`, credits, ...(used !== null ? { generations_used: used } : {}), ...(result.provider !== requested ? { fallback_from: requested } : {}), ...(notes.length ? { notes } : {}) };
+    const extra = { generation: `${generation} of ${1 + MAX_REGENERATIONS}`, credits, ...(used !== null ? { generations_used: used } : {}), ...(result.provider !== requested ? { fallback_from: requested } : {}), ...(floored ? { pixellab_floor: floored } : {}), ...(notes.length ? { notes } : {}) };
     try {
       let postprocess: Record<string, unknown> | null = null;
       if (i.postprocess && (i.postprocess.snap || i.postprocess.lock || i.postprocess.outline))
@@ -1134,6 +1303,9 @@ const artGenerate: ToolImpl = {
     } catch (e) {
       // generation succeeded and was paid; postprocess failing must not erase the charge
       return { content: `generated ${result.images.join(", ")} but postprocess failed: ${errText(e)} ${JSON.stringify(extra)}`, is_error: true, cost_micro_usd: result.cost_micro_usd };
+    }
+    } finally {
+      if (!billed) releaseGeneration(paths.gallery, i.out);
     }
   },
 };
@@ -1254,6 +1426,36 @@ const artSignoff: ToolImpl = {
         next: "Continue the batch: generate non-anchor assets against the anchors.",
       }),
     };
+  },
+};
+
+/**
+ * art_redo (T39): an operator-approved redo of one asset past its generation cap. It lives under the art_signoff
+ * capability, which is approval_only (a spec can't grant it "allow"), so this body runs only after a human
+ * approved this exact request in the approvals queue; the approval is ledgered by the gate.
+ */
+const artRedo: ToolImpl = {
+  description:
+    "Ask the human operator to approve a redo of ONE asset that hit its generation cap (1 + 2 regenerations). Use it only when the " +
+    "asset must keep its path (e.g. an anchor others reference); otherwise generate to a new out path. Blocks until the operator decides; " +
+    "approved = a fresh allowance for that out path.",
+  input: z
+    .object({
+      out: z.string().min(1).max(200).describe("the asset's out path, exactly as you pass it to art_generate (game/assets/...png)"),
+      why: z.string().min(10).max(300).describe("why a redo instead of a new asset: what was wrong and what will change"),
+    })
+    .strict(),
+  async run(i, ctx) {
+    const issue = outPathProblem(i.out);
+    if (issue) return { content: `art_redo refused: ${issue}`, is_error: true };
+    const paths = statePaths(ctx.runsDir);
+    const grant = grantRedo(paths.gallery, i.out, { by: "operator (approved art_redo)", why: i.why, approval: `${ctx.run_id ?? "unknown"}` });
+    ledgerAppend({
+      kind: "decision", ts: grant.ts, agent: ctx.agent ?? "art_redo", run_id: ctx.run_id ?? "unknown", topic: "art.redo",
+      decision: `operator approved a redo of ${i.out}: a fresh allowance of ${1 + MAX_REGENERATIONS} generations (after ${grant.at_count} so far)`,
+      rationale: i.why, refs: [i.out],
+    }, ctx.ledgerFile ?? LEDGER_FILE);
+    return { content: JSON.stringify({ redo: "granted", out: i.out, allowance: 1 + MAX_REGENERATIONS, generations_before: grant.at_count }) };
   },
 };
 
@@ -1517,12 +1719,12 @@ export function validateLaunchArgv(argv: unknown, clone: string): string[] {
   return argv;
 }
 
-type QaMode = "smoke" | "check" | "determinism" | "export-check";
+type QaMode = "smoke" | "check" | "determinism" | "export-check" | "ui-lint";
 
 async function runQa(mode: QaMode, input: Record<string, unknown>, ctx: ToolContext): Promise<{ content: string; is_error?: boolean }> {
   try {
     const clone = path.join(ctx.workspace, "game");
-    if (!existsSync(path.join(clone, "project.godot")) && mode !== "check") {
+    if (!existsSync(path.join(clone, "project.godot")) && mode !== "check" && mode !== "ui-lint") {
       throw new Error(`no game clone at ${path.relative(ctx.workspace, clone)}; call game_clone first`);
     }
     if (mode === "export-check") {
@@ -1530,10 +1732,14 @@ async function runQa(mode: QaMode, input: Record<string, unknown>, ctx: ToolCont
       if (input["frames"] !== undefined) args.push("--frames", String(input["frames"]));
       args.push("--timeout-ms", String(input["timeout_ms"] ?? 180_000));
       if (input["run"] === false) args.push("--run", "false");
+      if (input["save_frames"] !== undefined) args.push("--save-frames", String(input["save_frames"]), "--save-dir", mediaOut(ctx.workspace, "media/export-frames"));
       const tsxLoader = fileURLToPath(import.meta.resolve("tsx"));
       const proc = await execText(process.execPath, ["--import", `file://${tsxLoader}`, path.join(ROOT, "tools", "qa", "qa.ts"), "export-check", ...args], 15 * 60_000);
       try {
-        return { content: clip(JSON.stringify(JSON.parse(proc.out)), MAX_RESULT_CHARS) };
+        const result = JSON.parse(proc.out);
+        // saved frames are reported workspace-relative, the paths image_view takes
+        for (const p of result.packs ?? []) if (Array.isArray(p.run?.saved_frames)) p.run.saved_frames = p.run.saved_frames.map((f: string) => path.relative(ctx.workspace, f));
+        return { content: clip(JSON.stringify(result), MAX_RESULT_CHARS) };
       } catch {
         throw new Error(`qa export-check produced no JSON (exit ${proc.code}): ${proc.err.slice(-400)}`);
       }
@@ -1544,19 +1750,25 @@ async function runQa(mode: QaMode, input: Record<string, unknown>, ctx: ToolCont
       if (!Number.isFinite(n) || n < 0) throw new Error(`${k} must be a non-negative number`);
       return n;
     };
-    if (mode !== "check") {
+    if (mode === "check" || mode === "ui-lint") {
+      const dir = input["qa_dir"];
+      // ui-lint wants the clone root (its CLI resolves <dir>/state.json); check wants <dir>/qa.
+      cli["dir"] = typeof dir === "string" ? resolveInWorkspace(ctx.workspace, path.join("game", dir)) : mode === "ui-lint" ? clone : path.join(clone, "qa");
+    } else {
       const cmd = validateLaunchArgv(input["cmd"], clone);
       cli["cmd"] = JSON.stringify(cmd);
       cli["dir"] = clone;
       cli["seed"] = numArg("seed", input["seed"] ?? 0);
       cli["ticks"] = numArg("ticks", input["ticks"] ?? 0);
       if (input["policy"] !== undefined) cli["policy"] = String(input["policy"]);
-    } else {
-      const dir = input["qa_dir"];
-      cli["dir"] = typeof dir === "string" ? resolveInWorkspace(ctx.workspace, path.join("game", dir, "qa")) : path.join(clone, "qa");
     }
     // Mandatory caps (ms): a QA run can't hang the agent loop.
     cli["ack-timeout-ms"] = numArg("ack_timeout_ms", input["ack_timeout_ms"] ?? 30_000);
+    if (mode === "ui-lint") {
+      if (input["viewport"] !== undefined) cli["viewport"] = String(input["viewport"]);
+      if (input["min_text_px"] !== undefined) cli["min-text-px"] = numArg("min_text_px", input["min_text_px"]);
+      if (input["grid_px"] !== undefined) cli["grid-px"] = numArg("grid_px", input["grid_px"]);
+    }
     if (input["ready_timeout_ms"] !== undefined) cli["ready-timeout-ms"] = numArg("ready_timeout_ms", input["ready_timeout_ms"]);
     cli["end-wait-ms"] = numArg("end_wait_ms", input["end_wait_ms"] ?? 120_000);
     if (input["step_frames"] !== undefined) cli["step-frames"] = numArg("step_frames", input["step_frames"]);
@@ -1645,6 +1857,7 @@ const qaExportCheck: ToolImpl = {
       frames: z.number().int().min(10).max(600).optional().describe("frames to render before the still (default 90 at 30 fps)"),
       timeout_ms: z.number().int().positive().max(10 * 60_000).optional().describe("per-pack engine timeout (default 180000)"),
       run: z.boolean().optional().describe("false = pack-table check only (no engine run)"),
+      save_frames: z.number().int().min(1).max(12).optional().describe("copy this many evenly spaced rendered frames (always including the last) to media/export-frames/<pack>/ in your workspace, for image_view (UI review of the exported build)"),
     })
     .strict(),
   async run(input, ctx) {
@@ -1652,7 +1865,23 @@ const qaExportCheck: ToolImpl = {
   },
 };
 
-const qaHarnessTools = { qa_smoke: qaSmoke, qa_check: qaCheck, qa_determinism: qaDeterminism, qa_export_check: qaExportCheck };
+const qaUiLint: ToolImpl = {
+  description:
+    "UI layout lint over the ui[] of the clone's qa/state.json (release-gate layer when the game emits ui[]): overlapping visible non-overlay elements, off-screen/clipped rects, text below min px, optional grid snap. Absent ui[] => ui_lint_not_implemented (reported, not a pass). Verdict JSON {ok, exitCode, checks[], ui:{status,findings[],dumpsChecked}} — findings carry {check, ids, rects, tick, detail}.",
+  input: z
+    .object({
+      qa_dir: z.string().optional().describe("game-clone dir holding qa/; default the clone root"),
+      viewport: z.string().optional().describe("WxH, default 1280x720 (the --resolution backbuffer)"),
+      min_text_px: z.number().min(1).max(72).optional().describe("minimum font size (default 10)"),
+      grid_px: z.number().min(1).max(512).optional().describe("require x/y on this grid, e.g. 8"),
+    })
+    .strict(),
+  async run(input, ctx) {
+    return runQa("ui-lint", input, ctx);
+  },
+};
+
+const qaHarnessTools = { qa_smoke: qaSmoke, qa_check: qaCheck, qa_determinism: qaDeterminism, qa_export_check: qaExportCheck, qa_ui_lint: qaUiLint };
 
 // ---------- media_capture (tools/media): stills, footage, and deterministic edits for marketing ----------
 // Built against docs/contracts only. Inputs are workspace-relative (the game clone is <workspace>/game);
@@ -1817,7 +2046,7 @@ const CORE_IMPLS: Record<keyof typeof CORE_CAPABILITIES, Record<string, ToolImpl
   email_send: { email_send: emailSend },
   site_deploy: { site_deploy: siteDeploy },
   site_status: { site_status: siteStatus },
-  art_signoff: { art_signoff: artSignoff },
+  art_signoff: { art_signoff: artSignoff, art_redo: artRedo },
   board: boardTools,
   media_capture: mediaTools,
 };

@@ -1,8 +1,8 @@
 # Feasibility Critic eval
 
 ```
-node --import tsx scripts/greenlight-handoff.ts --pitches runs/<game-director-run>
-npm run agent -- feasibility-critic --task-file runs/<game-director-run>/handoff-critic.md
+node --import tsx scripts/greenlight-handoff.ts --pitches runs/<pitch-writer-run>
+npm run agent -- feasibility-critic --task-file runs/<pitch-writer-run>/handoff-critic.md
 npm run eval:feasibility-critic -- runs/<critic-run>
 ```
 Mechanical: every pitch reviewed, every `must` item estimated, every attack targets a real field.

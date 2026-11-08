@@ -13,6 +13,9 @@ export interface Capability {
   /** Sends or spends outside the studio: spec validation refuses "allow", so every grant is "ask"
    *  (approval gate + ledger, AGENTS.md rule 4). */
   outward?: boolean;
+  /** A human decision by construction (e.g. art_signoff, art_redo): like outward, spec validation refuses "allow",
+   *  so the tool only ever runs after the approval gate (T39). */
+  approval_only?: boolean;
 }
 
 /** The core capabilities. Lane capabilities (runner/tools/lanes/) are merged in below. */
@@ -30,7 +33,7 @@ export const CORE_CAPABILITIES = {
     note: "Local tools over the run workspace and the game clone. Hosted setup not done.",
   },
   art_generate: {
-    summary: "Paid pixel-art generation (tools/art/generate.ts): PixelLab or Retro Diffusion, prompt + size + optional reference/seed/frames, PNGs into the workspace, optional deterministic postprocess. Credit-aware (tools/art/credits.ts): exhausted providers fall back, then a procedural floor; anchor winners, regeneration cap, free quotes (art_quote), balances",
+    summary: "Pixel-art generation (tools/art/generate.ts): PixelLab or Retro Diffusion (paid), or the local lab ComfyUI (comfy, free, stills), prompt + size + optional reference/seed/frames, PNGs into the workspace, optional deterministic postprocess. Credit-aware (tools/art/credits.ts): exhausted providers fall back, then a procedural floor; anchor winners, regeneration cap, free quotes (art_quote), balances",
     naive: ["bash"],
     local: true,
     note: "Spend is budget-capped like inference (spec budgets + runner caps), not per-call approved. Free-trial credits, never purchased: state in runs/art-providers.json, art-credits.jsonl, art-gallery.json. Keys only from env; hosted setup not done.",
@@ -135,7 +138,8 @@ export const CORE_CAPABILITIES = {
     summary: "Human checkpoint before batch art: the operator approves or denies the anchor set (style bible + contact sheet) via the approval queue",
     naive: [],
     local: true,
-    note: "Ask-gated: blocks in the approvals queue (T1). Grant art_signoff: 'ask' to art-director only. A denial returns its note as a normal result so the anchors get revised.",
+    note: "Ask-gated: blocks in the approvals queue (T1). Grant art_signoff: 'ask' to art-director only. A denial returns its note as a normal result so the anchors get revised. Also art_redo (T39): an approved request grants one asset a fresh generation allowance.",
+    approval_only: true,
   },
 } as const satisfies Record<string, Capability>;
 

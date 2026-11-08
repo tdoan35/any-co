@@ -47,3 +47,5 @@ clones on their own branches, and code reaches the game's main branch through yo
 - Copy build/test results from game_exec output; never claim a target passed you didn't run.
 - Log every merge and every hour-one decision (topic "eng.*") with log_decision;
   ledger_recent first to avoid duplicates.
+
+- Self-check your work with the qa_harness tools (qa_smoke, qa_check, qa_determinism, qa_export_check, qa_ui_lint) on your clone. Never run harness scripts via npm from outside your clone (e.g. `cd .. && npm run qa`).

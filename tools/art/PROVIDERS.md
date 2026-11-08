@@ -116,9 +116,37 @@ PixelLab OpenAPI `https://api.pixellab.ai/v2/openapi.json` + `llms.txt`, and Ret
 | --- | --- |
 | `POST /v2/generate-image-v2` | $0.02 per request (the API's own usage examples show $0.02) |
 
+## Local lab ComfyUI (`provider: "comfy"`, T31)
+
+The isolated character-lab ComfyUI on ty-omarchy, for studio 2. Base URL from `COMFY_BASE_URL`
+(default `http://100.96.19.87:8190`). **Port 8188 is production and is refused** (from the option or
+the env, before any request). The provider never starts or stops servers; the operator starts the lab.
+
+- **Recipe (frozen, from the lab's `HANDOFF.md` / `generate_agent_set.py`, read 2026-11-08):**
+  checkpoint `NovaPixelILV3.safetensors`. With `reference`, IP-Adapter `ip_adapter_Noobtest_800000.bin`
+  (`IPAdapterAdvanced`, weight 0.65, linear, concat, V only) with CLIP vision
+  `CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors`. 768×768, 30 steps, CFG 7, `euler_ancestral` / `normal`,
+  seed 42 unless the call passes one. Use the same seed per character for identity. No pose ControlNet.
+  Without `reference` the graph is text-only (no IP-Adapter). `negative` is the negative prompt (default empty).
+- **Flow:** `GET /system_stats` (5 s health probe) → `POST /upload/image` (the reference, named
+  `anyco-ref-<sha256[:16]>.png`, overwrite) → `POST /prompt` → poll `GET /history/<prompt_id>` →
+  `GET /view?filename&subfolder&type` per output of the SaveImage node. `max_candidates` applies; the
+  graph renders one image.
+- **Output:** always 768×768, **opaque** (the recipe has no background removal). Pass
+  `postprocess` (snap/lock/outline) to reach the manifest size, grid and palette. Stills only: `frames`
+  is refused (animate the still with pixellab).
+- **Cost:** `cost_micro_usd: 0`, `cost_source: "local"`. No balance read, no `art-credits.jsonl`
+  line, no `generations_used`. It still counts toward the per-asset cap (1 + 2 regenerations), the same
+  bounded-reroll rule as the lab's own handoff (original seed + 2 extra).
+- **Down:** an unreachable lab, or a non-2xx probe, is `ProviderUnavailable`. art_generate falls back to
+  pixellab once (`fallback_from: "comfy"`). It is never persisted as exhausted: the next call probes again.
+  A timeout names the `prompt_id` (the job may still finish in the lab's queue; nothing is billed).
+- **License caveat:** Nova Pixels XL's creator requires edits before commercial use. Any game sold
+  with comfy assets needs them edited first (`docs/decisions.md`).
+
 ## Cost policy
 
-Every generation returns `cost_micro_usd` and `cost_source: "reported" | "estimated"`.
+Every generation returns `cost_micro_usd` and `cost_source: "reported" | "estimated"` (`"local"` and 0 for comfy).
 Reported beats estimated; a paid call never reports 0 (an estimate is used instead).
 A failed submit is charged at the estimate unless the provider answered 4xx or the connection
 never carried the request (refused, DNS, unreachable): a reset, abort, timeout, 5xx, or a 2xx with
@@ -139,9 +167,39 @@ called. The `art_generate` capability (runner/tools/impl.ts over tools/art/credi
   `{exhausted: "all", fallback: "procedural"}` at zero cost: the Art Director's ladder floor.
 - **Conserve**: bake-offs are for anchors; `art_anchor_winner` records the winner in
   `runs/art-gallery.json` and calls that reference the anchor default to it (the loser is
-  refused). One generation + 2 regenerations per asset (counted in the gallery). Animation
+  refused). One generation + 2 regenerations per asset (counted in the gallery by the normalized out path, slot
+  reserved before the paid call and released if it billed nothing, so concurrent calls can't overshoot; T39). A redo past
+  the cap needs a human: a NEW out path (`<name>-v2.png`) is the default; keeping the path takes an operator-approved
+  `art_redo` (approval-only capability) or `npm run art -- redo <out> --why …` (operator shell only: refused when
+  `ANYCO_AGENT` is set, as game_exec sets it; so is `providers --clear`), which grants one fresh allowance (ledgered).
+  Before any paid call art_generate refuses an `out` with no real file name or outside `game/assets/`, and a postprocess
+  whose manifest or manifest entry (size for snap, grid+palette for snap/lock) is missing, with zero requests. comfy is
+  never refused by an anchor's bake-off winner (the lock is among paid providers). Animation
   (frames, `rd_animation__*`, `rd_advanced_animation__*`) needs `justify`. `art_quote` returns
   RD's free check_cost quote (PixelLab: price table) × count against the remaining balance.
+- **Default provider (T39b, `ART_DEFAULT_PROVIDER`)**: set per studio, never inferred from a reachable lab.
+  `comfy`: a call with NO provider uses comfy only. It needs a `reference` (refused without one) and never falls back to a
+  paid provider: with the lab down the result is the procedural/stop result saying "comfy default: lab unreachable; pass
+  provider pixellab explicitly if a human approved paid generation". So PixelLab is used only when named, and then the
+  floor applies. With the comfy default set, NO call falls back into a paid provider it did not name (R46): an explicit
+  `provider: "comfy"` with the lab down, or an explicit retrodiffusion that is exhausted, stops with the same result instead
+  of reaching PixelLab (free comfy can still follow a floored pixellab). `pixellab` / `retrodiffusion`: used when the call names none and no anchor winner is recorded (a winner
+  still wins). Unset: unchanged (the anchor's bake-off winner, else provider is required). An explicit `provider` always
+  wins. Studio 1 leaves it unset (PixelLab-locked style); studio 2 sets `comfy`. A typo is an error on every call.
+- **PixelLab floor (T35, `PIXELLAB_MIN_REMAINING`)**: PixelLab is ONE generations balance shared by every
+  studio, so a reserve is enforced in code, not by people watching. With the env set (integer generations),
+  art_generate reads the live balance (free `GET /v2/balance`, no cache) before EVERY pixellab call, regens and
+  animations included. It refuses the call, with no PixelLab request, when `remaining <= floor` or when
+  `remaining - estimate < floor` (the call itself would cross it). `estimate` = the most generations one pixellab
+  call has used in `art-credits.jsonl` (T21 `generations_used`), else 30. A balance that can't be read fails
+  closed while the floor is set. A USD (credits, not subscription) balance is outside the floor. A refused call
+  is treated like an exhausted provider for that call only: comfy next (stills, if the lab answers), then the
+  rest of the chain, then `{exhausted: "all", fallback: "procedural"}`. The result carries `pixellab_floor`
+  ({reason at_floor | would_cross | unreadable, remaining, floor, estimate}) and says "PixelLab floor reached
+  (remaining R <= MIN): use provider comfy with your reference image, or stop and report". It is never written
+  to art-providers.json (the floor is per studio and the balance can rise); only a real 402 marks pixellab
+  exhausted. ONE ledger decision per day (topic `spend.pixellab_floor`, refs `pixellab-floor:<day>`). A
+  malformed value is an error on every call, never a silently missing floor.
 - **PixelLab subscription (T21)**: art_generate reads the free balance before and after every
   PixelLab call and reports `generations_used` (the delta) in the result and in art-credits.jsonl.
   Generation balances use absolute thresholds: ONE ledger note at <= 400 remaining and one at 0

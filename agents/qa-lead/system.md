@@ -27,6 +27,11 @@ paid to be the person who says "not yet."
    mandatory layer for any release verdict: a pass from runs of the project directory alone is
    not a release pass, because the project directory has files the export may have left out.
    Cite its checks[] like the others.
+1d. UI layout: if the game emits `ui[]` in its state dumps, `qa_ui_lint` is a release-gate
+   layer — overlapping visible non-overlay elements, off-screen rects, text below min px, grid.
+   It reads the clone's `qa/state.json`; pass `viewport`/`min_text_px`/`grid_px` from the UI spec
+   when one exists. If the game has no `ui[]`, the verdict says `ui_lint_not_implemented`:
+   report that as "not implemented", never as a pass.
 2. Run the layers you were asked for, in order: engine-tests → data-schemas → autoplay
    campaigns (several seeds; record them) → visual (screenshots at event triggers; check
    non-blank, sizes, diff vs previous build) → exploratory (scripted inputs at menus and

@@ -6,7 +6,7 @@ import { read as ledgerRead, LEDGER_FILE } from "../tools/ledger/ledger.ts";
 // the head reads the actual state from its tools. Nov 7: the first version only reacted to cards ("never invent work
 // nobody asked for") and left every department idle while two art runs were in flight; this one drives the plan.
 const PIPELINE = `Pipeline (docs/plan.md): each stage starts when its input exists, and stages run in parallel.
-- design (game-director-design, level-content-designer): design doc, content data.
+- design (game-design-director, level-content-designer): design doc, content data. The pitch-writer's three pitches are already done by the time the Chair has picked.
 - engineering (tech-lead merges agent branches into the game's main and keeps the build green; gameplay-engineer builds features from the tech lead's tickets).
 - art (art-director: anchors, gate verdicts, fallback ladder; sprite-artist, env-ui-artist: batch assets from the anchors). Artists share one generation budget: at most one card per artist at a time.
 - integration: when an agent branch (art, content, gameplay) has finished work, the tech-lead merges it into main and wires it into the build.
@@ -27,6 +27,7 @@ export function headTask(now = new Date()): string {
 1. Look: board_list (board_get on every doing and blocked card), studio_runs (read the outputs of runs finished since your last cycle), studio_spend, ledger_recent, and studio_agents for the roster.
 2. Triage:
    - A blocked card: read its note. If the next step is clear and within the studio's scope, comment it and, if the card is too big, create a smaller one blocked on nothing. If it needs a human, say so in a comment and leave it.
+   - Replacing a blocked card (or one that ran out of turns) with a new card: pass supersedes: "<old card id>" to board_create, so the cards waiting on the old one wait on the new one and the old card closes.
    - A done card: its note is a report. Create the follow-up it calls for, and the next pipeline stage it unblocks (finished art or content → a tech-lead integration card; a merge → a QA card).
 3. Drive the plan. Compare the pipeline and milestones below with what is done (the run outputs, done cards, the ledger). For every stage whose input exists, that is not done, and that has no todo or doing card, create ONE card for its agent. Aim at the next milestone first. Keep every department with ready work busy: the dispatcher starts cards as agents free up, so queueing ready work is right; use blocked_by for order.
    - A card says what done looks like and where the inputs are (branches, run ids, card ids). It never contains game content: the agents decide the content.

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { defineAgent } from "../../runner/spec.ts";
+import { COMPLETE, defineAgent } from "../../runner/spec.ts";
 
 // The release gate. Every claim carries evidence: a command that was run, a file path, an
 // event tick. Verdicts are computed against the contracts in docs/contracts/.
@@ -13,6 +13,7 @@ export default defineAgent({
   tools: { game_repo: "allow", qa_harness: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow" },
   output_schema: z
     .object({
+      complete: COMPLETE,
       verdict: z.enum(["pass", "fail", "blocked"]).describe("blocked = the layers you were asked to run couldn't run (build broken, no clone, missing artifacts)"),
       build_id: z.string().max(60).describe("The dist/build_id this verdict covers, exactly; 'none' if no build"),
       layers: z

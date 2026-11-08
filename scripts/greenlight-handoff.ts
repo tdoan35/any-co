@@ -2,11 +2,11 @@
 //   node --import tsx scripts/greenlight-handoff.ts runs/<market-analyst-run> [--top 3]
 //     → runs/<ma-run>/handoff-player-voice.md  (task for the Player Voice Analyst)
 //   node --import tsx scripts/greenlight-handoff.ts runs/<market-analyst-run> --voice runs/<player-voice-run> [--top 3]
-//     → runs/<pv-run>/handoff-pitches.md       (task for the Game Director)
-//   node --import tsx scripts/greenlight-handoff.ts --pitches runs/<game-director-run>
+//     → runs/<pv-run>/handoff-pitches.md       (task for the Pitch Writer)
+//   node --import tsx scripts/greenlight-handoff.ts --pitches runs/<pitch-writer-run>
 //     → runs/<gd-run>/handoff-critic.md        (task for the Feasibility Critic)
 //   node --import tsx scripts/greenlight-handoff.ts --design runs/<chair-run>
-//     → runs/<chair-run>/handoff-design.md  (task for the Game Director's design-doc mode)
+//     → runs/<chair-run>/handoff-design.md  (task for the Game Design Director)
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";

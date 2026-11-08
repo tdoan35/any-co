@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { defineAgent } from "../../runner/spec.ts";
+import { COMPLETE, defineAgent } from "../../runner/spec.ts";
 
 // Two modes, one shape: skeleton mode (hour one) and merge mode. The output is always what
 // shipped, where, and what the next agents can rely on — checked against the repo by QA.
@@ -13,9 +13,10 @@ export default defineAgent({
   model: "anthropic/claude-opus-5.5", // Naïve catalogue id, used if this agent is ever hosted
   // Nov 7 6 PM: Neon credits ran out ($0.99 left), so local runs go through Naïve's proxy (real money, billed per call). Ty via EA B.
   budget: { cap_usd: 60, max_task_usd: 15, period: "day" }, // Opus via Neon: a ~90-turn skeleton run is ~$5 at list price; Ty: spend the Neon credits
-  tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow", web_search: "allow", web_fetch: "allow" },
+  tools: { game_repo: "allow", qa_harness: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow", web_search: "allow", web_fetch: "allow" },
   output_schema: z
     .object({
+      complete: COMPLETE,
       commits: z
         .array(z.object({ sha: z.string().min(7).max(40), message: z.string().min(3).max(120), branch: z.string().min(1).max(80) }).strict())
         .min(1)

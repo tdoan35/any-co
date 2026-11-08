@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { defineAgent } from "../../runner/spec.ts";
+import { COMPLETE, defineAgent } from "../../runner/spec.ts";
 
 // The director approves/rejects every asset using art_gate numbers and owns the style bible.
 // Budget: generation is real money (RD Pro ~$0.18/image) — the director mostly gates and
@@ -17,6 +17,7 @@ export default defineAgent({
   tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", art_tools: "allow", art_generate: "allow", art_signoff: "ask", studio_ledger: "allow" },
   output_schema: z
     .object({
+      complete: COMPLETE,
       style_bible: z.string().min(3).max(200).describe("Repo path of the style bible (docs/style-bible.md)"),
       manifest: z
         .object({
@@ -41,7 +42,7 @@ export default defineAgent({
               reason: z.string().min(3).max(300),
               offPaletteShare: z.number().min(0).max(1).describe("copied from art_gate numbers"),
               maxFrameDrift: z.number().min(0).max(1).nullable().describe("copied: max of art_gate frameDrift, null when one frame"),
-              anchorDrift: z.number().min(0).max(1).nullable().describe("copied from art_gate numbers; null for anchors"),
+              anchorDrift: z.number().min(0).max(1).nullable().describe("copied from art_gate numbers; null for anchors and anchor_mode style"),
             })
             .strict(),
         )

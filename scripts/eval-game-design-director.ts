@@ -1,4 +1,4 @@
-// Mechanical eval of a Game Director design-doc run. Usage: npm run eval:game-director-design -- runs/<run_id>
+// Mechanical eval of a Game Design Director run. Usage: npm run eval:game-design-director -- runs/<run_id>
 // Opens the run's game clone at the reported commit and checks docs/design.md against the
 // Chair's pick (embedded in the task by designTask) and the run's manifest output.
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -9,7 +9,7 @@ import { read as readLedger, type DecisionEntry } from "../tools/ledger/ledger.t
 
 const dir = process.argv[2];
 if (!dir || !existsSync(path.join(dir, "run.json"))) {
-  console.error("usage: npm run eval:game-director-design -- runs/<run_id>");
+  console.error("usage: npm run eval:game-design-director -- runs/<run_id>");
   process.exit(2);
 }
 const run = JSON.parse(readFileSync(path.join(dir, "run.json"), "utf8"));
@@ -43,7 +43,7 @@ if (chairRef && existsSync(chairOutPath)) {
   check(false, `chair run ${chairRef ?? "(no Refs line)"} not found under runs/; cannot verify the embedded pick`);
 }
 
-check(out.branch === "agent/game-director-design", `branch "${out.branch}" is not the agent branch game_clone creates`);
+check(out.branch === "agent/game-design-director", `branch "${out.branch}" is not the agent branch game_clone creates`);
 check(out.doc_path === "docs/design.md", `doc_path "${out.doc_path}" is not docs/design.md`);
 
 const clone = path.join(dir, "workspace", "game");
@@ -52,7 +52,7 @@ if (!existsSync(clone)) {
   issues.push("no game clone at workspace/game; run game_clone in the run");
   checks++;
 } else {
-  const at = docAtCommit(clone, String(out.commit ?? ""), String(out.doc_path ?? "docs/design.md"), String(out.branch ?? "agent/game-director-design"));
+  const at = docAtCommit(clone, String(out.commit ?? ""), String(out.doc_path ?? "docs/design.md"), String(out.branch ?? "agent/game-design-director"));
   check(at.doc !== undefined, `cannot read the doc at commit ${out.commit} in the clone: ${at.error}`);
   doc = at.doc ?? "";
 }

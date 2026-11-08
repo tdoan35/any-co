@@ -22,7 +22,7 @@
     "window:build": "npm run build -w @anyco/window",
     "window:typecheck": "npm run typecheck -w @anyco/window",
     "window:electron": "npm run electron:dev -w @anyco/window",
-    "eval:game-director": "node --env-file-if-exists=.env --import tsx scripts/eval-game-director.ts",
+    "eval:pitch-writer": "node --env-file-if-exists=.env --import tsx scripts/eval-pitch-writer.ts",
     "eval:feasibility-critic": "node --env-file-if-exists=.env --import tsx scripts/eval-feasibility-critic.ts",
     "window:server": "node --env-file-if-exists=.env --import tsx window/server/index.ts",
     "window:check": "node --import tsx window/server/check.ts",
@@ -33,12 +33,13 @@
     "qa": "node --import tsx tools/qa/qa.ts",
     "approvals": "node --import tsx tools/approvals/approvals.ts",
     "eval:greenlight-chair": "node --env-file-if-exists=.env --import tsx scripts/eval-greenlight-chair.ts",
-    "eval:game-director-design": "node --env-file-if-exists=.env --import tsx scripts/eval-game-director-design.ts",
+    "eval:game-design-director": "node --env-file-if-exists=.env --import tsx scripts/eval-game-design-director.ts",
     "new-game": "node --import tsx tools/gamerepo/new-game.ts",
     "art": "node --import tsx tools/art/art.ts",
     "eval:art-director": "node --env-file-if-exists=.env --import tsx scripts/eval-art-director.ts",
     "eval:sprite-artist": "node --env-file-if-exists=.env --import tsx scripts/eval-artists.ts",
-    "eval:env-ui-artist": "node --env-file-if-exists=.env --import tsx scripts/eval-artists.ts"
+    "eval:env-ui-artist": "node --env-file-if-exists=.env --import tsx scripts/eval-artists.ts",
+    "eval:ui-ux-designer": "node --env-file-if-exists=.env --import tsx scripts/eval-ui-ux-designer.ts"
   },
   "dependencies": {
     "@usenaive-sdk/managed-agents": "^0.12.1",

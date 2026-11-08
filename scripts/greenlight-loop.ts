@@ -16,7 +16,7 @@ const brief = readFileSync(values.brief, "utf8");
 const maxRounds = Number(values.rounds), need = Number(values.need);
 
 const naive = naiveClient();
-const director = await loadAgent("game-director");
+const director = await loadAgent("pitch-writer");
 const critic = await loadAgent("feasibility-critic");
 const loopDir = path.join(RUNS_DIR, `greenlight-${new Date().toISOString().replace(/[-:]/g, "").slice(0, 15)}`);
 mkdirSync(loopDir, { recursive: true });

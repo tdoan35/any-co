@@ -1,15 +1,16 @@
-// Paid art generation over the two providers researched in PROVIDERS.md (T3).
-// One interface, provider chosen per call. Keys come only from env and never appear in
-// results, logs, or errors. Every call reports cost_micro_usd (reported when the provider
-// tells us, estimated from the documented price table otherwise — never 0 for a paid call).
+// Art generation over the two paid providers researched in PROVIDERS.md (T3) and the local lab
+// ComfyUI ("comfy", T31). One interface, provider chosen per call. Keys come only from env and never
+// appear in results, logs, or errors. Every call reports cost_micro_usd (reported when the provider
+// tells us, estimated from the documented price table otherwise — never 0 for a paid call; comfy
+// is local and reports 0 with cost_source "local").
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { decodePng, encodePng } from "./png.ts";
 import { contactSheet } from "./ops.ts";
 
-export type ProviderName = "pixellab" | "retrodiffusion";
+export type ProviderName = "pixellab" | "retrodiffusion" | "comfy";
 
 export interface GenerateInput {
   provider: ProviderName;
@@ -33,6 +34,8 @@ export interface GenerateInput {
   /** PixelLab: collect an already-submitted background job by id instead of submitting a new one
    *  (after a timeout or poll failure). Same inputs as the original call; costs no new generation. */
   resumeJobId?: string;
+  /** comfy only: negative prompt text (default empty). */
+  negative?: string;
 }
 
 export interface GenerateOptions {
@@ -52,7 +55,7 @@ export interface GenerateResult {
   /** Workspace-relative paths of the PNGs written. */
   images: string[];
   cost_micro_usd: number;
-  cost_source: "reported" | "estimated" | "collected";
+  cost_source: "reported" | "estimated" | "collected" | "local";
   /** Provider facts (job/task ids, balances, model). No auth material, no image payloads. */
   metadata: Record<string, unknown>;
 }
@@ -126,6 +129,19 @@ export class ProviderExhausted extends Error {
     this.name = "ProviderExhausted";
     this.provider = provider;
     this.remaining_balance = remaining;
+  }
+}
+
+/**
+ * The provider cannot be reached right now (comfy: the lab is down or not started). Transient: never
+ * persisted as exhausted, so the next call probes again; the capability falls back to pixellab once.
+ */
+export class ProviderUnavailable extends Error {
+  provider: ProviderName;
+  constructor(provider: ProviderName, detail: string) {
+    super(`${provider} is unavailable (${detail}); it is not marked exhausted, so a later call tries it again`);
+    this.name = "ProviderUnavailable";
+    this.provider = provider;
   }
 }
 
@@ -241,6 +257,7 @@ export async function generate(input: GenerateInput, opts: GenerateOptions): Pro
   if (input.resumeJobId !== undefined && input.provider !== "pixellab") throw new Error("resume_job_id collects PixelLab background jobs only");
   if (input.resumeJobId !== undefined && !/^[A-Za-z0-9_-]{1,80}$/.test(input.resumeJobId)) throw new Error(`resume_job_id "${input.resumeJobId}" is not a job id`);
   if (input.provider === "retrodiffusion") return retrodiffusion(input, opts, env, fetchImpl, deadline, sleep);
+  if (input.provider === "comfy") return comfy(input, opts, env, fetchImpl, deadline, sleep);
   return pixellab(input, opts, env, fetchImpl, deadline, sleep);
 }
 
@@ -648,12 +665,197 @@ async function pixellab(
   };
 }
 
+// ---------- comfy: the isolated lab ComfyUI (T31). Local, free, stills only. ----------
+
+/**
+ * The lab's frozen recipe (fabric-character-lab HANDOFF.md + generate_agent_set.py, read 2026-11-08):
+ * NovaPixelILV3 + NoobAI IP-Adapter at 0.65 with CLIP ViT-H on the reference, 768², 30 steps, CFG 7,
+ * euler_ancestral/normal, seed 42 unless the caller fixes one per character. No pose ControlNet.
+ */
+export const COMFY_RECIPE = {
+  checkpoint: "NovaPixelILV3.safetensors",
+  ipadapter: "ip_adapter_Noobtest_800000.bin",
+  ipa_weight: 0.65,
+  clip_vision: "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors",
+  size: 768,
+  steps: 30,
+  cfg: 7,
+  sampler: "euler_ancestral",
+  scheduler: "normal",
+  seed: 42,
+} as const;
+export const COMFY_DEFAULT_BASE_URL = "http://100.96.19.87:8190";
+/** The production ComfyUI port on the same host: never used by the studio. */
+export const COMFY_PRODUCTION_PORT = "8188";
+const COMFY_PROBE_MS = 5000;
+const COMFY_SAVE_NODE = "7";
+
+/** COMFY_BASE_URL (or the lab default), refusing the production port and non-http(s) URLs. */
+export function comfyBaseUrl(opts: Pick<GenerateOptions, "baseUrl">, env: Record<string, string | undefined>): string {
+  const raw = (opts.baseUrl?.comfy?.trim() || env.COMFY_BASE_URL?.trim() || COMFY_DEFAULT_BASE_URL).replace(/\/+$/, ""); // empty = unset (.env.example)
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`COMFY_BASE_URL "${raw}" is not a URL`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error(`COMFY_BASE_URL "${raw}" must be http(s)`);
+  if (url.port === COMFY_PRODUCTION_PORT)
+    throw new Error(`refused: ${raw} is port ${COMFY_PRODUCTION_PORT}, the production ComfyUI. The studio uses only the isolated lab (default ${COMFY_DEFAULT_BASE_URL})`);
+  return raw;
+}
+
+/** The recipe as a ComfyUI API graph; with `reference` (an uploaded image name) the model goes through IP-Adapter. */
+export function comfyGraph(o: { prompt: string; negative: string; seed: number; reference?: string; prefix: string }): Record<string, { class_type: string; inputs: Record<string, unknown> }> {
+  const r = COMFY_RECIPE;
+  const graph: Record<string, { class_type: string; inputs: Record<string, unknown> }> = {
+    "1": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: r.checkpoint } },
+    "2": { class_type: "CLIPTextEncode", inputs: { clip: ["1", 1], text: o.prompt } },
+    "3": { class_type: "CLIPTextEncode", inputs: { clip: ["1", 1], text: o.negative } },
+    "4": { class_type: "EmptyLatentImage", inputs: { width: r.size, height: r.size, batch_size: 1 } },
+    "5": {
+      class_type: "KSampler",
+      inputs: { model: ["1", 0], positive: ["2", 0], negative: ["3", 0], latent_image: ["4", 0], seed: o.seed, steps: r.steps, cfg: r.cfg, sampler_name: r.sampler, scheduler: r.scheduler, denoise: 1 },
+    },
+    "6": { class_type: "VAEDecode", inputs: { samples: ["5", 0], vae: ["1", 2] } },
+    [COMFY_SAVE_NODE]: { class_type: "SaveImage", inputs: { images: ["6", 0], filename_prefix: o.prefix } },
+  };
+  if (o.reference !== undefined) {
+    graph["8"] = { class_type: "LoadImage", inputs: { image: o.reference } };
+    graph["9"] = { class_type: "IPAdapterModelLoader", inputs: { ipadapter_file: r.ipadapter } };
+    graph["10"] = { class_type: "CLIPVisionLoader", inputs: { clip_name: r.clip_vision } };
+    graph["11"] = {
+      class_type: "IPAdapterAdvanced",
+      inputs: { model: ["1", 0], ipadapter: ["9", 0], image: ["8", 0], clip_vision: ["10", 0], weight: r.ipa_weight, weight_type: "linear", combine_embeds: "concat", start_at: 0, end_at: 1, embeds_scaling: "V only" },
+    };
+    graph["5"].inputs.model = ["11", 0];
+  }
+  return graph;
+}
+
+/**
+ * One lab request. A connection that never reached the lab is ProviderUnavailable (the lab went
+ * down: fall back); anything else is a plain error. Nothing is ever billed.
+ */
+async function comfyCall(fetchImpl: typeof fetch, base: string, route: string, init: RequestInit, deadline: number): Promise<{ status: number; body: any }> {
+  try {
+    return await httpJson(fetchImpl, `${base}${route}`, init, deadline);
+  } catch (e) {
+    if (neverSent(e)) throw new ProviderUnavailable("comfy", `${base}${route}: ${(e as Error).message}${(e as any)?.cause?.code ? ` (${(e as any).cause.code})` : ""}`);
+    if (Date.now() >= deadline) throw new Error(`comfy ${route} hit the deadline`);
+    throw new Error(`comfy ${route} failed: ${(e as Error).message}`);
+  }
+}
+
+/**
+ * Stills from the lab: health probe (GET /system_stats) → reference upload (POST /upload/image) →
+ * POST /prompt with the frozen graph → poll GET /history/<id> → GET /view per output image. The
+ * provider never starts or stops servers. Always 768x768 and opaque: postprocess snap/lock/outline
+ * brings it to the manifest grid and palette.
+ */
+async function comfy(
+  input: GenerateInput,
+  opts: GenerateOptions,
+  env: Record<string, string | undefined>,
+  fetchImpl: typeof fetch,
+  deadline: number,
+  sleep: (ms: number) => Promise<void>,
+): Promise<GenerateResult> {
+  if (input.frames !== undefined) throw new Error("comfy makes stills only (frozen recipe); animate the still with pixellab (frames + reference)");
+  const base = comfyBaseUrl(opts, env);
+  const ref = input.reference ? await readReference(opts.workspace, input.reference) : null; // path safety before any request
+
+  // Health probe, short: an unreachable or unready lab moves the call elsewhere instead of hanging.
+  try {
+    const probe = await fetchImpl(`${base}/system_stats`, { signal: AbortSignal.timeout(Math.max(1, Math.min(COMFY_PROBE_MS, deadline - Date.now()))) });
+    await probe.arrayBuffer().catch(() => undefined);
+    if (!probe.ok) throw new ProviderUnavailable("comfy", `${base}/system_stats answered ${probe.status}`);
+  } catch (e) {
+    if (e instanceof ProviderUnavailable) throw e;
+    throw new ProviderUnavailable("comfy", `${base}/system_stats: ${(e as Error).message}${(e as any)?.cause?.code ? ` (${(e as any).cause.code})` : ""}`);
+  }
+
+  let uploaded: string | undefined;
+  if (ref) {
+    const bytes = Buffer.from(ref.base64, "base64");
+    const name = `anyco-ref-${createHash("sha256").update(bytes).digest("hex").slice(0, 16)}.png`;
+    const form = new FormData();
+    form.append("image", new Blob([bytes], { type: "image/png" }), name);
+    form.append("overwrite", "true");
+    const up = await comfyCall(fetchImpl, base, "/upload/image", { method: "POST", body: form }, deadline);
+    if (up.status >= 400 || typeof up.body?.name !== "string")
+      throw new Error(`comfy reference upload failed (${up.status}): ${JSON.stringify(up.body).slice(0, 300)}`);
+    uploaded = [up.body.subfolder, up.body.name].filter((x: unknown) => typeof x === "string" && x).join("/");
+  }
+
+  const seed = input.seed ?? COMFY_RECIPE.seed;
+  const graph = comfyGraph({ prompt: input.prompt, negative: input.negative ?? "", seed, reference: uploaded, prefix: `anyco/${randomUUID()}` });
+  const sub = await comfyCall(fetchImpl, base, "/prompt", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: graph, client_id: "anyco-art" }) }, deadline);
+  const nodeErrors = sub.body?.node_errors && Object.keys(sub.body.node_errors).length > 0 ? sub.body.node_errors : null;
+  if (sub.status >= 400 || nodeErrors || sub.body?.error)
+    throw new Error(`comfy rejected the graph (${sub.status}): ${JSON.stringify(sub.body?.error ?? nodeErrors ?? sub.body).slice(0, 400)}`);
+  const promptId = sub.body?.prompt_id;
+  if (typeof promptId !== "string" || !/^[A-Za-z0-9_-]{1,80}$/.test(promptId)) throw new Error(`comfy returned no prompt_id: ${JSON.stringify(sub.body).slice(0, 300)}`);
+
+  const timedOut = () => new Error(`comfy generation timed out after ${opts.timeoutMs} ms (prompt ${promptId}; it may still finish in the lab's queue, nothing is billed)`);
+  let images: Array<{ filename?: unknown; subfolder?: unknown; type?: unknown }> = [];
+  for (;;) {
+    if (Date.now() > deadline) throw timedOut();
+    let h: { status: number; body: any };
+    try {
+      h = await comfyCall(fetchImpl, base, `/history/${promptId}`, {}, deadline);
+    } catch (e) {
+      if (Date.now() >= deadline) throw timedOut();
+      throw e;
+    }
+    if (h.status >= 400) throw new Error(`comfy history poll failed (${h.status}): ${JSON.stringify(h.body).slice(0, 300)}`);
+    const entry = h.body?.[promptId];
+    if (entry) {
+      if (entry.status?.status_str === "error") throw new Error(`comfy job failed: ${JSON.stringify(entry.status?.messages ?? entry.status).slice(0, 400)}`);
+      const out = entry.outputs?.[COMFY_SAVE_NODE]?.images;
+      if (Array.isArray(out) && out.length > 0) {
+        images = out;
+        break;
+      }
+      if (entry.status?.completed) throw new Error(`comfy job completed without an image: ${JSON.stringify(entry).slice(0, 300)}`);
+    }
+    await sleep(opts.pollIntervalMs ?? 2000);
+  }
+
+  const cap = keepCandidates(images, input.maxCandidates);
+  const pngs: Uint8Array[][] = [];
+  for (const im of cap.kept) {
+    if (typeof im.filename !== "string") throw new Error(`comfy output has no filename: ${JSON.stringify(im).slice(0, 200)}`);
+    const q = new URLSearchParams({ filename: im.filename, subfolder: typeof im.subfolder === "string" ? im.subfolder : "", type: typeof im.type === "string" ? im.type : "output" });
+    try {
+      pngs.push([await download(fetchImpl, `${base}/view?${q}`, deadline)]);
+    } catch (e) {
+      if (Date.now() >= deadline) throw timedOut();
+      throw e;
+    }
+  }
+  const written = await writeImages(opts.workspace, input.out, pngs);
+  const first = decodePng(pngs[0][0]);
+  return {
+    provider: "comfy",
+    images: written,
+    cost_micro_usd: 0,
+    cost_source: "local",
+    metadata: {
+      prompt_id: promptId, base_url: base, method: uploaded ? "ipa" : "text", seed, reference_uploaded: uploaded ?? null,
+      recipe: COMFY_RECIPE, size: { w: first.width, h: first.height }, requested_size: { w: input.width, h: input.height },
+      candidates_discarded: cap.discarded,
+      notes: ["comfy renders an opaque 768x768 image (the recipe has no background removal); use postprocess snap/lock/outline to reach the manifest size and palette"],
+    },
+  };
+}
+
 // ---------- free reads: cost quotes and balances (T19). Never a billing or purchase endpoint. ----------
 
 export interface Quote {
   provider: ProviderName;
   per_call_usd: number;
-  source: "check_cost" | "price table";
+  source: "check_cost" | "price table" | "local";
   remaining_balance: number | null;
   unit: "usd" | "generations";
   total?: number | null;
@@ -669,6 +871,8 @@ export async function quote(input: GenerateInput, opts: GenerateOptions): Promis
   const env = opts.env ?? process.env;
   const fetchImpl = opts.fetchImpl ?? fetch;
   const deadline = Date.now() + (opts.timeoutMs ?? 30_000);
+  if (input.provider === "comfy")
+    return { provider: "comfy", per_call_usd: 0, source: "local", remaining_balance: null, unit: "usd", total: null, note: "the local lab is free and has no balance; it can be down (art_generate then falls back to pixellab)" };
   if (input.provider === "pixellab") {
     const b = await balance("pixellab", opts).catch(() => null);
     const anim = input.frames !== undefined;
@@ -717,6 +921,7 @@ export async function balance(provider: ProviderName, opts: Omit<GenerateOptions
   const env = opts.env ?? process.env;
   const fetchImpl = opts.fetchImpl ?? fetch;
   const deadline = Date.now() + (opts.timeoutMs ?? 15_000);
+  if (provider === "comfy") return null; // local lab: no balance
   if (provider === "retrodiffusion") {
     const key = requireKey(env, "RETRO_DIFFUSION_API_KEY");
     const base = (opts.baseUrl?.retrodiffusion ?? env.RETRO_DIFFUSION_BASE_URL ?? "https://api.retrodiffusion.ai").replace(/\/$/, "");

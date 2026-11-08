@@ -18,13 +18,25 @@ export interface GateThresholds {
   maxFrameDrift?: number;
   /** Max fraction of differing pixels between the asset's frame 0 and its anchor's frame 0 (default 0.5). */
   maxAnchorDrift?: number;
+  /** anchor_mode "style": max total-variation distance between the non-outline opaque-pixel color histograms of asset and anchor frame 0 (default 0.95). */
+  maxPaletteDistance?: number;
+  /** anchor_mode "style": max |luma range(asset) − luma range(anchor)|, ranges are p95−p5 of opaque-pixel luma in 0..1 (default 0.4). */
+  maxLumaRangeDelta?: number;
+  /** anchor_mode "style": min share of frame-0 edge pixels (opaque, 4-adjacent to transparent) in the outline color (default 0.8). */
+  minOutlineShare?: number;
 }
 
 export const DEFAULT_THRESHOLDS: Required<GateThresholds> = {
   maxOffPaletteShare: 0,
   maxFrameDrift: 0.5,
   maxAnchorDrift: 0.5,
+  maxPaletteDistance: 0.95,
+  maxLumaRangeDelta: 0.4,
+  minOutlineShare: 0.8,
 };
+
+/** How an asset is compared to its anchor: same subject (pixel drift) or same style, different subject (style metrics only). */
+export type AnchorMode = "same-subject" | "style";
 
 export interface GateOptions {
   schemaPath?: string;
@@ -41,6 +53,14 @@ export interface AssetNumbers {
   offPaletteShare?: number;
   frameDrift?: number[];
   anchorDrift?: number | null;
+  /** The drift basis used (null: anchor sheet, or the entry was refused for a missing anchor_mode). */
+  anchorMode?: AnchorMode | null;
+  /** Style mode only: the numbers style_similarity and style_outline gate on (frame 0 vs anchor frame 0). */
+  paletteDistance?: number | null;
+  lumaRange?: number | null;
+  anchorLumaRange?: number | null;
+  outlineColor?: string | null;
+  outlineShare?: number | null;
 }
 
 export interface AssetResult {
@@ -145,11 +165,14 @@ interface ManifestAsset {
   frames?: number;
   palette?: string[];
   anchor?: string | null;
+  anchor_mode?: AnchorMode;
+  outline?: string | null;
 }
 
 interface Manifest {
   grid: { w: number; h: number };
   palette: string[];
+  outline?: string | null;
   assets: ManifestAsset[];
 }
 
@@ -189,6 +212,88 @@ function differingShare(a: RgbaImage, b: RgbaImage): number | null {
   for (let i = 0; i < n * 4; i += 4)
     if (a.data[i] !== b.data[i] || a.data[i + 1] !== b.data[i + 1] || a.data[i + 2] !== b.data[i + 2] || a.data[i + 3] !== b.data[i + 3]) diff++;
   return diff / n;
+}
+
+// ---------- style metrics (subject-independent; anchor_mode "style") ----------
+
+const hexOf = (d: Uint8Array, i: number) => `#${((d[i] << 16) | (d[i + 1] << 8) | d[i + 2]).toString(16).padStart(6, "0")}`;
+
+/** Color histogram (share of opaque pixels per color) and opaque-pixel lumas (0..1). */
+function colorStats(img: RgbaImage): { hist: Map<string, number>; lumas: number[] } {
+  const counts = new Map<string, number>();
+  const lumas: number[] = [];
+  for (let i = 0; i < img.width * img.height * 4; i += 4) {
+    if (img.data[i + 3] === 0) continue;
+    const hex = hexOf(img.data, i);
+    counts.set(hex, (counts.get(hex) ?? 0) + 1);
+    lumas.push((0.299 * img.data[i] + 0.587 * img.data[i + 1] + 0.114 * img.data[i + 2]) / 255);
+  }
+  const hist = new Map<string, number>();
+  for (const [hex, n] of counts) hist.set(hex, n / lumas.length);
+  return { hist, lumas };
+}
+
+/** Opaque-pixel color histogram without `exclude` (the outline color), renormalized to sum 1. */
+function interiorHist(img: RgbaImage, exclude: string | null): Map<string, number> {
+  const hist = colorStats(img).hist;
+  const ex = exclude?.toLowerCase();
+  if (ex) hist.delete(ex);
+  const total = [...hist.values()].reduce((x, y) => x + y, 0);
+  for (const [hex, share] of hist) hist.set(hex, share / total);
+  return hist;
+}
+
+/**
+ * Total-variation distance of two color histograms: 0 = same color mix, 1 = no color in common.
+ * `exclude` drops the outline color first: both images share it heavily, which would cap the
+ * distance well below 1 whatever the interior is. null = no pixels left on one side.
+ */
+export function paletteDistance(a: RgbaImage, b: RgbaImage, exclude: string | null = null): number | null {
+  const ha = interiorHist(a, exclude);
+  const hb = interiorHist(b, exclude);
+  if (ha.size === 0 || hb.size === 0) return null;
+  let sum = 0;
+  for (const hex of new Set([...ha.keys(), ...hb.keys()])) sum += Math.abs((ha.get(hex) ?? 0) - (hb.get(hex) ?? 0));
+  return sum / 2;
+}
+
+/** p95 − p5 of opaque-pixel luma (0..1): the light/dark contrast span, robust to a stray pixel. */
+export function lumaRange(img: RgbaImage): number | null {
+  const lumas = colorStats(img).lumas.sort((x, y) => x - y);
+  if (lumas.length === 0) return null;
+  const at = (q: number) => lumas[Math.min(lumas.length - 1, Math.floor(q * lumas.length))];
+  return at(0.95) - at(0.05);
+}
+
+/** Colors of the edge pixels: opaque pixels 4-adjacent to a transparent one (the frame border does not count). */
+function edgeColors(img: RgbaImage): string[] {
+  const out: string[] = [];
+  const { width: w, height: h, data } = img;
+  const clear = (x: number, y: number) => x >= 0 && y >= 0 && x < w && y < h && data[(y * w + x) * 4 + 3] === 0;
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      if (data[i + 3] === 0) continue;
+      if (clear(x - 1, y) || clear(x + 1, y) || clear(x, y - 1) || clear(x, y + 1)) out.push(hexOf(data, i));
+    }
+  return out;
+}
+
+/** Share of edge pixels in `color` (0 when the image has no transparent edge at all). */
+export function outlineShare(img: RgbaImage, color: string): number {
+  const edge = edgeColors(img);
+  const c = color.toLowerCase();
+  return edge.length === 0 ? 0 : edge.filter((e) => e === c).length / edge.length;
+}
+
+/** The anchor's outline: its most common edge color and that color's share of the edge. */
+export function dominantEdge(img: RgbaImage): { color: string; share: number } | null {
+  const edge = edgeColors(img);
+  if (edge.length === 0) return null;
+  const counts = new Map<string, number>();
+  for (const e of edge) counts.set(e, (counts.get(e) ?? 0) + 1);
+  const [color, n] = [...counts].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))[0];
+  return { color, share: n / edge.length };
 }
 
 export function runGate(repoDir: string, opts?: GateOptions): GateReport {
@@ -324,6 +429,7 @@ export function runGate(repoDir: string, opts?: GateOptions): GateReport {
       );
     }
 
+    const anchorValid = !!asset.anchor && byId.has(asset.anchor) && asset.anchor !== asset.id;
     if (asset.anchor === null || asset.anchor === undefined) {
       checks.push(pass("anchor", "anchor sheet"));
     } else {
@@ -334,6 +440,29 @@ export function runGate(repoDir: string, opts?: GateOptions): GateReport {
           : fail("anchor", target ? "anchor references itself" : `anchor "${asset.anchor}" is not a manifest id`),
       );
     }
+
+    // The drift basis is declared, never guessed: a strip defaults to same-subject (its frames are one
+    // subject); a single-frame asset with an anchor may be a different subject and must say which.
+    let mode: AnchorMode | null = null;
+    if (asset.anchor === null || asset.anchor === undefined) {
+      if (asset.anchor_mode)
+        checks.push(fail("anchor_mode", `anchor_mode "${asset.anchor_mode}" needs an anchor to compare against; anchor sheets (anchor: null) take none`));
+    } else if (asset.anchor_mode) {
+      mode = asset.anchor_mode;
+      checks.push(pass("anchor_mode", `${mode} (declared)`));
+    } else if (frameCount > 1) {
+      mode = "same-subject";
+      checks.push(pass("anchor_mode", "same-subject (default for strips)"));
+    } else {
+      checks.push(
+        fail(
+          "anchor_mode",
+          `single-frame asset with anchor "${asset.anchor}" has no anchor_mode. Fix: set anchor_mode: "style" for cross-subject family members ` +
+            `(a different subject in the anchor's style: palette, contrast and outline), "same-subject" for frames of one subject (pixel drift)`,
+        ),
+      );
+    }
+    numbers.anchorMode = mode;
 
     const divisible = img.width % frameCount === 0;
     const frames = divisible ? splitStrip(img, frameCount) : [img];
@@ -354,8 +483,59 @@ export function runGate(repoDir: string, opts?: GateOptions): GateReport {
     );
 
     numbers.anchorDrift = null;
-    if (asset.anchor && byId.has(asset.anchor) && asset.anchor !== asset.id) {
-      const anchorAsset = byId.get(asset.anchor)!;
+    if (anchorValid && mode === "style") {
+      checks.push(pass("anchor_drift", "skipped: anchor_mode style (a different subject; style_similarity and style_outline gate instead)"));
+      const anchorAsset = byId.get(asset.anchor!)!;
+      const anchorImg = anchorAsset.path.endsWith(".png") ? decode(anchorAsset) : null;
+      const anchorFrames = anchorAsset.frames ?? 1;
+      const theirs = anchorImg && anchorImg.width % anchorFrames === 0 ? splitStrip(anchorImg, anchorFrames)[0] : null;
+      const mine = frames[0];
+      if (theirs === null) {
+        checks.push(fail("style_similarity", `anchor "${asset.anchor}" is not a decodable PNG with a valid frame layout; nothing to compare the style against`));
+      } else {
+        // Outline color: the entry's, else the manifest's, else the anchor's own (its dominant edge color).
+        let color: string | null;
+        let source: string;
+        if (asset.outline !== undefined) [color, source] = [asset.outline, "entry"];
+        else if (manifest.outline !== undefined) [color, source] = [manifest.outline, "manifest"];
+        else {
+          const edge = dominantEdge(theirs);
+          [color, source] = edge && edge.share >= thresholds.minOutlineShare ? [edge.color, `anchor edge, ${edge.share.toFixed(4)}`] : [null, "anchor has none"];
+        }
+        numbers.outlineColor = color;
+
+        // The color mix is measured on non-outline pixels; the contrast span on all opaque pixels.
+        const dist = paletteDistance(mine, theirs, color);
+        const range = lumaRange(mine);
+        const anchorRange = lumaRange(theirs);
+        numbers.paletteDistance = dist;
+        numbers.lumaRange = range;
+        numbers.anchorLumaRange = anchorRange;
+        if (range === null || anchorRange === null) {
+          checks.push(fail("style_similarity", `${range === null ? "asset" : "anchor"} frame 0 has no opaque pixels`));
+        } else if (dist === null) {
+          checks.push(fail("style_similarity", `${paletteDistance(mine, mine, color) === null ? "asset" : "anchor"} frame 0 has no pixels besides the outline ${color}; no color mix to compare`));
+        } else {
+          const delta = Math.abs(range - anchorRange);
+          const ok = dist <= thresholds.maxPaletteDistance && delta <= thresholds.maxLumaRangeDelta;
+          const detail =
+            `non-outline color-mix distance ${dist.toFixed(4)} (max ${thresholds.maxPaletteDistance}), ` +
+            `luma range ${range.toFixed(4)} vs anchor ${anchorRange.toFixed(4)}, delta ${delta.toFixed(4)} (max ${thresholds.maxLumaRangeDelta})`;
+          checks.push(ok ? pass("style_similarity", detail) : fail("style_similarity", detail));
+        }
+
+        if (color === null) {
+          numbers.outlineShare = null;
+          checks.push(pass("style_outline", `no outline expected (${source})`));
+        } else {
+          const share = outlineShare(mine, color);
+          numbers.outlineShare = share;
+          const detail = `${share.toFixed(4)} of frame-0 edge pixels are outline ${color.toLowerCase()} (${source}; min ${thresholds.minOutlineShare})`;
+          checks.push(share >= thresholds.minOutlineShare ? pass("style_outline", detail) : fail("style_outline", detail));
+        }
+      }
+    } else if (anchorValid && mode === "same-subject") {
+      const anchorAsset = byId.get(asset.anchor!)!;
       const anchorImg = anchorAsset.path.endsWith(".png") ? decode(anchorAsset) : null;
       if (anchorImg) {
         const mine = frames[0];
@@ -372,7 +552,11 @@ export function runGate(repoDir: string, opts?: GateOptions): GateReport {
           checks.push(
             share <= thresholds.maxAnchorDrift
               ? pass("anchor_drift", `frame 0 vs anchor frame 0 difference ${share.toFixed(4)} ≤ ${thresholds.maxAnchorDrift}`)
-              : fail("anchor_drift", `frame 0 vs anchor frame 0 difference ${share.toFixed(4)} exceeds ${thresholds.maxAnchorDrift}`),
+              : fail(
+                  "anchor_drift",
+                  `frame 0 vs anchor frame 0 difference ${share.toFixed(4)} exceeds ${thresholds.maxAnchorDrift}` +
+                    (asset.anchor_mode ? "" : ` (anchor_mode defaulted to same-subject for a strip; set anchor_mode: "style" if this is a different subject)`),
+                ),
           );
         }
       }

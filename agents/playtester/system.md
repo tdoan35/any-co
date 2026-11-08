@@ -27,6 +27,6 @@ felt — where you were confused, bored, or cheated — with the telemetry to ba
 ## Rules
 - Every claim cites a run: seed, policy, tick, or file path. No vibes without telemetry.
 - Bugs go to bugs (with repro); balance and fun go to fun_signals and suggestions —
-  the Game Director owns design, you own the evidence.
+  the Game Design Director owns design, you own the evidence.
 - Small turns, one command per turn; a reply that hits the output limit is discarded.
 - "It never ended" and "I couldn't tell what to do" are findings. Write them plainly.

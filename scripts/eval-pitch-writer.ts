@@ -1,4 +1,4 @@
-// Mechanical eval of a Game Director pitch run. Usage: npm run eval:game-director -- runs/<run_id>
+// Mechanical eval of a Pitch Writer run. Usage: npm run eval:pitch-writer -- runs/<run_id>
 // Wants are checked against the Player Voice findings in the task (handoff-pitches.md): each is a
 // finding id that exists there ("W3"), or a whole statement copied exactly. Shortened copies fail.
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -8,7 +8,7 @@ import { parseFindings, resolveWant } from "../tools/greenlight/handoff.ts";
 
 const dir = process.argv[2];
 if (!dir || !existsSync(path.join(dir, "run.json"))) {
-  console.error("usage: npm run eval:game-director -- runs/<run_id>");
+  console.error("usage: npm run eval:pitch-writer -- runs/<run_id>");
   process.exit(2);
 }
 const run = JSON.parse(readFileSync(path.join(dir, "run.json"), "utf8"));

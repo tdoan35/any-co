@@ -23,9 +23,8 @@ export const CAST: Readonly<Record<string, SpriteAvatar>> = {
   "player-voice-analyst": still("megan"),
   "feasibility-critic": still("carlos"),
   "greenlight-chair": still("elliot"),
-  // design: the Game Director wears one face in both modes
-  "game-director": still("diego"),
-  "game-director-design": still("diego"),
+  // design: the design-doc owner keeps Diego. The Pitch Writer is a different agent and has no spare portrait yet.
+  "game-design-director": still("diego"),
   // art / eng / qa
   "art-director": still("maya"),
   "tech-lead": still("jonah"),

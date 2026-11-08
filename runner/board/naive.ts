@@ -133,11 +133,19 @@ export class NaiveBoard implements Board {
   async update(cardId: string, patch: BoardUpdate): Promise<BoardCard> {
     try {
       // No assignee ever: writing it resets the card's wake (docs/team/board.md, PATCH row).
+      // A repoint PATCHes the whole blocked_by list (the SDK's CardPatch carries blocked_by), read from the card now.
+      let blocked_by: string[] | undefined;
+      if (patch.repoint) {
+        const { from, to } = patch.repoint;
+        const current = decode(await this.client.board.cards.get(this.ref, cardId)).blocked_by;
+        blocked_by = [...new Set(current.map((id) => (id === from ? to : id)))];
+      }
       const raw = await this.client.board.cards.update(this.ref, cardId, {
         status: patch.status,
         note: patch.note,
         body: patch.body,
         title: patch.title,
+        ...(blocked_by ? { blocked_by } : {}),
       });
       return decode(raw);
     } catch (e) {
@@ -145,10 +153,11 @@ export class NaiveBoard implements Board {
     }
   }
 
-  async comment(cardId: string, body: string, _author: string): Promise<BoardComment> {
-    // The server signs the comment with the caller's principal; our author value is local-only.
+  async comment(cardId: string, body: string, author: string): Promise<BoardComment> {
+    // The server signs the comment with the caller's principal (this runner's key_, for the dispatcher and every
+    // local agent alike), so the local author rides as a body tag, decoded by comments() (T37).
     try {
-      return await this.client.board.cards.comment(this.ref, cardId, { body });
+      return decodeComment(await this.client.board.cards.comment(this.ref, cardId, { body: tagComment(author, body) }));
     } catch (e) {
       rethrow(e);
     }
@@ -157,9 +166,25 @@ export class NaiveBoard implements Board {
   async comments(cardId: string): Promise<BoardComment[]> {
     try {
       const page = await this.client.board.cards.comments(this.ref, cardId, { limit: 100 });
-      return page.data;
+      return page.data.map(decodeComment);
     } catch (e) {
       rethrow(e);
     }
   }
+}
+
+// ---------- comment authors (T37) ----------
+// Naïve signs every comment: `usr_` a person in the app, `key_` an API key (this runner: dispatcher + local agents),
+// `ses_` a hosted session. The runner's comments carry `[<local author>] ` in front; only a key_-signed comment's
+// tag is trusted, so a hosted session or a person typing "[operator]" cannot pose as another local author.
+const COMMENT_TAG = /^\[([a-z][a-z0-9-]{0,40})\] /;
+
+export function tagComment(author: string, body: string): string {
+  return COMMENT_TAG.test(`[${author}] `) ? `[${author}] ${body}` : body;
+}
+
+export function decodeComment(c: BoardComment): BoardComment {
+  if (!c.author.startsWith("key_")) return c;
+  const m = COMMENT_TAG.exec(c.body);
+  return m ? { ...c, author: m[1], body: c.body.slice(m[0].length) } : c;
 }

@@ -1,9 +1,9 @@
-# Game Director eval (Greenlight pitch mode)
+# Pitch Writer eval (Greenlight pitches)
 
 ```
 node --import tsx scripts/greenlight-handoff.ts runs/<ma-run> --voice runs/<pv-run>
-npm run agent -- game-director --task-file runs/<pv-run>/handoff-pitches.md
-npm run eval:game-director -- runs/<gd-run>
+npm run agent -- pitch-writer --task-file runs/<pv-run>/handoff-pitches.md
+npm run eval:pitch-writer -- runs/<pw-run>
 ```
 Mechanical: gap labels copied exactly from the task; each want is a finding id in the task (`W3`) or its whole
 statement copied exactly (shortened copies fail); comparables are real; 2+ gaps covered.

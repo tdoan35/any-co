@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { defineAgent } from "../../runner/spec.ts";
+import { COMPLETE, defineAgent } from "../../runner/spec.ts";
 
 // One ticket per task, own clone + branch, never merges. Self-test evidence is copied from
 // game_exec output; QA re-runs it. (Roster runs two instances of this spec.)
@@ -11,9 +11,10 @@ export default defineAgent({
   model: "anthropic/claude-opus-5.5", // Naïve catalogue id, used if this agent is ever hosted
   // Nov 7 6 PM: Neon credits ran out ($0.99 left), so local runs go through Naïve's proxy (real money, billed per call). Ty via EA B.
   budget: { cap_usd: 80, max_task_usd: 15, period: "day" }, // Opus via Neon; one feature ticket per run; both engineer runs share this day cap
-  tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow" },
+  tools: { game_repo: "allow", qa_harness: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow" },
   output_schema: z
     .object({
+      complete: COMPLETE,
       ticket: z.string().min(3).max(120).describe("The ticket id/title from the task, copied exactly"),
       summary: z.string().min(20).max(600).describe("What you built and the design choices worth knowing"),
       files: z

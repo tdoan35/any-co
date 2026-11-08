@@ -48,7 +48,16 @@ export async function checkpointGameClone(workspace: string, agent: string, runI
     if (!branch || branch === "main") return { checkpointed, pushed: false, branch, note: "nothing to push from main (the Tech Lead pushes main itself after green builds)" };
     const p = await git(clone, ["push", "-q", "origin", `HEAD:refs/heads/${branch}`], env);
     const commit = (await git(clone, ["rev-parse", "--short", "HEAD"], env)).out;
-    return { checkpointed, pushed: p.code === 0, branch, commit, note: p.code === 0 ? "pushed" : `push failed: ${p.err.slice(0, 300)}` };
+    if (p.code === 0) return { checkpointed, pushed: true, branch, commit, note: "pushed" };
+    // Rejected (origin's branch moved on: non-fast-forward, or a hook refused it). Never force:
+    // put the work on its own wip branch so it is on origin somewhere and nothing is overwritten.
+    const wip = `wip/${agent}-${runId}`;
+    if (branch === wip) return { checkpointed, pushed: false, branch, commit, note: `push failed: ${p.err.slice(0, 300)}` };
+    const w = await git(clone, ["push", "-q", "origin", `HEAD:refs/heads/${wip}`], env);
+    const why = /non-fast-forward|fetch first|\[rejected\]/.test(p.err) ? "non-fast-forward" : "rejected";
+    return w.code === 0
+      ? { checkpointed, pushed: true, branch: wip, commit, note: `pushed to ${wip}: origin's ${branch} was ${why} for this run's history (not forced; merge it from ${wip})` }
+      : { checkpointed, pushed: false, branch, commit, note: `push failed on ${branch} (${p.err.slice(0, 200)}) and on ${wip} (${w.err.slice(0, 200)})` };
   } catch (e) {
     return { checkpointed: false, pushed: false, note: `checkpoint error: ${(e as Error).message}` };
   }

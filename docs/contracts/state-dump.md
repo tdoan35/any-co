@@ -24,6 +24,17 @@ Validated against [state.schema.json](state.schema.json). Summary:
   game fields (`hp`, `state`, `kind`…). Coordinates are pixels, origin top-left, from the
   play-field's top-left. `id` is stable for the entity's lifetime.
 - `errors[]`: non-fatal errors so far this run (`{ tick, message }`); empty in a clean run.
+- `ui[]` (optional): every UI element of the **current phase's screen** — the menu screen while
+  in `menu`, the HUD in `run`, etc.; a dump must never list elements of a phase that is not on
+  screen. Each item:
+  `{ id, rect: [x, y, w, h], z, visible, overlay?, text_px?, parent?, contains? }`.
+  `rect` is in **viewport pixels, origin top-left of the window** (the `--resolution`
+  backbuffer) — not play-field coordinates. `z` is draw order (higher on top); `visible false`
+  elements are listed but excluded from layout checks; `overlay: true` marks tooltips/modals
+  that may overlap anything; `text_px` is the font size when the element renders text;
+  `parent`/`contains` declare nesting so container/child overlaps are allowed. Optional: games
+  without `ui[]` still validate, but the ui-lint release-gate layer then reports
+  "not implemented", not pass.
 
 ## Rules
 - State must be complete enough that two builds given the same seed and inputs either

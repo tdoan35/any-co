@@ -5,8 +5,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileS
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { encodePng, makeImage, type RgbaImage } from "../art/png.ts";
-import { blankIssues, exportCheck, frameStats, missingAutoloads, parseAutoloads, readPck, runPack } from "./export.ts";
+import { decodePng, encodePng, makeImage, type RgbaImage } from "../art/png.ts";
+import { blankIssues, exportCheck, frameStats, missingAutoloads, parseAutoloads, pickFrames, readPck, runPack } from "./export.ts";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const tmp = () => mkdtempSync(path.join(tmpdir(), "qa-export-test-"));
@@ -206,4 +206,20 @@ test("LIVE: games/caravan-cargo-cult main exported in a temp clone: fails while 
     assert.equal(r.exitCode, 1);
     assert.ok(r.checks.some((c) => c.name.endsWith("autoloads shipped") && !c.pass));
   } else assert.equal(r.exitCode, 0, "the tech-lead's export fix has landed: the gate should pass");
+});
+
+test("T33: save_frames copies evenly spaced frames (always the last) out of the run dir for UI review", async () => {
+  assert.deepEqual(pickFrames(12, 3), [3, 7, 11]);
+  assert.deepEqual(pickFrames(5, 12), [0, 1, 2, 3, 4]);
+  assert.deepEqual(pickFrames(90, 1), [89]);
+  assert.deepEqual(pickFrames(0, 3), []);
+  const g = game(SHIPPED);
+  const saveDir = path.join(tmp(), "media", "export-frames");
+  const r = await exportCheck({ gameDir: g, frames: 12, godot: fakeGodot(busy()).bin, saveFrames: 3, saveDir });
+  assert.equal(r.exitCode, 0, JSON.stringify(r.checks));
+  const saved = r.packs[0].run?.saved_frames ?? [];
+  assert.deepEqual(saved.map((f) => path.relative(saveDir, f)), ["web-index/frame-0003.png", "web-index/frame-0007.png", "web-index/frame-0011.png"]);
+  for (const f of saved) assert.equal(decodePng(new Uint8Array(readFileSync(f))).width, busy().width);
+  const none = await exportCheck({ gameDir: g, frames: 4, godot: fakeGodot(busy()).bin });
+  assert.equal(none.packs[0].run?.saved_frames, undefined, "nothing is saved unless asked");
 });

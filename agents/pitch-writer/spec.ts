@@ -2,8 +2,8 @@ import { z } from "zod";
 import { defineAgent } from "../../runner/spec.ts";
 import { MUST_HOURS_BUDGET } from "../../tools/greenlight/feasibility.ts";
 
-// Greenlight mode: three pitches built from the Market Analyst's gaps and the Player Voice
-// Analyst's findings. (Design-doc mode comes after the pick; not built yet.)
+// Three pitches built from the Market Analyst's gaps and the Player Voice Analyst's findings.
+// The design doc after the pick is the Game Design Director's job.
 const Pitch = z
   .object({
     working_title: z.string().min(2).max(40),
@@ -55,8 +55,8 @@ const Pitch = z
   });
 
 export default defineAgent({
-  name: "game-director",
-  description: "Design: in Greenlight, turns market gaps and player findings into three buildable pitches; later owns the design doc.",
+  name: "pitch-writer",
+  description: "Game Design: during Greenlight, turns market gaps and player findings into three buildable pitches.",
   dept: "design",
   runner: "local",
   model: "z-ai/glm-5.3",
