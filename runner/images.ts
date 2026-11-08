@@ -25,3 +25,20 @@ function wireBlocks(blocks: Block[]): Block[] {
 export function wireMessages(messages: Message[]): Message[] {
   return messages.map((m) => (typeof m.content === "string" ? m : { role: m.role, content: wireBlocks(m.content) }));
 }
+
+/** The text a no-image provider sees in place of an image (Naïve's Messages proxy rejects image blocks, Nov 8). */
+export const IMAGE_OMITTED =
+  "[image omitted: this model's provider accepts no images, so you cannot see it. Rely on the tool's text (sizes, gate numbers, palette checks); a human can view the file at the path above.]";
+
+/** Replace every image block (top level or inside a tool_result) with a text note, for providers that reject images. */
+export function stripImages(messages: Message[]): Message[] {
+  const strip = (blocks: Block[]): Block[] =>
+    blocks.map((b): Block =>
+      b.type === "image"
+        ? { type: "text", text: IMAGE_OMITTED }
+        : b.type === "tool_result" && Array.isArray(b.content)
+          ? ({ ...b, content: b.content.map((c) => (c.type === "image" ? { type: "text" as const, text: IMAGE_OMITTED } : c)) } as Block)
+          : b,
+    );
+  return messages.map((m) => (typeof m.content === "string" ? m : { role: m.role, content: strip(m.content) }));
+}

@@ -140,7 +140,8 @@ test("run loop: image reaches both providers in the right wire shape; transcript
   assert.equal(userImg.role, "user");
   assert.equal(userImg.content[0].type, "image_url");
 
-  // NaiveProvider passes the Anthropic shape through untouched (stub client, no network).
+  // NaiveProvider: the Naïve Messages proxy rejects image blocks (Nov 8, "messages.N.content: Invalid input"), so it
+  // sends a text note in the image's place (stub client, no network).
   const sent: unknown[] = [];
   const stub = {
     proxy: {
@@ -156,9 +157,8 @@ test("run loop: image reaches both providers in the right wire shape; transcript
   assert.equal(reply.content[0].type, "text");
   const body = sent[0] as { messages: Array<{ content: Array<Record<string, unknown>> }> };
   const wireTr = (body.messages.at(-1)!.content as Array<Record<string, unknown>>).find((b) => b.type === "tool_result") as { content: Array<Record<string, unknown>> };
-  const wireImg = wireTr.content.find((b) => b.type === "image") as { source: { type: string; data: string } };
-  assert.equal(wireImg.source.type, "base64");
-  assert.deepEqual(Buffer.from(wireImg.source.data, "base64"), PNG);
+  assert.equal(wireTr.content.find((b) => b.type === "image"), undefined);
+  assert.ok(wireTr.content.some((b) => b.type === "text" && /image omitted/.test(String(b.text))));
 });
 
 test("crash after an image turn: resume rebuilds the identical image from the run-dir copy", async () => {
@@ -190,4 +190,30 @@ test("crash after an image turn: resume rebuilds the identical image from the ru
   // And the transcript still has no base64 after the resume.
   const lines = readFileSync(path.join(runsDir, runId, "transcript.jsonl"), "utf8").split("\n").filter(Boolean);
   assert.ok(lines.every((l) => l.length < 4000 && !l.includes('"type":"base64"')));
+});
+
+test("Naïve provider: image blocks (top level and inside tool_result) are sent as a text note, never as images", async () => {
+  const { NaiveProvider } = await import("./providers.ts");
+  const { IMAGE_OMITTED } = await import("./images.ts");
+  let sent: any = null;
+  const client: any = {
+    proxy: {
+      messages: async (body: any) => { sent = body; return { id: "r1", content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } }; },
+      call: async () => ({ billed_micro_usd: 2 }),
+    },
+  };
+  const p = new NaiveProvider(client, "z-ai/glm-5.3", "immediate");
+  const img = { type: "image" as const, source: { type: "base64" as const, media_type: "image/png", data: "eHg=" } };
+  await p.complete({
+    system: "s", max_tokens: 10, tools: [],
+    messages: [
+      { role: "user", content: [{ type: "text", text: "look" }, img] },
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "art_view", input: { path: "a.png" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "text", text: "64x64 sha abc" }, img] }] },
+    ],
+  } as any);
+  const json = JSON.stringify(sent.messages);
+  assert.doesNotMatch(json, /"type":"image"/);
+  assert.equal(json.split(IMAGE_OMITTED.slice(0, 20)).length - 1, 2);
+  assert.match(json, /64x64 sha abc/);
 });

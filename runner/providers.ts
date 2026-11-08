@@ -1,4 +1,5 @@
 import path from "node:path";
+import { stripImages } from "./images.ts";
 import { writeFileSync } from "node:fs";
 // Inference providers for the local runner: Naïve proxy (default), any OpenAI-compatible
 // endpoint (fast external inference, local-only), and a scripted fake for tests.
@@ -141,7 +142,7 @@ export class NaiveProvider implements Provider {
             model: this.model,
             max_tokens: req.max_tokens,
             system: req.system,
-            messages: req.messages as any,
+            messages: stripImages(req.messages) as any, // the Naïve proxy rejects image blocks ("messages.N.content: Invalid input")
             ...(req.tools.length ? { tools: req.tools as any } : {}),
           },
           this.window,
