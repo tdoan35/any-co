@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { decodePng, encodePng, makeImage } from "./png.ts";
@@ -821,5 +821,100 @@ test("T19-4: every reported balance lands in art-credits.jsonl; the low-20% note
     const low = readLedger(ctx.ledgerFile).filter((e) => e.kind === "decision" && e.topic === "art.credits_low");
     assert.equal(low.length, 1, JSON.stringify(low));
     assert.match((low[0] as { decision: string }).decision, /under 20% of today's first reading 10/);
+  });
+});
+
+// ---- T21: PixelLab subscription accounting in generations ----
+
+import { pixellabBalance, keepCandidates } from "./generate.ts";
+
+test("T21-1: PixelLab balance: an active generations subscription wins; else credits.usd", () => {
+  const live = { credits: { type: "usd", usd: 0.0 }, subscription: { type: "generations", status: "active", plan: "Tier 1: Pixel Apprentice", generations: 2000.0, total: 2000.0 } };
+  assert.deepEqual(pixellabBalance(live), { remaining: 2000, unit: "generations", total: 2000 });
+  assert.deepEqual(pixellabBalance({ ...live, subscription: { ...live.subscription, status: "canceled" } }), { remaining: 0, unit: "usd", total: null });
+  assert.deepEqual(pixellabBalance({ credits: { type: "usd", usd: 1.25 }, subscription: null }), { remaining: 1.25, unit: "usd", total: null });
+  assert.equal(pixellabBalance({}), null);
+});
+
+/** Fake PixelLab subscription: each generation spends `perCall` generations; `images` per job. */
+function subscriptionServer(state: { generations: number; perCall: number; images: number }) {
+  return (req: CapturedRequest, _count: number, res: ServerResponse) => {
+    if (req.url === "/v2/balance")
+      return json(res, 200, { credits: { type: "usd", usd: 0.0 }, subscription: { type: "generations", status: "active", plan: "Tier 1", generations: state.generations, total: 2000 } });
+    if (req.method === "POST" && req.url === "/v2/generate-image-v2") {
+      if (state.generations <= 0) return json(res, 402, { detail: "Insufficient generations" });
+      state.generations -= state.perCall;
+      return json(res, 202, { background_job_id: "sub-1", status: "processing", usage: null });
+    }
+    if (req.url === "/v2/background-jobs/sub-1")
+      return json(res, 200, { id: "sub-1", status: "completed", usage: null, last_response: { images: Array.from({ length: state.images }, () => ({ type: "base64", base64: PNG_B64 })) } });
+    return json(res, 404, {});
+  };
+}
+
+async function withSubscription(state: Parameters<typeof subscriptionServer>[0], fn: (h: Harness, ctx: ToolContext) => Promise<void>) {
+  const ws = tempWorkspace();
+  const ctx = capabilityCtx(ws);
+  const prev = { ...process.env };
+  process.env.PIXELLAB_API_KEY = "pl-t21";
+  try {
+    await withServer(subscriptionServer(state), async (h) => {
+      process.env.PIXELLAB_BASE_URL = h.baseUrl;
+      await fn(h, ctx);
+    });
+  } finally {
+    for (const k of ["PIXELLAB_API_KEY", "PIXELLAB_BASE_URL"]) {
+      if (prev[k] === undefined) delete process.env[k];
+      else process.env[k] = prev[k];
+    }
+  }
+}
+
+test("T21-2: each PixelLab call reports generations_used from the balance before/after; credits log carries the unit", async () => {
+  await withSubscription({ generations: 2000, perCall: 4, images: 1 }, async (_h, ctx) => {
+    const r = await gen({ provider: "pixellab", out: "game/assets/a.png" }, ctx);
+    assert.equal(r.is_error, undefined, r.content);
+    const out = JSON.parse(r.content);
+    assert.equal(out.generations_used, 4);
+    assert.deepEqual([out.credits.remaining, out.credits.unit, out.credits.total], [1996, "generations", 2000]);
+    const [line] = readCredits(statePaths(ctx.runsDir).credits);
+    assert.deepEqual([line.provider, line.remaining, line.unit, line.total, line.generations_used], ["pixellab", 1996, "generations", 2000, 4]);
+    // credits.usd is 0 on a subscription account: no false "zero" note
+    assert.equal(readLedger(ctx.ledgerFile).filter((e) => e.kind === "decision" && e.topic === "art.credits_low").length, 0);
+  });
+});
+
+test("T21-1: generations notes at <= 400 and at 0, once each per day; a 402 on the subscription is exhausted", async () => {
+  await withSubscription({ generations: 404, perCall: 4, images: 1 }, async (_h, ctx) => {
+    const thresholds = () => readLedger(ctx.ledgerFile).filter((e) => e.kind === "decision" && e.topic === "art.credits_low").map((e) => (e as { refs?: string[] }).refs![0].split(":").pop());
+    await gen({ provider: "pixellab", out: "game/assets/a.png" }, ctx); // 400 left
+    await gen({ provider: "pixellab", out: "game/assets/b.png" }, ctx); // 396 left
+    assert.deepEqual(thresholds(), ["low400"]);
+  });
+  await withSubscription({ generations: 8, perCall: 4, images: 1 }, async (_h, ctx) => {
+    const notes = () => readLedger(ctx.ledgerFile).filter((e) => e.kind === "decision" && e.topic === "art.credits_low");
+    await gen({ provider: "pixellab", out: "game/assets/a.png" }, ctx); // 4 left: low400
+    await gen({ provider: "pixellab", out: "game/assets/b.png" }, ctx); // 0 left: zero
+    assert.deepEqual(notes().map((e) => (e as { refs?: string[] }).refs![0].split(":").pop()), ["low400", "zero"]);
+    assert.match((notes()[1] as { decision: string }).decision, /0 generations left of 2000/);
+    const r = await gen({ provider: "pixellab", out: "game/assets/c.png" }, ctx); // 402 → exhausted, RD has no key here
+    assert.equal(readProviders(statePaths(ctx.runsDir).providers).pixellab?.exhausted, true, r.content);
+    assert.equal(notes().length, 2, "no duplicate zero note");
+  });
+});
+
+test("T21-3: max_candidates keeps the first N images and discards the rest unwritten", async () => {
+  assert.deepEqual(keepCandidates([1, 2, 3, 4, 5, 6]), { kept: [1, 2, 3, 4], discarded: 2 });
+  assert.deepEqual(keepCandidates([1, 2, 3], 8), { kept: [1, 2, 3], discarded: 0 });
+  assert.deepEqual(keepCandidates([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 99).kept.length, 8);
+  assert.throws(() => IMPLS.art_generate.art_generate.input.parse({ provider: "pixellab", prompt: "x", width: 16, height: 16, out: "a.png", max_candidates: 9 }));
+  await withSubscription({ generations: 2000, perCall: 1, images: 6 }, async (_h, ctx) => {
+    const def = JSON.parse((await gen({ provider: "pixellab", out: "game/assets/many.png" }, ctx)).content);
+    assert.deepEqual(def.images, [0, 1, 2, 3].map((n) => `game/assets/many-${n}.png`));
+    assert.equal(def.metadata.candidates_discarded, 2);
+    assert.equal(existsSync(path.join(ctx.workspace, "game/assets/many-4.png")), false);
+    const two = JSON.parse((await gen({ provider: "pixellab", out: "game/assets/two.png", max_candidates: 2 }, ctx)).content);
+    assert.equal(two.images.length, 2);
+    assert.equal(two.metadata.candidates_discarded, 4);
   });
 });

@@ -13,9 +13,9 @@ import { studioStatusTools } from "./studio-status.ts";
 import { decodePng, encodePng, type RgbaImage } from "../../tools/art/png.ts";
 import { addOutline, contactSheet, lockPalette, snapToGrid, splitStrip, upscaleNearest } from "../../tools/art/ops.ts";
 import { runGate } from "../../tools/art/gate.ts";
-import { ChargedFailure, ProviderExhausted, balance as providerBalance, generate, isAnimation, quote as providerQuote, type GenerateResult, type ProviderName } from "../../tools/art/generate.ts";
+import { ChargedFailure, DEFAULT_CANDIDATES, MAX_CANDIDATES, ProviderExhausted, balance as providerBalance, generate, type Balance, isAnimation, quote as providerQuote, type GenerateResult, type ProviderName } from "../../tools/art/generate.ts";
 import {
-  MAX_REGENERATIONS, PROVIDERS, anchorWinner, countGeneration, generationCount, isExhausted, markExhausted, other, readCredits, readGallery,
+  LOW_GENERATIONS, MAX_REGENERATIONS, PROVIDERS, anchorWinner, countGeneration, generationCount, isExhausted, markExhausted, other, readCredits, readGallery,
   readProviders, recordAnchorWinner, recordCredit, statePaths,
 } from "../../tools/art/credits.ts";
 import { capture as mediaCapture, POLICY as MEDIA_POLICY, type CaptureMode } from "../../tools/media/capture.ts";
@@ -1018,20 +1018,28 @@ async function applyArtPostprocess(
 const providerEnum = z.enum(["pixellab", "retrodiffusion"]);
 
 /** Log a reported balance; write ONE ledger note per low threshold per provider per day. */
-function noteCredits(ctx: ToolContext, provider: ProviderName, remaining: number | null, source: string): { provider: ProviderName; remaining: number | null; low_notes: string[] } {
-  if (remaining === null || !Number.isFinite(remaining)) return { provider, remaining: null, low_notes: [] };
+function noteCredits(
+  ctx: ToolContext, provider: ProviderName, bal: Balance | null, source: string, generationsUsed: number | null = null,
+): { provider: ProviderName; remaining: number | null; unit: Balance["unit"] | null; total: number | null; generations_used: number | null; low_notes: string[] } {
+  if (bal === null || !Number.isFinite(bal.remaining)) return { provider, remaining: null, unit: null, total: null, generations_used: generationsUsed, low_notes: [] };
   const paths = statePaths(ctx.runsDir);
   const ledgerFile = ctx.ledgerFile ?? LEDGER_FILE;
   const noted = (ref: string) => ledgerRead(ledgerFile).some((e) => e.kind === "decision" && e.topic === "art.credits_low" && (e.refs ?? []).includes(ref));
-  const notes = recordCredit(paths.credits, { ts: new Date().toISOString(), provider, remaining, run_id: ctx.run_id ?? "unknown", source }, noted);
+  const line = { ts: new Date().toISOString(), provider, remaining: bal.remaining, unit: bal.unit, total: bal.total, generations_used: generationsUsed, run_id: ctx.run_id ?? "unknown", source };
+  const notes = recordCredit(paths.credits, line, noted);
+  const what = bal.unit === "generations" ? `${bal.remaining} generations left${bal.total !== null ? ` of ${bal.total}` : ""}` : `${bal.remaining} USD left`;
   for (const n of notes)
     ledgerAppend({
       kind: "decision", ts: new Date().toISOString(), agent: ctx.agent ?? "art_generate", run_id: ctx.run_id ?? "unknown", topic: "art.credits_low",
-      decision: n.threshold === "zero" ? `${provider} credits are at ${remaining}: generation moves to the other provider or the procedural floor` : `${provider} credits are low: ${remaining} left, under ${LOW_PCT}% of today's first reading ${n.first_today}`,
-      rationale: "Free-trial credits are not topped up (no purchases). Conserve: anchors only for bake-offs, quote batches, cap regenerations.",
+      decision: n.threshold === "zero"
+        ? `${provider} is out (${what}): generation moves to the other provider or the procedural floor`
+        : n.threshold === "low400"
+          ? `${provider} is low: ${what} (at or under ${LOW_GENERATIONS})`
+          : `${provider} credits are low: ${what}, under ${LOW_PCT}% of today's first reading ${n.first_today}`,
+      rationale: "Credits are not topped up by the harness (no purchases). Conserve: anchors only for bake-offs, quote batches, cap regenerations and candidates.",
       refs: [n.ref, statePaths(ctx.runsDir).credits],
     }, ledgerFile);
-  return { provider, remaining, low_notes: notes.map((n) => n.threshold) };
+  return { provider, remaining: bal.remaining, unit: bal.unit, total: bal.total, generations_used: generationsUsed, low_notes: notes.map((n) => n.threshold) };
 }
 const LOW_PCT = 20;
 
@@ -1042,7 +1050,9 @@ const artGenerate: ToolImpl = {
     "postprocess is set: snap downscales to the manifest grid, lock forces the manifest palette, outline takes the " +
     "style bible's outline color. The manifest must be locked (game_clone) before postprocess can run. " +
     `Credits are free-trial and never topped up: omit provider to use the reference anchor's winning provider; an exhausted provider falls back to the other once; with both gone the result is {exhausted:"all", fallback:"procedural"} at no cost. ` +
-    `Each asset gets one generation plus ${MAX_REGENERATIONS} regenerations. Animation (frames or rd_animation/rd_advanced_animation styles) needs justify. Quote batches with art_quote first.`,
+    `Each asset gets one generation plus ${MAX_REGENERATIONS} regenerations. Animation (frames or rd_animation/rd_advanced_animation styles) needs justify. Quote batches with art_quote first. ` +
+    `max_candidates (default ${DEFAULT_CANDIDATES}, max ${MAX_CANDIDATES}) caps the images kept per call to keep the gallery reviewable; it does not save generations. ` +
+    "PixelLab results report generations_used (subscription balance before vs after).",
   input: z
     .object({
       provider: providerEnum.optional().describe("omit to use the anchor-winning provider of `reference` (art_anchor_winner)"),
@@ -1055,6 +1065,7 @@ const artGenerate: ToolImpl = {
       frames: z.number().int().optional().describe("animation frames_duration (Retro Diffusion only: 4|6|8|10|12|16)"),
       transparent: z.boolean().optional().describe("transparent background (default true)"),
       style: z.string().max(120).optional().describe("Retro Diffusion prompt_style id"),
+      max_candidates: z.number().int().min(1).max(MAX_CANDIDATES).default(DEFAULT_CANDIDATES).describe(`keep at most this many returned images (default ${DEFAULT_CANDIDATES}); extras are discarded unwritten. Keeps the gallery reviewable; it does NOT save generations (the provider bills what it made)`),
       justify: z.string().min(10).max(300).optional().describe("required for animation: why the cheaper ladder steps (cutout parts, in-engine motion) won't do"),
       postprocess: z
         .object({
@@ -1086,6 +1097,7 @@ const artGenerate: ToolImpl = {
     const notes: string[] = [];
     let result: GenerateResult | null = null;
     let credits: ReturnType<typeof noteCredits> | null = null;
+    let before: Balance | null = null;
     for (const p of [requested, other(requested)]) {
       if (isExhausted(paths.providers, p)) {
         exhausted.push(p);
@@ -1097,13 +1109,15 @@ const artGenerate: ToolImpl = {
       }
       if (p !== requested) notes.push(`${requested} is exhausted; tried ${p} once instead (same prompt and size)`);
       try {
-        const { justify: _j, postprocess: _p, ...gen } = i;
-        result = await generate({ ...gen, provider: p }, { workspace: ctx.workspace });
+        const { justify: _j, postprocess: _p, max_candidates, ...gen } = i;
+        // PixelLab: read the (free) balance before and after, so the result says what the call used
+        before = p === "pixellab" ? await providerBalance("pixellab", {}).catch(() => null) : null;
+        result = await generate({ ...gen, provider: p, maxCandidates: max_candidates }, { workspace: ctx.workspace });
         break;
       } catch (e) {
         if (e instanceof ProviderExhausted) {
           markExhausted(paths.providers, p, { remaining_balance: e.remaining_balance, reason: e.message });
-          noteCredits(ctx, p, e.remaining_balance ?? 0, "exhausted");
+          noteCredits(ctx, p, { remaining: e.remaining_balance ?? 0, unit: p === "pixellab" && before?.unit === "generations" ? "generations" : "usd", total: before?.total ?? null }, "exhausted");
           exhausted.push(p);
           continue;
         }
@@ -1125,11 +1139,12 @@ const artGenerate: ToolImpl = {
       };
     }
     const generation = countGeneration(paths.gallery, i.out);
-    const remaining = typeof result.metadata.remaining_balance === "number"
-      ? (result.metadata.remaining_balance as number)
+    const after: Balance | null = typeof result.metadata.remaining_balance === "number"
+      ? { remaining: result.metadata.remaining_balance as number, unit: "usd", total: null }
       : await providerBalance(result.provider, {}).catch(() => null);
-    credits = noteCredits(ctx, result.provider, remaining, "generation");
-    const extra = { generation: `${generation} of ${1 + MAX_REGENERATIONS}`, credits, ...(result.provider !== requested ? { fallback_from: requested } : {}), ...(notes.length ? { notes } : {}) };
+    const used = before && after && before.unit === "generations" && after.unit === "generations" ? Math.round((before.remaining - after.remaining) * 1000) / 1000 : null;
+    credits = noteCredits(ctx, result.provider, after, "generation", used);
+    const extra = { generation: `${generation} of ${1 + MAX_REGENERATIONS}`, credits, ...(used !== null ? { generations_used: used } : {}), ...(result.provider !== requested ? { fallback_from: requested } : {}), ...(notes.length ? { notes } : {}) };
     try {
       let postprocess: Record<string, unknown> | null = null;
       if (i.postprocess && (i.postprocess.snap || i.postprocess.lock || i.postprocess.outline))
@@ -1163,13 +1178,13 @@ const artQuote: ToolImpl = {
     if (isExhausted(paths.providers, i.provider)) return { content: JSON.stringify({ provider: i.provider, exhausted: true, per_call_usd: null, total_usd: null }) };
     try {
       const q = await providerQuote({ ...i, out: "quote.png" }, { workspace: ctx.workspace });
-      const credits = noteCredits(ctx, q.provider, q.remaining_balance, "quote");
+      const credits = noteCredits(ctx, q.provider, q.remaining_balance === null ? null : { remaining: q.remaining_balance, unit: q.unit, total: q.total ?? null }, "quote");
       const total = Math.round(q.per_call_usd * count * 1e6) / 1e6;
-      return { content: JSON.stringify({ ...q, count, total_usd: total, affordable: q.remaining_balance === null ? null : q.remaining_balance >= total, credits }) };
+      return { content: JSON.stringify({ ...q, count, total_usd: total, affordable: q.remaining_balance === null || q.unit !== "usd" ? null : q.remaining_balance >= total, credits }) };
     } catch (e) {
       if (e instanceof ProviderExhausted) {
         markExhausted(paths.providers, i.provider, { remaining_balance: e.remaining_balance, reason: e.message });
-        noteCredits(ctx, i.provider, e.remaining_balance ?? 0, "exhausted");
+        noteCredits(ctx, i.provider, { remaining: e.remaining_balance ?? 0, unit: "usd", total: null }, "exhausted");
       }
       return { content: errText(e), is_error: true };
     }
