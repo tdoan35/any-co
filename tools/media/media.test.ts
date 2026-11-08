@@ -55,7 +55,9 @@ test("ticks mode: pauses, steps to each tick exactly, screenshots, quits cleanly
   }
   assert.equal(r.exit.killed, false);
   assert.equal(r.exit.code, 0);
-  assert.deepEqual(r.notes, []);
+  // the fake game's shots are solid colour, so each one is flagged as blank (T43); nothing else is noted
+  assert.equal(r.notes.length, 3);
+  for (const n of r.notes) assert.match(n, /^shot-\d{6}-\d\.png looks blank \(.*\): screenshot\.md wants the frame a player sees/);
   const argv = JSON.parse(readFileSync(path.join(game, "qa", "argv.json"), "utf8"));
   assert.deepEqual(argv, ["--qa", "--seed", "7", "--time-scale", "1", "--autoplay", "--policy", "script:trailer.jsonl", "--resolution", "64x36"]);
 });
@@ -242,8 +244,20 @@ test("R16-2: engine launch args are allowlisted; --path must be the clone", () =
   mkdirSync(clone);
   assert.deepEqual(mediaLaunch(clone, ["godot", "--path", ".", "--rendering-method", "gl_compatibility", "--windowed"]), ["godot", "--path", clone, "--rendering-method", "gl_compatibility", "--windowed"]);
   assert.deepEqual(mediaLaunch(clone, ["godot"]), ["godot"]);
-  for (const bad of [["--script", "x.gd"], ["-s", "x.gd"], ["--main-pack", "x.pck"], ["--editor"], ["-e"], ["--path", "/elsewhere"], ["--path", ".."], ["--rendering-method", "a b"], ["--rendering-method"]])
-    assert.throws(() => mediaLaunch(clone, ["godot", ...bad]), /not allowed|--path must be the game clone|escapes/, bad.join(" "));
+  for (const bad of [["--script", "x.gd"], ["-s", "x.gd"], ["--editor"], ["-e"], ["--path", "/elsewhere"], ["--path", ".."], ["--rendering-method", "a b"], ["--rendering-method"]])
+    assert.throws(() => mediaLaunch(clone, ["godot", ...bad]), /not allowed|--path must be the game clone|escapes|does not exist/, bad.join(" "));
+  // T49: --main-pack, the exported pack, as the project source
+  mkdirSync(path.join(clone, "dist"), { recursive: true });
+  writeFileSync(path.join(clone, "dist", "web.pck"), Buffer.alloc(8));
+  assert.deepEqual(mediaLaunch(clone, ["godot", "--main-pack", "dist/web.pck"]), ["godot", "--main-pack", path.join(clone, "dist", "web.pck")]);
+  // pack + the qa scene (T49: when the export includes qa/, drive the protocol through the pack)
+  writeFileSync(path.join(clone, "qa-driver.tscn"), Buffer.alloc(4));
+  assert.deepEqual(mediaLaunch(clone, ["godot", "--main-pack", "dist/web.pck", "res://qa-driver.tscn"]), ["godot", "--main-pack", path.join(clone, "dist", "web.pck"), "res://qa-driver.tscn"]);
+  assert.throws(() => mediaLaunch(clone, ["godot", "--main-pack", "dist/other.pck"]), /does not exist/);
+  assert.throws(() => mediaLaunch(clone, ["godot", "--main-pack", "dist/../escape.pck"]), /does not exist|escapes/);
+  assert.throws(() => mediaLaunch(clone, ["godot", "--main-pack", "dist/web.pck", "--path", "."]), /mutually exclusive/);
+  assert.throws(() => mediaLaunch(clone, ["godot", "--main-pack", "dist/web.pck", "--main-pack", "dist/web.pck"]), /only one/);
+  assert.throws(() => mediaLaunch(clone, ["godot", "--main-pack", "dist/web.txt"]), /\.pck/);
 });
 
 test("R16-4: playlists and non-media containers are refused before ffmpeg reads them", { skip: NO_FF }, async () => {
@@ -265,4 +279,26 @@ test("R16-4: playlists and non-media containers are refused before ffmpeg reads 
   const ts = path.join(root, "media", "a.ts");
   execFileSync(FFMPEG(), ["-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=64x48:rate=10", "-t", "1", "-pix_fmt", "yuv420p", ts]);
   await assert.rejects(edit({ schema_version: 1, clips: [{ source: "media/a.ts", start_s: 0, end_s: 0.5 }], output: out }, confined(root)), /allowed containers/);
+});
+
+test("T43: an engine launch may name one res:// scene that exists in the clone (a game whose qa/ protocol lives outside the main scene)", () => {
+  const ws = mkdtempSync(path.join(tmpdir(), "media-scene-"));
+  const clone = path.join(ws, "game");
+  mkdirSync(path.join(clone, "qa"), { recursive: true });
+  writeFileSync(path.join(clone, "qa", "driver.tscn"), "[gd_scene]\n");
+  assert.deepEqual(mediaLaunch(clone, ["godot", "--path", ".", "res://qa/driver.tscn"]), ["godot", "--path", clone, "res://qa/driver.tscn"]);
+  assert.deepEqual(mediaLaunch(clone, ["godot", "--headless", "res://qa/driver.tscn"]), ["godot", "--headless", "res://qa/driver.tscn"]);
+  assert.throws(() => mediaLaunch(clone, ["godot", "res://qa/missing.tscn"]), /does not exist in the game clone/);
+  assert.throws(() => mediaLaunch(clone, ["godot", "res://qa/driver.tscn", "res://qa/driver.tscn"]), /not allowed/, "one scene only");
+  assert.throws(() => mediaLaunch(clone, ["godot", "res://../outside.tscn"]), /not allowed|escapes|does not exist/);
+  assert.throws(() => mediaLaunch(clone, ["godot", "res://qa/driver.gd"]), /not allowed/, "a script is not a scene");
+  assert.throws(() => mediaLaunch(clone, ["godot", "qa/driver.tscn"]), /not allowed/, "only the res:// form");
+});
+
+test("T43: when the run ends before a requested tick, ticks mode keeps the stills already taken and says which ticks were missed", async () => {
+  const { game, out } = tempGame();
+  const r = await capture({ ...base(game, out), env: { FAKE_MODE: "quit-at-run-end" }, mode: { kind: "ticks", ticks: [120, 300, 600, 700] } });
+  assert.deepEqual(r.shots.map((s) => s.tick), [120, 300], "the run ended at tick 400; the earlier shots survive");
+  assert.match(r.notes.join(" "), /the game exited \(its run ended\) before tick 600; 2 requested tick\(s\) not captured: 600, 700/);
+  assert.equal(r.exit.code, 0);
 });

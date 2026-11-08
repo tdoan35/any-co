@@ -16,7 +16,7 @@ import { boardFromEnv } from "../../runner/board/index.ts";
 import type { Board } from "../../runner/board/index.ts";
 import { buildRegistry, PROJECT } from "./registry.ts";
 import { galleryRoute } from "./gallery.ts";
-import { mapRun, parseTranscript, type MappedRun } from "./runs.ts";
+import { gameOfRun, mapRun, parseTranscript, type MappedRun } from "./runs.ts";
 import { buildWeave } from "./weave.ts";
 
 export interface ServerOptions {
@@ -91,6 +91,7 @@ export async function startServer(opts: ServerOptions = {}) {
     cache.set(id, { key, lines });
     return lines;
   };
+  const gameCache = new Map<string, string | null>();
   const allRuns = (): MappedRun[] => {
     if (!existsSync(runsDir)) return [];
     const out: MappedRun[] = [];
@@ -98,7 +99,15 @@ export async function startServer(opts: ServerOptions = {}) {
       if (!d.isDirectory()) continue;
       const lines = linesOf(d.name);
       const mapped = lines && mapRun(d.name, lines, deptOf);
-      if (mapped) out.push(mapped);
+      if (mapped) {
+        let game = gameCache.get(d.name);
+        if (game === undefined) {
+          game = gameOfRun(path.join(runsDir, d.name), String(lines.find((l) => l.type === "start")?.task ?? ""));
+          if (game !== null) gameCache.set(d.name, game); // null may become a game once the run clones; re-check
+        }
+        mapped.run.game = game;
+        out.push(mapped);
+      }
     }
     return out.sort((a, b) => Date.parse(a.run.startedAt) - Date.parse(b.run.startedAt));
   };

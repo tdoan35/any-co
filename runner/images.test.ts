@@ -80,12 +80,12 @@ test("art_view: image block + size, content-addressed copy, escape and cap refus
   assert.equal(capped.is_error, true);
   assert.match(capped.content, /too large/);
 
-  // A2: a huge but small-in-bytes PNG is capped by dimensions too, unless upscaling.
+  // A2 (T49): a huge but small-in-bytes PNG is DOWNSCALED to the cap, not refused.
   const huge = encodePng({ width: 2000, height: 2000, data: new Uint8Array(2000 * 2000 * 4) });
   writeFileSync(path.join(workspace, "huge.png"), huge);
   const noScale = await artView.run({ path: "huge.png" }, { workspace, naive: null, runsDir, run_id: "r-img" });
-  assert.equal(noScale.is_error, true);
-  assert.match(noScale.content, /1024px per-side cap/);
+  assert.equal(noScale.is_error, undefined, noScale.content);
+  assert.match(noScale.content, /1000×1000 .*shown at 1\/2/);
   const withScale = await artView.run({ path: "huge.png", upscale: 1 }, { workspace, naive: null, runsDir, run_id: "r-img" });
   assert.equal(withScale.is_error, undefined, withScale.content);
 });
@@ -140,7 +140,8 @@ test("run loop: image reaches both providers in the right wire shape; transcript
   assert.equal(userImg.role, "user");
   assert.equal(userImg.content[0].type, "image_url");
 
-  // NaiveProvider passes the Anthropic shape through untouched (stub client, no network).
+  // NaiveProvider: the Naïve Messages proxy rejects image blocks (Nov 8, "messages.N.content: Invalid input"), so it
+  // sends a text note in the image's place (stub client, no network).
   const sent: unknown[] = [];
   const stub = {
     proxy: {
@@ -156,9 +157,8 @@ test("run loop: image reaches both providers in the right wire shape; transcript
   assert.equal(reply.content[0].type, "text");
   const body = sent[0] as { messages: Array<{ content: Array<Record<string, unknown>> }> };
   const wireTr = (body.messages.at(-1)!.content as Array<Record<string, unknown>>).find((b) => b.type === "tool_result") as { content: Array<Record<string, unknown>> };
-  const wireImg = wireTr.content.find((b) => b.type === "image") as { source: { type: string; data: string } };
-  assert.equal(wireImg.source.type, "base64");
-  assert.deepEqual(Buffer.from(wireImg.source.data, "base64"), PNG);
+  assert.equal(wireTr.content.find((b) => b.type === "image"), undefined);
+  assert.ok(wireTr.content.some((b) => b.type === "text" && /image omitted/.test(String(b.text))));
 });
 
 test("crash after an image turn: resume rebuilds the identical image from the run-dir copy", async () => {
@@ -190,4 +190,71 @@ test("crash after an image turn: resume rebuilds the identical image from the ru
   // And the transcript still has no base64 after the resume.
   const lines = readFileSync(path.join(runsDir, runId, "transcript.jsonl"), "utf8").split("\n").filter(Boolean);
   assert.ok(lines.every((l) => l.length < 4000 && !l.includes('"type":"base64"')));
+});
+
+test("Naïve provider: image blocks (top level and inside tool_result) are sent as a text note, never as images", async () => {
+  const { NaiveProvider } = await import("./providers.ts");
+  const { IMAGE_OMITTED } = await import("./images.ts");
+  let sent: any = null;
+  const client: any = {
+    proxy: {
+      messages: async (body: any) => { sent = body; return { id: "r1", content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } }; },
+      call: async () => ({ billed_micro_usd: 2 }),
+    },
+  };
+  const p = new NaiveProvider(client, "z-ai/glm-5.3", "immediate");
+  const img = { type: "image" as const, source: { type: "base64" as const, media_type: "image/png", data: "eHg=" } };
+  await p.complete({
+    system: "s", max_tokens: 10, tools: [],
+    messages: [
+      { role: "user", content: [{ type: "text", text: "look" }, img] },
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "art_view", input: { path: "a.png" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "text", text: "64x64 sha abc" }, img] }] },
+    ],
+  } as any);
+  const json = JSON.stringify(sent.messages);
+  assert.doesNotMatch(json, /"type":"image"/);
+  assert.equal(json.split(IMAGE_OMITTED.slice(0, 20)).length - 1, 2);
+  assert.match(json, /64x64 sha abc/);
+});
+
+// ----- T49: over-cap images are downscaled, not refused -----
+
+test("T49 art_view: 1280x720 downscales to 640x360 at 1/2 with the scale note; odd sizes fit 1024", async () => {
+  const artView = IMPLS.image_view.art_view;
+  const workspace = tmp();
+  const run = (w: number, h: number, extra: Record<string, unknown> = {}) =>
+    artView.run({ path: "shot.png", ...extra }, { workspace, naive: null, runsDir: tmp(), run_id: `r-t49-${w}x${h}` });
+
+  const even = encodePng({ width: 1280, height: 720, data: new Uint8Array(1280 * 720 * 4).fill(9) });
+  writeFileSync(path.join(workspace, "shot.png"), even);
+  const half = await run(1280, 720);
+  assert.equal(half.is_error, undefined, half.content);
+  assert.match(half.content, /^640×360 \(1280x720 shown at 1\/2[^)]*\) PNG/);
+  assert.match(half.content, /1280x720 shown at 1\/2: multiply rect sizes by 2/);
+  const halfImg = decodePng(new Uint8Array(readFileSync(path.join((half.image?.source as { path: string }).path))));
+  assert.equal(halfImg.width, 640);
+  assert.equal(halfImg.height, 360);
+
+  // 1537x864: the half (768x432) fits too -- use an odd height so halving is not clean? half always fits
+  // for anything <= 2048; the fit path takes over above 2048 or on odd halves. 3001x2001: half=1500>1024? no.
+  // The fit branch triggers when half would still exceed the cap: e.g. 4096x2 -> 2048x2? half 2048>1024 -> fit.
+  const tall = encodePng({ width: 4096, height: 2, data: new Uint8Array(4096 * 2 * 4).fill(3) });
+  writeFileSync(path.join(workspace, "wide2.png"), tall);
+  const fit = await artView.run({ path: "wide2.png" }, { workspace, naive: null, runsDir: tmp(), run_id: "r-t49-fit" });
+  assert.match(fit.content, /^1024×\d+ \([^)]*shown at 1\/[^)]*\) PNG/);
+  assert.match(fit.content, /shown at 1\//);
+  // 1152x648 halves cleanly to 576x324 (ticket's 1024x576 is the fit path for non-halvable sizes)
+  const mid = encodePng({ width: 1152, height: 648, data: new Uint8Array(1152 * 648 * 4).fill(3) });
+  writeFileSync(path.join(workspace, "mid.png"), mid);
+  const midOut = await artView.run({ path: "mid.png" }, { workspace, naive: null, runsDir: tmp(), run_id: "r-t49-mid" });
+  assert.match(midOut.content, /^576×324 \([^)]*1\/2[^)]*\) PNG/);
+  assert.match(midOut.content, /shown at 1\/2/);
+
+  // an upscale that would exceed the cap is clamped, not refused (pre-existing behaviour, now
+  // composed with the downscale: a small source still upscales after a big one is reduced)
+  const tiny = encodePng({ width: 300, height: 200, data: new Uint8Array(300 * 200 * 4).fill(5) });
+  writeFileSync(path.join(workspace, "tiny.png"), tiny);
+  const up = await artView.run({ path: "tiny.png", upscale: 8 }, { workspace, naive: null, runsDir: tmp(), run_id: "r-t49-up" });
+  assert.match(up.content, /900×600 \(300x200, x3 nearest-neighbour\) PNG/); // k clamped so the long side <= 1024
 });

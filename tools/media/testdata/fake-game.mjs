@@ -3,7 +3,8 @@
 // docs/contracts (controls, events, screenshot, state-dump) with no game in it. It ticks on a
 // timer, emits standard events on a fixed schedule, and writes solid-colour PNGs on screenshot.
 // FAKE_MODE=no-ready never acks startup; FAKE_MODE=ignore-quit acks quit but keeps running;
-// FAKE_STARTUP_MS delays startup like a real engine boot.
+// FAKE_STARTUP_MS delays startup like a real engine boot. FAKE_MODE=quit-at-run-end exits when the run ends (tick 400),
+// as a real game driver does on a win or loss.
 import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
@@ -80,6 +81,7 @@ const advance = () => {
   if (tick === 400) {
     emit("run_end", { outcome: "loss" });
     over = true;
+    if (mode === "quit-at-run-end") finish();
   }
 };
 const dump = () => atomic(path.join(qa, "state.json"), JSON.stringify({ schema_version: 1, scene: "run", tick, run: { started: true, over, seed: 0, elapsed_ticks: tick }, player: { x: 0, y: 0 }, resources: {}, entities: [], errors: [] }));

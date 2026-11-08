@@ -6,10 +6,13 @@ import { linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:f
 import { hostname } from "node:os";
 import path from "node:path";
 import { RUNS_DIR, stamp, runAgent, denyAll, type Approver, type RunResult } from "./run.ts";
+import { append as ledgerAppend } from "../tools/ledger/ledger.ts";
 import { killSwitchOn } from "./spend.ts";
 import type { AgentSpec } from "./spec.ts";
 import type { Provider } from "./types.ts";
 import type { NaiveClient } from "./providers.ts";
+import { artMerge, gameRepoOfClone, type ArtMergeOptions, type ArtMergeResult } from "../tools/art/merge.ts";
+import { handIn, handInLines, snapshotRun, type HandIn } from "./handoff.ts";
 import { BoardError, completeSupersedes, type Board, type BoardCard, type BoardComment } from "./board/index.ts";
 
 export interface DispatchOptions {
@@ -30,7 +33,19 @@ export interface DispatchOptions {
    *  live run. Return true if the resume path owns the card (it stays doing); return false and
    *  the card is requeued to todo with a comment saying why. */
   onResumeOrphan?: (card: BoardCard) => Promise<boolean>;
+  /** T46: the mechanical art-only merge run when an artist's card closes done with complete:true (default: tools/art/merge.ts). */
+  artMerge?: (gameDir: string, branch: string, opts: ArtMergeOptions) => Promise<ArtMergeResult>;
+  /** Where art.merge ledger decisions go (default: the studio ledger). */
+  ledgerFile?: string;
+  /** T46: the only directory whose direct children may be merged into (default STUDIO_GAMES_DIR, else games/). */
+  gamesRoot?: string;
+  /** PLUG-IN POINT — T47: called after a card closes done/blocked (a todo requeue is not a close).
+   *  studioLoop uses it to trigger an early head cycle when the board goes idle. */
+  onCardClosed?: (cardId: string, status: "done" | "blocked") => void | Promise<void>;
 }
+
+/** Agents whose finished branches are art-only by role: their done cards trigger the mechanical merge (T46). */
+export const ART_AGENTS = new Set(["art-director", "sprite-artist", "sprite-artist-b", "env-ui-artist", "env-ui-artist-b"]);
 
 export interface PassResult {
   started: number;
@@ -236,12 +251,14 @@ export function operatorNotes(comments: BoardComment[], cap = OPERATOR_NOTES_CAP
 }
 
 /** The task handed to an agent: the card, what its finished blockers produced, and the operator's comments on the card. */
-export function cardTask(card: BoardCard, blockers: BoardCard[], comments: BoardComment[] = []): string {
+export function cardTask(card: BoardCard, blockers: BoardCard[], comments: BoardComment[] = [], handins: HandIn[] = []): string {
   const parts = [`# ${card.title}`, card.body].filter(Boolean);
   if (blockers.length) {
+    const files = handInLines(handins);
     parts.push(
       "--- Upstream results (done cards this card waited on) ---\n" +
-        blockers.map((b) => `## ${b.title} (${b.id})\n${b.note ?? "(no note)"}`).join("\n\n"),
+        blockers.map((b) => `## ${b.title} (${b.id})\n${b.note ?? "(no note)"}`).join("\n\n") +
+        (files.length ? `\n\nUpstream files, copied into your workspace (read them with workspace_read):\n${files.join("\n")}` : ""),
     );
   }
   const notes = operatorNotes(comments);
@@ -365,11 +382,46 @@ export class Dispatcher {
       this.opts.log?.(`card ${card.id}: could not read comments (${errText(e)}); starting without operator notes`);
       return [] as BoardComment[];
     });
-    const task = cardTask(card, blockers, comments);
+    // T48: hand in the upstream cards' files at upstream/<card-id>/ in this run's workspace (runAgent keeps what is there)
+    let handins: HandIn[] = [];
+    try {
+      const workspace = path.join(this.opts.runsDir ?? RUNS_DIR, runId, "workspace");
+      mkdirSync(workspace, { recursive: true });
+      handins = handIn(this.opts.runsDir ?? RUNS_DIR, workspace, blockers.map((b) => ({ id: b.id, agent: b.assignee })));
+    } catch (e) {
+      this.opts.log?.(`card ${card.id}: upstream file hand-in failed (${errText(e)}); starting without upstream files`);
+    }
+    const task = cardTask(card, blockers, comments, handins);
     this.opts.log?.(`▶ ${spec.name} on card ${card.id}: ${card.title}`);
     const done = this.run(spec, card, task, runId);
     this.inflight.set(spec.name, done);
     done.finally(() => this.inflight.delete(spec.name)).catch(() => {});
+  }
+
+  /**
+   * T46: merge the artist's agent/<name> branch into the game repo's main with no LLM (tools/art/merge.ts). The game repo is
+   * the run clone's origin. The outcome goes on the card as a comment; a refusal is left for the head (it cards a tech-lead
+   * merge). Never throws: a merge problem must not take the dispatcher down.
+   */
+  private async autoArtMerge(spec: AgentSpec, card: BoardCard, runId: string, runsDir: string): Promise<void> {
+    const board = this.opts.board;
+    const branch = `agent/${spec.name}`;
+    try {
+      const gameDir = gameRepoOfClone(path.join(runsDir, runId, "workspace", "game"), this.opts.gamesRoot);
+      if (!gameDir) {
+        await board.comment(card.id, `art-merge: skipped — run ${runId} has no game clone with a local origin; card a tech-lead merge if ${branch} needs landing`, "dispatcher");
+        return;
+      }
+      const r = await (this.opts.artMerge ?? artMerge)(gameDir, branch, { runsDir, ledgerFile: this.opts.ledgerFile, agent: "dispatcher", run_id: runId });
+      const text = r.ok
+        ? `art-merge: merged ${branch} into main mechanically (${r.mode}, ${r.assets ?? 0} asset file(s), gate ok) @ ${(r.merged ?? "").slice(0, 10)}`
+        : `art-merge: refused — ${r.reason}. Card a tech-lead merge for ${branch}.`;
+      await board.comment(card.id, text, "dispatcher");
+      this.opts.log?.(`${r.ok ? "⇢" : "⇢✗"} card ${card.id} ${text}`);
+    } catch (e) {
+      this.opts.log?.(`✗ card ${card.id}: art-merge error (${errText(e)}); left for the head`);
+      await board.comment(card.id, `art-merge: error — ${errText(e)}. Card a tech-lead merge for ${branch}.`, "dispatcher").catch(() => {});
+    }
   }
 
   private async run(spec: AgentSpec, card: BoardCard, task: string, runId: string): Promise<void> {
@@ -416,6 +468,16 @@ export class Dispatcher {
       return;
     }
     const money = `$${(r.spent_micro_usd / 1e6).toFixed(4)}`;
+    // T48: a run that finished (done, or done-but-not-complete: partial work hands on too) leaves its files for dependents
+    if (r.status === "done") {
+      try {
+        const m = snapshotRun(runsDir, r.run_id, card.id, spec.name, r.output);
+        const copied = m.files.filter((f) => f.copied).length;
+        if (copied || m.files.length) this.opts.log?.(`  card ${card.id}: handed off ${copied} file(s) (${m.files.length - copied} skipped) → runs/handoff/${card.id}/`);
+      } catch (e) {
+        this.opts.log?.(`card ${card.id}: file hand-off snapshot failed (${errText(e)})`);
+      }
+    }
     if (r.status === "done" && isObject(r.output) && r.output.complete === false) {
       // ran to the end but says the work isn't done (T29): never close it as done
       await close("blocked", `not complete: run ${r.run_id}, ${money} — ${agentNote(r)}`);
@@ -423,6 +485,9 @@ export class Dispatcher {
     } else if (r.status === "done") {
       await close("done", `done: run ${r.run_id}, ${money} — ${summary(r)}`);
       this.opts.log?.(`✓ card ${card.id} done: run ${r.run_id}, ${money}`);
+      if (ART_AGENTS.has(spec.name) && isObject(r.output) && r.output.complete === true && process.env.STUDIO_AUTO_ART_MERGE !== "off")
+        await this.autoArtMerge(spec, card, r.run_id, runsDir);
+      await this.opts.onCardClosed?.(card.id, "done");
     } else if (r.status === "killed") {
       // The kill switch stops spend, not the work: requeue so the loop picks the card up
       // again once runs/KILL is gone. (Any other failure blocks the card with the error.)
@@ -433,6 +498,7 @@ export class Dispatcher {
     } else {
       await close("blocked", `${r.status}: run ${r.run_id}, ${money} — ${r.error ?? "(no error text)"}`);
       this.opts.log?.(`✗ card ${card.id} blocked: run ${r.run_id} ended ${r.status}`);
+      await this.opts.onCardClosed?.(card.id, "blocked");
     }
   }
 }
@@ -514,6 +580,55 @@ export async function studioLoop(opts: StudioLoopOptions): Promise<void> {
     };
 
     const headOn = opts.head !== undefined && opts.headEveryMin !== undefined;
+    // T47: an early head cycle when a card closes and no todo card can start. Debounced
+    // (STUDIO_HEAD_EARLY_MIN, default 3, 0 = off), single-flight via headRun, and the early
+    // cycle resets the timed backstop by going through runHead (which stamps lastHeadAt).
+    const earlyMinRaw = process.env.STUDIO_HEAD_EARLY_MIN?.trim();
+    const earlyMin = earlyMinRaw !== undefined && earlyMinRaw !== "" ? Number(earlyMinRaw) : 3;
+    if (earlyMinRaw !== undefined && (!Number.isFinite(earlyMin) || earlyMin < 0))
+      throw new Error(`STUDIO_HEAD_EARLY_MIN must be a non-negative number of minutes, got "${earlyMinRaw}"`);
+    let lastEarlyAt = -Infinity;
+    const boardIdle = async (): Promise<boolean> => {
+      const cards = await opts.board.list();
+      const byId = new Map(cards.map((c) => [c.id, c]));
+      return !cards.some(
+        (c) => c.status === "todo" && c.assignee && opts.specs.has(c.assignee) && c.blocked_by.every((id) => byId.get(id)?.status === "done"),
+      );
+    };
+    const ledgerFile = path.join(opts.runsDir ?? RUNS_DIR, "ledger.jsonl");
+    const ctxRunId = () => `studio-loop-${new Date(now()).toISOString().slice(0, 16)}`;
+    const maybeEarlyHead = async (cardId: string): Promise<void> => {
+      if (!headOn || headRun || earlyMin === 0) return;
+      if (now() - lastEarlyAt < earlyMin * 60_000) return;
+      if (!(await boardIdle())) return;
+      lastEarlyAt = now();
+      ledgerAppend(
+        {
+          kind: "decision",
+          ts: new Date(now()).toISOString(),
+          agent: "dispatcher",
+          run_id: ctxRunId(),
+          topic: "studio.head_early",
+          decision: `early studio-head cycle: card ${cardId} closed and no todo card can start (STUDIO_HEAD_EARLY_MIN=${earlyMin})`,
+          rationale: "an idle board wastes free slots until the timed cycle; the head re-plans now",
+        },
+        ledgerFile,
+      );
+      log(`head: early cycle (card ${cardId} closed, board idle)`);
+      runHead();
+    };
+    if (headOn) {
+      const prior = opts.onCardClosed;
+      opts.onCardClosed = async (cardId: string, status: "done" | "blocked") => {
+        await prior?.(cardId, status);
+        void status;
+        try {
+          await maybeEarlyHead(cardId);
+        } catch (e) {
+          log(`head: early-cycle check failed after card ${cardId}: ${errText(e)}`);
+        }
+      };
+    }
     if (headOn && opts.headNow) {
       log("--head-now: one studio-head turn now");
       runHead();

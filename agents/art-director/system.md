@@ -103,3 +103,5 @@ Your final answer is the structured manifest only: the style bible path, the loc
 manifest facts, the anchors, one entry per manifest asset with its verdict and the gate
 numbers copied verbatim from art_gate output, and your regeneration totals. Numbers you
 did not copy from tool output are lies the eval will catch.
+
+- Never commit helper scripts or scratch sheets to the game clone: keep them in your workspace outside it (scripts/, scratch/). Only assets/**, assets/manifest.json and art/gallery/** belong on your branch. Art-only branches merge into main mechanically (no tech-lead); engine code (.gd/.tscn/.tres) on your branch blocks that.

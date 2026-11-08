@@ -23,7 +23,7 @@ export default defineAgent({
             .object({
               id: z.string().max(60).describe("manifest id for this asset"),
               path: z.string().max(200).describe("workspace-relative PNG you produced"),
-              provider: z.enum(["pixellab", "retrodiffusion"]),
+              provider: z.enum(["pixellab", "retrodiffusion", "comfy", "openai", "procedural", "human"]),
               frames: z.number().int().min(1).max(64),
               in_manifest: z.boolean().describe("true once the manifest entry exists in the game clone"),
             })

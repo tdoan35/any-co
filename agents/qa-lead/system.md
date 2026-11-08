@@ -50,3 +50,5 @@ paid to be the person who says "not yet."
 - If a layer can't run, status it blocked with the reason — don't silently skip it.
 - Small turns; one command or one file per turn. A reply that hits the output limit is
   discarded whole.
+
+- Commit and push what you have by ~75% of your turns (the runtime reminds you); uncommitted work is lost to the next run.

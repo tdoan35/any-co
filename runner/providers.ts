@@ -1,4 +1,6 @@
 import path from "node:path";
+import { Agent, setGlobalDispatcher } from "undici";
+import { stripImages } from "./images.ts";
 import { writeFileSync } from "node:fs";
 // Inference providers for the local runner: Naïve proxy (default), any OpenAI-compatible
 // endpoint (fast external inference, local-only), and a scripted fake for tests.
@@ -91,6 +93,21 @@ export function retryWaitMs(e: unknown, attempt: number, baseMs: number): number
   return baseMs * 2 ** (attempt - 1) + Math.floor(Math.random() * 250);
 }
 
+/** Socket codes that mean the pooled connection itself is broken, not the network (retrying on it fails the same way). */
+export const POISONED_CONNECTION = /^ERR_HTTP2_|^ERR_SSL_|^ERR_TLS_|BAD_RECORD_MAC|UND_ERR_INFO/;
+export const connectionResets = { count: 0, last: "" };
+/** Drop every pooled connection: install a fresh global fetch dispatcher (HTTP/1.1, so no long-lived H2 session to go stale). */
+export function resetConnections(reason: string): void {
+  try {
+    setGlobalDispatcher(new Agent({ allowH2: false }));
+    connectionResets.count++;
+    connectionResets.last = reason;
+    console.warn(`  network: reset the fetch connection pool (${reason}); retrying on fresh connections`);
+  } catch (e) {
+    console.warn(`  network: could not reset the fetch connection pool: ${String(e).slice(0, 120)}`);
+  }
+}
+
 export async function withRetry<T>(fn: () => Promise<T>, label: string, tries = 5, baseMs = retryClock.baseMs): Promise<T> {
   let network = 0;
   let timeouts = 0;
@@ -121,6 +138,10 @@ export async function withRetry<T>(fn: () => Promise<T>, label: string, tries = 
         : retryWaitMs(e, i, baseMs);
       const kind = net ? "network error" : timeout ? "request timeout (retried once)" : "transient error";
       console.warn(`  ${label}: ${kind} (${String((e as any)?.message ?? e).slice(0, 120)}${code ? ` [${code}]` : ""}), retry ${i}/${limit - 1} in ${wait} ms`);
+      // A poisoned pooled connection (a dead HTTP/2 session or a corrupted TLS stream) is reused by every retry, so the
+      // backoff alone never reaches a fresh socket (Nov 8: a studio loop failed every OpenAI and Naïve call while fresh
+      // processes connected fine). Replace the process's fetch dispatcher before retrying.
+      if (code && POISONED_CONNECTION.test(code)) resetConnections(code);
       await sleep(wait);
     }
   }
@@ -141,7 +162,7 @@ export class NaiveProvider implements Provider {
             model: this.model,
             max_tokens: req.max_tokens,
             system: req.system,
-            messages: req.messages as any,
+            messages: stripImages(req.messages) as any, // the Naïve proxy rejects image blocks ("messages.N.content: Invalid input")
             ...(req.tools.length ? { tools: req.tools as any } : {}),
           },
           this.window,

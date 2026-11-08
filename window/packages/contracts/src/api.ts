@@ -64,6 +64,7 @@ export const RunSchema = z.object({
   outcome: z.string().optional(),
   reportId: z.string().optional(),
   recording: z.object({ key: z.string(), kind: RecordingKindSchema, spliceT: z.number().optional() }).optional(),
+  game: z.string().nullable().optional(),
 }) satisfies z.ZodType<Run>;
 
 export const RunEventSchema = z.object({

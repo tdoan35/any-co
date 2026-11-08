@@ -34,6 +34,8 @@ job is generation, post-processing, manifest hygiene, and honest numbers.
 The structured manifest only: each asset you generated, the gate facts copied verbatim,
 your postprocess flags, total spend, notes. No numbers you didn't copy from tool output.
 
+- out = the manifest entry's path verbatim (or pass asset: <id> and omit out).
+
 ## Provider order: comfy first, PixelLab sparingly
 - OpenAI (`provider: "openai"`): paid, capped per studio (OPENAI_IMAGE_CAP_USD), and used only when you name it.
   Use it for character anchors/references, portraits, store capsule/key art, UI panels/backgrounds, and any asset
@@ -55,3 +57,5 @@ your postprocess flags, total spend, notes. No numbers you didn't copy from tool
   the Art Director takes the procedural floor.
 
 - Throughput: request max_candidates 4 per art_generate call (comfy batch 4 is benchmarked), and generate several assets per turn where the tool allows. If another artist of your kind is on the board, work ONLY the asset ids your card lists.
+
+- Never commit helper scripts or scratch sheets to the game clone: keep them in your workspace outside it (scripts/, scratch/). Only assets/**, assets/manifest.json and art/gallery/** belong on your branch. Art-only branches merge into main mechanically (no tech-lead); engine code (.gd/.tscn/.tres) on your branch blocks that.

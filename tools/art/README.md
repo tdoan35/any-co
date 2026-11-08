@@ -21,7 +21,23 @@ Exit codes: 0 = ok, 1 = gate verdict fail, 2 = usage error or crash (bad args, u
 a `<out>.cells.json` sidecar mapping cell rectangles → frame index. `gate` prints the
 full report and exits 1 when the repo fails.
 
-## Methods
+## Art-only merges (`merge.ts`, T46)
+
+`npm run art -- merge <game-dir> <agent/branch> [--dry-run]` (operator; refused when an agent started the process) and the
+dispatcher hook (an artist's card closing done with `complete: true`; `STUDIO_AUTO_ART_MERGE=off` disables it) merge an
+`agent/*` branch into the game repo's main with no LLM, only if ALL hold:
+
+1. `git diff --name-only main...<branch>` touches only `assets/**` (manifest and Godot `.import`/`.uid` sidecars included) and
+   `art/**` (helper scripts and scratch sheets there are inert data); engine code (.gd, .tscn, .tres, ...) anywhere is refused; else "not art-only: <paths>".
+2. In a temp clone (never the live checkout): fast-forward, or a clean `--no-ff` merge; a conflict aborts with
+   "conflict: <paths> → needs a tech-lead card".
+3. `runGate` on the MERGED tree is ok; else the gate summary (failed ids, missing, unlisted, manifest errors).
+
+Then it pushes main to the game repo (games/<slug>, `updateInstead` updates its checkout) through the single-merger
+pre-receive hook with the operator override `ANYCO_ALLOW_MAIN=1`, and writes ONE ledger decision (topic `art.merge`). A
+refusal pushes nothing. A per-repo lock (`runs/locks/art-merge-<repo>.lock`, stale when its pid is gone) serializes merges; if
+main moved during the push (a tech-lead merge), it retries once from the new main.
+
 
 - **PNG codec** (`png.ts`): pure TS on node:zlib. Decodes 8-bit RGBA, RGB, grayscale,
   grayscale+alpha, and indexed (PLTE + tRNS), all five filter types, non-interlaced;
