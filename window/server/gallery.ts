@@ -7,7 +7,7 @@ import type { ArtGalleryEntry } from "@fabric/contracts";
 
 interface GalleryIndexFile {
   entries?: Array<{
-    asset?: string; file?: string; provider?: string;
+    asset?: string; file?: string; path?: string; provider?: string;
     verdict?: string; reason?: string; gate?: Record<string, unknown> | null; run_id?: string; ts?: string;
   }>;
 }
@@ -59,8 +59,45 @@ export function galleryRoute(seg: string[], gamesRoot: string): { status: number
     if (!realFile.startsWith(realRoot + path.sep) || !statSync(realFile).isFile()) return { ...missing };
     return { status: 200, body: null, png: readFileSync(realFile) };
   }
+  if (seg[1] === "file") {
+    // repo-relative image under art/ or assets/ (realpath-confined to that dir: a symlink can't serve anything outside it)
+    const rel = path.posix.normalize(seg.slice(2).join("/"));
+    const top = rel.split("/")[0];
+    if (!rel || path.isAbsolute(rel) || rel.split("/").includes("..") || !/\.png$/i.test(rel) || (top !== "art" && top !== "assets")) return { ...missing };
+    let realFile: string;
+    let realRoot: string;
+    try {
+      realRoot = realpathSync(path.join(root, top));
+      realFile = realpathSync(path.join(root, rel));
+    } catch {
+      return { ...missing };
+    }
+    if (!realFile.startsWith(realRoot + path.sep) || !statSync(realFile).isFile()) return { ...missing };
+    return { status: 200, body: null, png: readFileSync(realFile) };
+  }
   if (seg[1]) return { ...missing };
   return { status: 200, body: { repo, entries: entriesOf(root, repo) } };
+}
+
+/** Normalize an agent-written verdict word: agents wrote approve/accept/accepted and reject/rejected. */
+function verdictOf(v: unknown): "accepted" | "rejected" | null {
+  const w = String(v ?? "").toLowerCase();
+  if (["accepted", "accept", "approve", "approved", "pass", "passed"].includes(w)) return "accepted";
+  if (["rejected", "reject", "denied", "fail", "failed"].includes(w)) return "rejected";
+  return null;
+}
+
+/**
+ * A gallery entry's image as a repo-relative path. Older entries name `file` relative to art/ ("gallery/x/1.png"); agents
+ * since wrote `path` relative to the repo ("art/gallery/x/1.png" or "assets/sprites/x.png"). Only a single .png that exists
+ * under art/ or assets/ counts (patterns like "a-0..3.png + b.png" are skipped).
+ */
+function imagePathOf(repoRoot: string, e: { file?: string; path?: string }): string | null {
+  const cand = typeof e.file === "string" ? `art/${e.file}` : typeof e.path === "string" ? e.path : null;
+  if (!cand) return null;
+  const rel = path.posix.normalize(cand);
+  if (path.isAbsolute(rel) || rel.split("/").includes("..") || !/\.png$/i.test(rel) || !/^(art|assets)\//.test(rel)) return null;
+  return existsSync(path.join(repoRoot, rel)) ? rel : null;
 }
 
 function entriesOf(repoRoot: string, repo: string): ArtGalleryEntry[] {
@@ -70,17 +107,21 @@ function entriesOf(repoRoot: string, repo: string): ArtGalleryEntry[] {
   } catch {
     return [];
   }
-  return (parsed.entries ?? [])
-    .filter((e) => typeof e.file === "string" && typeof e.asset === "string" && (e.verdict === "accepted" || e.verdict === "rejected"))
-    .map((e) => ({
+  const raw = Array.isArray(parsed.entries) ? parsed.entries : [];
+  return raw.flatMap((e) => {
+    const verdict = verdictOf(e.verdict);
+    const rel = typeof e.asset === "string" && verdict ? imagePathOf(repoRoot, e as { file?: string; path?: string }) : null;
+    if (!rel || !verdict) return [];
+    return [{
       asset: e.asset!,
-      file: e.file!,
-      url: `/api/art-gallery/${repo}/png/${e.file!.split("/").map(encodeURIComponent).join("/")}`,
+      file: rel,
+      url: `/api/art-gallery/${repo}/file/${rel.split("/").map(encodeURIComponent).join("/")}`,
       provider: e.provider ?? "unknown",
-      verdict: e.verdict as "accepted" | "rejected",
+      verdict,
       reason: e.reason ?? "",
       gate: (e.gate ?? null) as ArtGalleryEntry["gate"],
       runId: e.run_id ?? "unknown",
       ts: e.ts ?? "",
-    }));
+    }];
+  });
 }
