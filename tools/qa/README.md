@@ -10,6 +10,7 @@ implements the contracts; knows nothing about the game itself.
              [--ack-timeout-ms N] [--ready-timeout-ms N] [--end-wait-ms N]
     qa check --dir <qa dir> [--max-entities N] [--identical-dumps N] [--tick-rate N]
     qa determinism --cmd '<json argv>' --dir <game dir> --seed N --ticks N [as smoke]
+    qa ui-lint --dir <qa dir> [--viewport WxH] [--min-text-px N] [--grid-px N]
     qa export-check --dir <game dir> [--dist <dir>/dist] [--frames 90] [--timeout-ms N] [--run true|false]
 
 - `smoke` — clears stale `qa/` outputs, launches `--cmd` (argv array, never a shell string) in
@@ -43,6 +44,15 @@ Exit codes: `0` pass, `1` invariant failure — including an unclean process end
 own `process_exit_clean` check —, `2` harness/usage error (ready/ack timeout on a live
 process, spawn failure, unreadable files). JSON on stdout
 `{ ok, exitCode, checks[], error?, end? }`; every check carries numbers in `detail`.
+
+## UI lint (`ui-lint.ts`, pure; `qa ui-lint`, `qa_ui_lint` via qa_harness)
+
+Release-gate layer **when the game emits `ui[]`** (state-dump.md): over every dump's ui[] —
+(a) overlaps between visible non-overlay elements (intersection area > 0; parent/contains
+relations exempt, transitively), (b) rects outside the viewport (`--viewport`, default
+1280x720), (c) `text_px` below `--min-text-px` (default 10), (d) optional `--grid-px` snap on
+x/y. Findings: `{ check, ids, rect(s), tick, detail }`. No `ui[]` in any dump ⇒
+`ui_lint_not_implemented` — reported, never counted as a pass. Malformed entries are skipped.
 
 ## Invariants (`invariants.ts`, pure)
 
