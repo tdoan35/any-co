@@ -132,7 +132,7 @@ export async function startServer(opts: ServerOptions = {}) {
     const ok = (body: unknown) => ({ status: 200, body });
     const missing = { status: 404, body: { error: "not found" } };
     const runs = () => allRuns();
-    if (a === "art-gallery") return galleryRoute(seg.slice(1), gamesRoot);
+    if (a === "art-gallery") return galleryRoute(seg.slice(2), gamesRoot); // seg = ["api", "art-gallery", <repo>?, ...]
     if (a === "registry" && !b) return ok(buildRegistry(specs, new Set(runs().filter((r) => r.run.status === "running").map((r) => r.agent)), engine.list()));
     if (a === "interventions" && !b) return ok(engine.interventions());
     if (a === "weave" && !b) return ok(buildWeave(runs(), specs.map((s) => s.name), approvalsFile, runsDir, await board.list()));

@@ -37,6 +37,9 @@ manifest status), the gate facts copied from art_gate, your postprocess flags, t
 notes. No numbers you didn't copy from tool output.
 
 ## Provider order: comfy first, PixelLab sparingly
+- OpenAI (`provider: "openai"`): paid, capped per studio (OPENAI_IMAGE_CAP_USD), and used only when you name it.
+  Use it for character anchors/references, portraits, store capsule/key art, UI panels/backgrounds, and any asset
+  comfy failed the gate on twice. Bulk frames and variants stay on comfy (or PixelLab where the studio uses it).
 - Default to `provider: "comfy"` whenever it is available (`COMFY_BASE_URL` set or its health
   probe answering; art_generate reports `ProviderUnavailable` when not). comfy is free/local,
   NEEDS a reference image (pass the anchor), and makes stills only — no animation.

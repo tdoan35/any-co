@@ -45,8 +45,11 @@ export const EXEC_ENV_ALLOW = new Set([
   "GODOT", "GODOT_BIN", "FFMPEG_BIN", "FFPROBE_BIN", // build.sh reads GODOT
   // Linux display/session for windowed Godot runs; XDG dirs hold Godot's editor data and export templates
   "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME",
+  "XAUTHORITY", // X cookie file path (Xvfb -auth); not a secret value, exempt from SECRETISH below
   "ANYCO_AGENT",
 ]);
+/** Allowlisted names that match SECRETISH but hold a path, not a secret. */
+const SECRETISH_EXEMPT = new Set(["XAUTHORITY"]);
 const SECRETISH = /KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH/i;
 
 /**
@@ -57,7 +60,7 @@ export function execEnv(agent: string, cwd: string, parent: NodeJS.ProcessEnv = 
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(parent)) {
     if (v === undefined) continue;
-    if (!(EXEC_ENV_ALLOW.has(k) || k.startsWith("LC_")) || SECRETISH.test(k)) continue;
+    if (!(EXEC_ENV_ALLOW.has(k) || k.startsWith("LC_")) || (SECRETISH.test(k) && !SECRETISH_EXEMPT.has(k))) continue;
     env[k] = v;
   }
   if (env.PATH) env.PATH = env.PATH.split(path.delimiter).filter((d) => d && !inside(real(path.resolve(d)), HARNESS_ROOT)).join(path.delimiter);

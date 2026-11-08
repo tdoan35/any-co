@@ -166,6 +166,33 @@ the env, before any request). The provider never starts or stops servers; the op
 - **License caveat:** Nova Pixels XL's creator requires edits before commercial use. Any game sold
   with comfy assets needs them edited first (`docs/decisions.md`).
 
+## OpenAI Image API (`provider: "openai"`, T44)
+
+Paid. It runs ONLY when a call names `provider: "openai"`: never a studio default (`ART_DEFAULT_PROVIDER` refuses it), never an
+anchor winner for an omitted provider, and never a fallback in either direction (its chain is just `[openai]`). It counts against
+the PAID per-asset cap (1 + 2), and T39's pre-call checks (out path, manifest entry) apply. No per-call approval gate.
+
+- **Models** (developers.openai.com/api/docs/models, read 2026-11-08): `gpt-image-2.6-flare` (default, "for fast iteration")
+  and `gpt-image-2.6-sunburst` ("for detailed visual work"); both serve `v1/images/generations` and `v1/images/edits`. Pick
+  with `OPENAI_IMAGE_MODEL` or the `model` param; anything else is refused.
+- **Requests:** text-led → `POST /v1/images/generations` (JSON); reference-led → `POST /v1/images/edits` (multipart, the
+  reference as `image[]`, path-safe like pixellab). Both send `background: transparent`, `output_format: png`,
+  `quality: medium`, `n` = max_candidates (1-10; extra images are written as `<out>-<i>.png` candidates), and `size` by aspect
+  (1024x1024, 1536x1024 wide, 1024x1536 tall). GPT image models always answer base64 (`data[].b64_json`). The 1024-class raw
+  goes through the usual postprocess (snap to the manifest grid → lock → outline) and the gate.
+- **Price** (pricing page, "Image generation models", per 1M tokens, both 2.6 models): text input $5, image input $8, image
+  output $30. No per-image price is published, so a call's cost is its `usage` × these prices (`cost_source: reported`); a
+  response without usage is charged the conservative $0.25 per image (`estimated`).
+- **Spend cap:** `OPENAI_IMAGE_CAP_USD` (per studio, total; default 25, Ty's number). Before a call, it is refused with no request
+  when spent + images × per-image estimate (the most one image has cost here, else $0.25) would exceed the cap. Every call
+  appends `{provider: openai, unit: usd, kind: spend, cost_usd, images, model}` to `art-credits.jsonl` (never read as a
+  balance) and its cost is charged to the run budget. One ledger decision at 80% of the cap and one at the cap (topic
+  `spend.openai_images`). Out of quota (402 / `insufficient_quota`) is ProviderExhausted.
+- **Live check (2026-11-08):** one generations call, flare, 1 image: 6.6 s, 1024x1024 PNG with 85.6% transparent pixels;
+  usage 20 text in + 1,449 image out → $0.0436.
+- **Use it for** character anchors/references, portraits, store capsule/key art, UI panels/backgrounds, and any asset comfy
+  failed the gate on twice. Bulk frames and variants stay on comfy or PixelLab.
+
 ## Cost policy
 
 Every generation returns `cost_micro_usd` and `cost_source: "reported" | "estimated"` (`"local"` and 0 for comfy).

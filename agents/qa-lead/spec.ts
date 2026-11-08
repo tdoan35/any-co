@@ -9,7 +9,7 @@ export default defineAgent({
   dept: "qa",
   runner: "local",
   model: "z-ai/glm-5.3",
-  budget: { cap_usd: 5, max_task_usd: 1, period: "day" },
+  budget: { cap_usd: 20, max_task_usd: 3, period: "day" }, // Nov 8 (Ty): GLM QA calls estimate ~$0.48 each with the big context; $1/40 turns cut release-gate passes short
   tools: { game_repo: "allow", qa_harness: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow" },
   output_schema: z
     .object({
@@ -54,5 +54,5 @@ export default defineAgent({
         .max(12),
     })
     .strict(),
-  limits: { max_turns: 40, max_output_tokens: 12288 },
+  limits: { max_turns: 90, max_output_tokens: 12288 },
 });

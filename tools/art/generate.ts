@@ -10,7 +10,7 @@ import path from "node:path";
 import { decodePng, encodePng } from "./png.ts";
 import { contactSheet } from "./ops.ts";
 
-export type ProviderName = "pixellab" | "retrodiffusion" | "comfy";
+export type ProviderName = "pixellab" | "retrodiffusion" | "comfy" | "openai";
 
 export interface GenerateInput {
   provider: ProviderName;
@@ -36,6 +36,8 @@ export interface GenerateInput {
   resumeJobId?: string;
   /** comfy only: negative prompt text (default empty). */
   negative?: string;
+  /** openai only: the image model (default OPENAI_IMAGE_MODEL, else gpt-image-2.6-flare). */
+  model?: string;
 }
 
 export interface GenerateOptions {
@@ -258,6 +260,7 @@ export async function generate(input: GenerateInput, opts: GenerateOptions): Pro
   if (input.resumeJobId !== undefined && !/^[A-Za-z0-9_-]{1,80}$/.test(input.resumeJobId)) throw new Error(`resume_job_id "${input.resumeJobId}" is not a job id`);
   if (input.provider === "retrodiffusion") return retrodiffusion(input, opts, env, fetchImpl, deadline, sleep);
   if (input.provider === "comfy") return comfy(input, opts, env, fetchImpl, deadline, sleep);
+  if (input.provider === "openai") return openaiImages(input, opts, env, fetchImpl, deadline);
   return pixellab(input, opts, env, fetchImpl, deadline, sleep);
 }
 
@@ -942,6 +945,101 @@ async function comfyOnLane(
   };
 }
 
+// ---------- openai: OpenAI Image API (T44). Paid; only when named; spend capped by the harness. ----------
+
+/** Verified 2026-11-08 (developers.openai.com/api/docs/models + /pricing): both serve v1/images/generations and v1/images/edits. */
+export const OPENAI_IMAGE_MODELS = ["gpt-image-2.6-flare", "gpt-image-2.6-sunburst"] as const;
+export const OPENAI_IMAGE_DEFAULT_MODEL = "gpt-image-2.6-flare";
+/** USD per 1M tokens, from the pricing page ("Image generation models", standard): same for both 2.6 models. */
+export const OPENAI_IMAGE_PRICES: Record<string, { text_in: number; image_in: number; image_out: number }> = {
+  "gpt-image-2.6-flare": { text_in: 5, image_in: 8, image_out: 30 },
+  "gpt-image-2.6-sunburst": { text_in: 5, image_in: 8, image_out: 30 },
+};
+/** Conservative cost per image when a response carries no usage (no per-image price is published): a high-quality
+ *  1536-px output is ~6,240 output tokens = $0.19 at $30/M, rounded up with input to $0.25. */
+export const OPENAI_IMAGE_ESTIMATE_USD = 0.25;
+
+/** OPENAI_IMAGE_MODEL / the model param, refusing anything but the verified 2.6 image models. */
+export function openaiImageModel(input: Pick<GenerateInput, "model">, env: Record<string, string | undefined>): string {
+  const m = (input.model?.trim() || env.OPENAI_IMAGE_MODEL?.trim() || OPENAI_IMAGE_DEFAULT_MODEL);
+  if (!(OPENAI_IMAGE_MODELS as readonly string[]).includes(m)) throw new Error(`openai image model must be one of ${OPENAI_IMAGE_MODELS.join(", ")}, got "${m}"`);
+  return m;
+}
+
+/** The image size closest to the target's aspect: 1024x1024, 1536x1024 (wide) or 1024x1536 (tall). Postprocess snaps it down. */
+export function openaiImageSize(width: number, height: number): string {
+  const r = width / height;
+  return r >= 1.25 ? "1536x1024" : r <= 0.8 ? "1024x1536" : "1024x1024";
+}
+
+/** The call's cost from the response usage at the model's verified token prices; null when the response carries no usage. */
+export function openaiImageCost(model: string, usage: unknown): number | null {
+  const u = usage as { input_tokens?: number; output_tokens?: number; input_tokens_details?: { text_tokens?: number; image_tokens?: number } } | null | undefined;
+  if (!u || typeof u.output_tokens !== "number") return null;
+  const p = OPENAI_IMAGE_PRICES[model] ?? OPENAI_IMAGE_PRICES[OPENAI_IMAGE_DEFAULT_MODEL];
+  const text = u.input_tokens_details?.text_tokens ?? (u.input_tokens_details ? 0 : (u.input_tokens ?? 0));
+  const image = u.input_tokens_details?.image_tokens ?? 0;
+  return (text * p.text_in + image * p.image_in + u.output_tokens * p.image_out) / 1e6;
+}
+
+/**
+ * Text-led: POST /v1/images/generations (JSON). Reference-led: POST /v1/images/edits (multipart, the reference as image[]).
+ * Both ask for a transparent PNG at medium quality, n = max_candidates (1-10), size by aspect (1024 class); GPT image models
+ * always answer base64 (data[].b64_json). Cost comes from `usage` at the verified token prices, else the per-image estimate.
+ * Stills only. A failed request is not billed by OpenAI, so errors are plain (uncharged); out of quota is ProviderExhausted.
+ */
+async function openaiImages(
+  input: GenerateInput,
+  opts: GenerateOptions,
+  env: Record<string, string | undefined>,
+  fetchImpl: typeof fetch,
+  deadline: number,
+): Promise<GenerateResult> {
+  if (input.frames !== undefined) throw new Error("openai makes stills only; animate the still with pixellab (frames + reference)");
+  const model = openaiImageModel(input, env);
+  const ref = input.reference ? await readReference(opts.workspace, input.reference) : null; // path safety before any request
+  const key = requireKey(env, "OPENAI_API_KEY");
+  const base = (opts.baseUrl?.openai ?? env.OPENAI_BASE_URL?.trim() ?? "https://api.openai.com/v1").replace(/\/+$/, "") || "https://api.openai.com/v1";
+  const n = Math.max(1, Math.min(10, Math.floor(input.maxCandidates ?? DEFAULT_CANDIDATES)));
+  const size = openaiImageSize(input.width, input.height);
+  const fields: Record<string, string> = { model, prompt: input.prompt.slice(0, 32_000), n: String(n), size, quality: "medium", background: input.transparent === false ? "opaque" : "transparent", output_format: "png" };
+  let res: { status: number; body: any };
+  try {
+    if (ref) {
+      const form = new FormData();
+      for (const [k, v] of Object.entries(fields)) form.append(k, v);
+      form.append("image[]", new Blob([Buffer.from(ref.base64, "base64")], { type: "image/png" }), "reference.png");
+      res = await httpJson(fetchImpl, `${base}/images/edits`, { method: "POST", headers: { authorization: `Bearer ${key}` }, body: form }, deadline);
+    } else {
+      res = await httpJson(fetchImpl, `${base}/images/generations`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+        body: JSON.stringify({ ...fields, n }),
+      }, deadline);
+    }
+  } catch (e) {
+    throw new Error(`openai ${ref ? "edits" : "generations"} request failed: ${(e as Error).message}${(e as any)?.cause?.code ? ` (${(e as any).cause.code})` : ""}`);
+  }
+  const code = res.body?.error?.code ?? res.body?.error?.type;
+  if (res.status === 402 || code === "insufficient_quota" || code === "billing_hard_limit_reached")
+    throw new ProviderExhausted("openai", `${res.status} ${code ?? "out of quota"}`);
+  if (res.status >= 400) throw new Error(`openai rejected the request (${res.status}): ${JSON.stringify(res.body?.error ?? res.body).slice(0, 400)}`);
+  const items: Array<{ b64_json?: string }> = Array.isArray(res.body?.data) ? res.body.data : [];
+  const b64s = items.map((d) => d.b64_json).filter((x): x is string => typeof x === "string");
+  if (b64s.length === 0) throw new Error(`openai answered with no image: ${JSON.stringify(res.body).slice(0, 300)}`);
+  const reported = openaiImageCost(model, res.body?.usage);
+  const costUsd = reported ?? OPENAI_IMAGE_ESTIMATE_USD * b64s.length;
+  const cap = keepCandidates(b64s, input.maxCandidates);
+  const written = await writeImages(opts.workspace, input.out, cap.kept.map((b) => [new Uint8Array(Buffer.from(b, "base64"))]));
+  return {
+    provider: "openai",
+    images: written,
+    cost_micro_usd: usdToMicro(costUsd),
+    cost_source: reported === null ? "estimated" : "reported",
+    metadata: { model, endpoint: ref ? "images/edits" : "images/generations", size, n, quality: "medium", background: fields.background, usage: res.body?.usage ?? null, cost_usd: costUsd, candidates_discarded: cap.discarded },
+  };
+}
+
 // ---------- free reads: cost quotes and balances (T19). Never a billing or purchase endpoint. ----------
 
 export interface Quote {
@@ -963,6 +1061,12 @@ export async function quote(input: GenerateInput, opts: GenerateOptions): Promis
   const env = opts.env ?? process.env;
   const fetchImpl = opts.fetchImpl ?? fetch;
   const deadline = Date.now() + (opts.timeoutMs ?? 30_000);
+  if (input.provider === "openai")
+    return {
+      provider: "openai", per_call_usd: OPENAI_IMAGE_ESTIMATE_USD * Math.max(1, Math.min(10, Math.floor(input.maxCandidates ?? 1))), source: "price table",
+      remaining_balance: null, unit: "usd", total: null,
+      note: "OpenAI publishes token prices, not per-image prices; this is the conservative per-image estimate × images. art_generate reports the real cost from the response usage, and OPENAI_IMAGE_CAP_USD caps the studio's total.",
+    };
   if (input.provider === "comfy")
     return { provider: "comfy", per_call_usd: 0, source: "local", remaining_balance: null, unit: "usd", total: null, note: "the local lab is free and has no balance; it can be down (art_generate then falls back to pixellab)" };
   if (input.provider === "pixellab") {
@@ -1013,7 +1117,7 @@ export async function balance(provider: ProviderName, opts: Omit<GenerateOptions
   const env = opts.env ?? process.env;
   const fetchImpl = opts.fetchImpl ?? fetch;
   const deadline = Date.now() + (opts.timeoutMs ?? 15_000);
-  if (provider === "comfy") return null; // local lab: no balance
+  if (provider === "comfy" || provider === "openai") return null; // local lab: no balance; openai: spend is capped by the harness (OPENAI_IMAGE_CAP_USD)
   if (provider === "retrodiffusion") {
     const key = requireKey(env, "RETRO_DIFFUSION_API_KEY");
     const base = (opts.baseUrl?.retrodiffusion ?? env.RETRO_DIFFUSION_BASE_URL ?? "https://api.retrodiffusion.ai").replace(/\/$/, "");
