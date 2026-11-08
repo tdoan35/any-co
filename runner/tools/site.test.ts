@@ -174,7 +174,7 @@ test("site_deploy refuses a web dir symlinked out of the clone, symlinks inside 
     symlinkSync(outside, web);
     const r1 = await deploy(a.ctx, fakeNaive(calls));
     assert.equal(r1.is_error, true);
-    assert.match(String(r1.content), /strictly inside your clone/);
+    assert.match(String(r1.content), /strictly inside your clone|escapes the workspace/); // the shared guard refuses first since T11
     // 2. a symlink inside the tree
     const b = setup();
     symlinkSync(outside, path.join(b.workspace, "game", "dist", "web", "linked"));

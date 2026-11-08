@@ -1,17 +1,19 @@
 // Weave snapshot from run state. `items` lists the pending approval requests (runs/approvals.jsonl,
 // written by the approval gate every `ask` tool call) as read-only display: deciding happens in the
 // terminal (`npm run approvals`), because chat with the Studio Head is the window's only write path.
+// Requests whose run finished or is orphaned are hidden (the window never writes the expiry itself;
+// `approvals list`/`approve`/`deny` and resume do, ledgered as who "run ended").
 // Board cards are read-only here too: a doing card shows its assignee at work (presence), a blocked
 // card is studio news (pulse) and marks its holder blocked when no run already shows them busy.
 import type { EventEntry, Presence, WeaveSnapshot } from "@fabric/contracts";
 import type { MappedRun } from "./runs.ts";
 import { PROJECT } from "./registry.ts";
-import { APPROVALS_FILE, pending } from "../../tools/approvals/approvals.ts";
+import { APPROVALS_FILE, pendingLive } from "../../tools/approvals/approvals.ts";
 import type { BoardCard } from "../../runner/board/types.ts";
 
 const PULSE_LIMIT = 60;
 
-export function buildWeave(runs: MappedRun[], agentIds: string[], approvalsFile = APPROVALS_FILE, boardCards: BoardCard[] = []): WeaveSnapshot {
+export function buildWeave(runs: MappedRun[], agentIds: string[], approvalsFile = APPROVALS_FILE, runsDir?: string, boardCards: BoardCard[] = []): WeaveSnapshot {
   const presence = new Map<string, Presence>();
   for (const id of agentIds) presence.set(id, { agentId: id, state: "idle", activity: "Idle", since: new Date(0).toISOString() });
 
@@ -53,7 +55,7 @@ export function buildWeave(runs: MappedRun[], agentIds: string[], approvalsFile 
       });
     }
   }
-  const items = pending(approvalsFile).map((a) => ({
+  const items = pendingLive(approvalsFile, runsDir).map((a) => ({
     id: a.id,
     kind: "approval" as const,
     agentId: a.agent,

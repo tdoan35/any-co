@@ -10,14 +10,14 @@ export default defineAgent({
   runner: "local",
   model: "z-ai/glm-5.3",
   budget: { cap_usd: 4, max_task_usd: 0.75, period: "day" },
-  tools: { workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow" },
+  tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow" },
   output_schema: z
     .object({
       files: z
         .array(
           z
             .object({
-              path: z.string().min(3).max(120).describe("Workspace path you wrote, e.g. content/enemies.json"),
+              path: z.string().min(3).max(120).describe("Path you wrote: game-repo path (e.g. content/enemies.json) when working in the game clone, else workspace path"),
               kind: z.string().min(3).max(40).describe("What this file holds, in the design doc's vocabulary"),
               entries: z.number().int().min(1).describe("Top-level entries in the file, counted from what you wrote"),
               notes: z.string().max(300).describe("What the entries cover and what was deliberately left out"),

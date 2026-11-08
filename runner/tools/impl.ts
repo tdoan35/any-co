@@ -1,8 +1,8 @@
 // Local implementations of the capabilities in registry.ts.
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
-import { existsSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, realpathSync } from "node:fs";
 import { isIP } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,9 +11,18 @@ import type { CapabilityName } from "./registry.ts";
 import type { NaiveClient } from "../providers.ts";
 import { studioStatusTools } from "./studio-status.ts";
 import { decodePng, encodePng, type RgbaImage } from "../../tools/art/png.ts";
-import { addOutline, contactSheet, lockPalette, snapToGrid, splitStrip } from "../../tools/art/ops.ts";
+import { addOutline, contactSheet, lockPalette, snapToGrid, splitStrip, upscaleNearest } from "../../tools/art/ops.ts";
 import { runGate } from "../../tools/art/gate.ts";
-import { append as ledgerAppend, read as ledgerRead, LEDGER_FILE } from "../../tools/ledger/ledger.ts";
+import { ChargedFailure, DEFAULT_CANDIDATES, MAX_CANDIDATES, ProviderExhausted, balance as providerBalance, generate, type Balance, isAnimation, quote as providerQuote, type GenerateResult, type ProviderName } from "../../tools/art/generate.ts";
+import {
+  LOW_GENERATIONS, MAX_REGENERATIONS, PROVIDERS, anchorWinner, countGeneration, generationCount, isExhausted, markExhausted, other, readCredits, readGallery,
+  readProviders, recordAnchorWinner, recordCredit, statePaths,
+} from "../../tools/art/credits.ts";
+import { capture as mediaCapture, POLICY as MEDIA_POLICY, type CaptureMode } from "../../tools/media/capture.ts";
+import { edit as mediaEdit, probe as mediaProbe } from "../../tools/media/edit.ts";
+import { track as trackGroup } from "../../tools/proc/reaper.ts";
+import { append as ledgerAppend, read as ledgerRead, LEDGER_FILE, type LedgerEntry } from "../../tools/ledger/ledger.ts";
+import type { ImageBlock } from "../types.ts";
 import { AGENTS_DIR } from "../load.ts";
 import type { Board } from "../board/index.ts";
 
@@ -33,6 +42,8 @@ export interface ToolContext {
 
 export interface ToolOutput {
   content: string;
+  /** Optional image the model must see next to the text (a ref block; no base64 here). */
+  image?: ImageBlock;
   is_error?: boolean;
   cost_micro_usd?: number;
 }
@@ -271,7 +282,27 @@ const ledgerTools: Record<string, ToolImpl> = {
       // A human approve/deny on the approval gate is a human intervention (rule 4); auto-approve and expiry are not.
       const human = all.filter((e) => e.kind === "approval" && e.decision !== "expired" && !e.who.startsWith("auto")).length;
       counts.intervention = (counts.intervention ?? 0) + human;
-      return { content: JSON.stringify({ total: all.length, counts, recent: all.slice(-limit).reverse() }) };
+      // T17: interventions by category; those approvals count as "approval", old lines as "uncategorized".
+      const interventionCategory = (e: LedgerEntry): string => {
+        if (e.kind === "approval") return e.decision !== "expired" && !e.who.startsWith("auto") ? "approval" : "auto/expired";
+        if (e.kind === "intervention") return e.category ?? "uncategorized";
+        return "decision";
+      };
+      const intervention_counts = all
+        .filter((e) => e.kind !== "decision")
+        .reduce<Record<string, number>>((a, e) => {
+          const k = interventionCategory(e);
+          return ((a[k] = (a[k] ?? 0) + 1), a);
+        }, {});
+      return {
+        content: JSON.stringify({
+          total: all.length,
+          counts,
+          intervention_counts,
+          steering: intervention_counts["steering"] ?? 0,
+          recent: all.slice(-limit).reverse(),
+        }),
+      };
     },
   },
 };
@@ -388,10 +419,41 @@ const webSearch: ToolImpl = {
 };
 
 // ---------- workspace_read / workspace_write ----------
+// Symlink-safe confinement. Returns the lexically normalised path (so `..` after a symlink is never
+// handed to the OS), after checking that what the OS would actually touch stays under the root's
+// realpath: the target's realpath when it exists, else the realpath of its deepest existing ancestor.
+// A dangling symlink anywhere on the path is refused, since a write would follow it to wherever it points.
+// Known limit: check-then-use, so a symlink swapped in between the check and the fs call is not caught.
 export function resolveInWorkspace(workspace: string, rel: string): string {
   const p = path.resolve(workspace, rel || ".");
   if (p !== workspace && !p.startsWith(workspace + path.sep)) throw new Error(`path escapes the workspace: ${rel}`);
-  return p;
+  const rootReal = realOrNull(workspace) ?? path.resolve(workspace);
+  for (let cur = p; ; cur = path.dirname(cur)) {
+    const real = realOrNull(cur);
+    if (real !== null) {
+      if (real !== rootReal && !real.startsWith(rootReal + path.sep)) throw new Error(`path escapes the workspace through a symlink: ${rel}`);
+      return p;
+    }
+    if (lstatOk(cur)) throw new Error(`path goes through a dangling symlink: ${rel}`);
+    if (cur === workspace || path.dirname(cur) === cur) return p; // root not created yet: nothing on disk to follow
+  }
+}
+
+function realOrNull(p: string): string | null {
+  try {
+    return realpathSync(p);
+  } catch {
+    return null;
+  }
+}
+
+function lstatOk(p: string): boolean {
+  try {
+    lstatSync(p);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 const workspaceRead: ToolImpl = {
@@ -427,20 +489,92 @@ const workspaceWrite: ToolImpl = {
   },
 };
 
+// ---------- art_view (image_view capability) ----------
+const MAX_PNG_BYTES = 4 * 1024 * 1024;
+const MAX_IMAGE_SIDE = 1024;
+
+const artView: ToolImpl = {
+  description:
+    "View a PNG image inside your workspace (sprite sheet, contact sheet, screenshot): the image itself is shown to you, along with its dimensions and sha256. Use it to check art against an anchor. Optional integer upscale for tiny pixel art (nearest-neighbour, output capped at 1024 px per side).",
+  input: z
+    .object({
+      path: z.string().min(1).describe("PNG path inside the workspace, e.g. art/sheet.png"),
+      upscale: z.number().int().min(1).max(8).optional().describe("Integer nearest-neighbour upscale for pixel art (max side 1024 px)"),
+    })
+    .strict(),
+  async run({ path: rel, upscale }, ctx) {
+    try {
+      const p = resolveInWorkspace(ctx.workspace, rel);
+      const st = await stat(p);
+      if (st.size > MAX_PNG_BYTES) return { content: `image is too large: ${st.size} bytes (cap ${MAX_PNG_BYTES})`, is_error: true };
+      let bytes: Uint8Array = new Uint8Array(await readFile(p));
+      let img: RgbaImage = decodePng(bytes);
+      const src = `${img.width}x${img.height}`;
+      if (Math.max(img.width, img.height) > MAX_IMAGE_SIDE && !upscale)
+        return { content: `image is ${img.width}x${img.height}: over the ${MAX_IMAGE_SIDE}px per-side cap. Make a smaller sheet (or pass \`upscale\` only on a small source).`, is_error: true };
+      let scaleNote = "";
+      if (upscale) {
+        const k = Math.min(upscale, Math.floor(MAX_IMAGE_SIDE / Math.max(img.width, img.height)));
+        if (k > 1) {
+          const up = upscaleNearest(img, k);
+          scaleNote = ` (${src}, x${k} nearest-neighbour)`;
+          img = up;
+          bytes = encodePng(img);
+        }
+      }
+      if (bytes.length > MAX_PNG_BYTES) return { content: `encoded image is too large: ${bytes.length} bytes (cap ${MAX_PNG_BYTES}); use a smaller upscale`, is_error: true };
+      // Content-addressed copy of the exact bytes sent: the transcript records the ref, a
+      // resume rebuilds the message from this copy even if the workspace file changes.
+      const sha = createHash("sha256").update(bytes).digest("hex");
+      const runDir = path.join(ctx.runsDir ?? path.join(ROOT, "runs"), ctx.run_id ?? "manual");
+      const imagesDir = path.join(runDir, "images");
+      await mkdir(imagesDir, { recursive: true });
+      const copy = path.join(imagesDir, `${sha}.png`);
+      if (!existsSync(copy)) await writeFile(copy, bytes);
+      return {
+        content: `${img.width}×${img.height}${scaleNote} PNG, ${bytes.length} bytes, sha256 ${sha.slice(0, 16)}`,
+        image: { type: "image", source: { type: "ref", path: copy, media_type: "image/png", sha256: sha, size: bytes.length } },
+      };
+    } catch (e) {
+      return { content: `art_view failed: ${e instanceof Error ? e.message : String(e)}`, is_error: true };
+    }
+  },
+};
+
 // ---------- game_repo: work on the studio's game repo (games/<name>) ----------
 // Each run gets its own clone at <workspace>/game on a per-agent branch; only the Tech Lead
 // merges branches into the game's main branch (single-merger rule, plan.md §6 Engineering).
 
+/** Repo names are single slugs (new-game.ts slugify output): no dots, slashes, or absolute paths. */
+const GAME_REPO_NAME = /^[a-z0-9][a-z0-9-]{0,79}$/;
+
+/** A games/<name> entry is usable only if it is a real directory (not a symlink) whose realpath sits strictly
+ *  inside realpath(root) and that holds a .git. This keeps agents from cloning, and pushing into, any repo
+ *  outside games/ — the harness repo included. */
+function gameRepoDir(root: string, name: string): string | null {
+  const dir = path.join(root, name);
+  try {
+    if (!lstatSync(dir).isDirectory()) return null; // lstat: a symlink is not a directory here
+    const rootReal = realpathSync(root);
+    const real = realpathSync(dir);
+    if (path.dirname(real) !== rootReal) return null;
+  } catch {
+    return null;
+  }
+  return existsSync(path.join(dir, ".git")) ? dir : null;
+}
+
 /** The one game repo the run works on: games/<name> (a git repo with >=1 commit). */
 export function resolveGameRepo(root: string, repo?: string): { name: string; dir: string } {
-  if (repo) {
-    const dir = path.join(root, repo);
-    if (!existsSync(path.join(dir, ".git"))) throw new Error(`games/${repo} is not a git repo`);
+  if (repo !== undefined) {
+    if (!GAME_REPO_NAME.test(repo)) throw new Error(`invalid repo name "${repo}": use the bare name under games/ (lowercase letters, digits, "-")`);
+    const dir = gameRepoDir(root, repo);
+    if (!dir) throw new Error(`games/${repo} is not a git repo directory inside games/`);
     return { name: repo, dir };
   }
   let entries: string[] = [];
   try {
-    entries = readdirSync(root).filter((d) => existsSync(path.join(root, d, ".git")));
+    entries = readdirSync(root).filter((d) => GAME_REPO_NAME.test(d) && gameRepoDir(root, d) !== null);
   } catch {
     entries = [];
   }
@@ -554,13 +688,45 @@ const gameExec: ToolImpl = {
       const { promise, resolve } = Promise.withResolvers<{ out: string; err: string; code: number }>();
       // ANYCO_AGENT lets the game repo's pre-receive hook enforce the single-merger rule (tools/gamerepo/new-game.ts).
       const env = { ...process.env, ANYCO_AGENT: ctx.agent ?? "unknown" };
-      execFile(cmd, args, { cwd, env, timeout: (timeout_s ?? 120) * 1000, maxBuffer: 32 * 1024 * 1024 }, (error, stdout, stderr) => {
-        resolve({ out: String(stdout), err: String(stderr), code: typeof error?.code === "number" ? error.code : error ? 1 : 0 });
-      });
+      // Own process group + our own timeout: execFile's timeout only SIGTERMs the direct child, so a build.sh that
+      // started Godot (or a Godot that ignores SIGTERM) left orphans running for hours. Kill the whole group instead.
+      const limitMs = (timeout_s ?? 120) * 1000;
+      const MAX_OUT = 32 * 1024 * 1024;
+      let timedOut = false;
+      let settled = false;
+      const out: Buffer[] = [];
+      const err: Buffer[] = [];
+      let outBytes = 0;
+      const child = spawn(cmd, args, { cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+      const reaper = child.pid ? trackGroup(child.pid) : null; // runner exit/signal/kill -9 reaps the group too
+      const take = (sink: Buffer[]) => (b: Buffer) => { if (outBytes < MAX_OUT) { sink.push(b); outBytes += b.length; } };
+      child.stdout?.on("data", take(out));
+      child.stderr?.on("data", take(err));
+      const finish = (code: number) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ out: Buffer.concat(out).toString("utf8"), err: Buffer.concat(err).toString("utf8"), code });
+      };
+      child.on("error", (e) => { err.push(Buffer.from(String(e.message))); finish(127); });
+      child.on("close", (code, signal) => finish(typeof code === "number" ? code : signal ? 128 : 1));
+      const killGroup = (sig: NodeJS.Signals) => {
+        try { if (child.pid) process.kill(-child.pid, sig); } catch { /* group already gone */ }
+      };
+      const timer = setTimeout(() => {
+        timedOut = true;
+        killGroup("SIGTERM");
+        setTimeout(() => killGroup("SIGKILL"), 2000).unref();
+        // a grandchild holding the pipes open must not hold the agent: give up waiting 3 s after the kill
+        setTimeout(() => finish(124), 3000).unref();
+      }, limitMs);
       const r = await promise;
+      killGroup("SIGKILL"); // nothing from this call outlives it (background children of a finished command included)
+      reaper?.untrack();
+      if (timedOut) r.err = `${r.err}\n(timed out after ${limitMs / 1000} s; the command and its children were killed)`;
       return {
-        content: clip(`exit ${r.code}\n${r.out}${r.err ? `\nstderr:\n${r.err}` : ""}`),
-        is_error: r.code !== 0,
+        content: clip(`exit ${timedOut ? "timeout" : r.code}\n${r.out}${r.err ? `\nstderr:\n${r.err}` : ""}`),
+        is_error: timedOut || r.code !== 0,
       };
     } catch (e) {
       return { content: errText(e), is_error: true };
@@ -798,6 +964,257 @@ const boardTools: Record<string, ToolImpl> = {
   },
 };
 
+// ---------- art_generate (tools/art): paid generation, budget-capped like inference ----------
+
+/** Chain the deterministic pipeline over generated PNGs using the game manifest's locked grid/palette. */
+async function applyArtPostprocess(
+  workspace: string,
+  opts: { snap?: boolean; lock?: boolean; outline?: string },
+  images: string[],
+): Promise<Record<string, unknown>> {
+  const manifestFile = resolveInWorkspace(workspace, path.join("game", "assets", "manifest.json"));
+  let manifest: { grid?: { w: number; h: number }; palette?: string[]; assets?: Array<{ path?: string; size?: { w: number; h: number }; frames?: number }> };
+  try {
+    manifest = JSON.parse(await readFile(manifestFile, "utf8"));
+  } catch (e) {
+    throw new Error(`postprocess needs the game manifest at game/assets/manifest.json (game_clone first): ${errText(e)}`);
+  }
+  if (!manifest.grid || !Array.isArray(manifest.palette) || manifest.palette.length === 0)
+    throw new Error("postprocess needs grid and palette locked in game/assets/manifest.json (the Art Director locks them)");
+
+  const steps: Record<string, unknown> = {};
+  let lockChanged = 0;
+  let lockMaxDistance = 0;
+  let lastSnap: { scaleX: number; scaleY: number; uniform: boolean; integerScale: boolean } | null = null;
+  for (const rel of images) {
+    let img = decodePng(new Uint8Array(await readFile(resolveInWorkspace(workspace, rel))));
+    if (opts.snap) {
+      // Snap to the whole asset (size is ONE frame × frames), never to a single grid cell.
+      const repoRel = rel.replace(/^game\//, "");
+      const entry = manifest.assets?.find((a) => a.path === repoRel);
+      if (!entry?.size)
+        throw new Error(`snap needs the manifest entry for "${repoRel}" with its size (one frame) declared first`);
+      if (entry.size.w % manifest.grid.w !== 0 || entry.size.h % manifest.grid.h !== 0)
+        throw new Error(`manifest size ${entry.size.w}x${entry.size.h} for "${repoRel}" is not a multiple of grid ${manifest.grid.w}x${manifest.grid.h}`);
+      const target = { w: entry.size.w * (entry.frames ?? 1), h: entry.size.h };
+      if (img.width < target.w || img.height < target.h)
+        throw new Error(`generated ${img.width}x${img.height} is smaller than the asset ${target.w}x${target.h}; generate at least the target size`);
+      const r = snapToGrid(img, target);
+      lastSnap = { scaleX: r.scaleX, scaleY: r.scaleY, uniform: r.uniform, integerScale: r.integerScale };
+      img = r.image;
+    }
+    if (opts.lock) {
+      const r = lockPalette(img, manifest.palette);
+      lockChanged += r.stats.pixelsChanged;
+      lockMaxDistance = Math.max(lockMaxDistance, r.stats.maxDistance);
+      img = r.image;
+    }
+    if (opts.outline) img = addOutline(img, opts.outline);
+    await artWritePng(workspace, rel, img);
+  }
+  if (opts.snap && lastSnap) steps.snap = lastSnap;
+  if (opts.lock) steps.lock = { pixelsChanged: lockChanged, maxDistance: lockMaxDistance };
+  if (opts.outline) steps.outline = { color: opts.outline };
+  return steps;
+}
+
+const providerEnum = z.enum(["pixellab", "retrodiffusion"]);
+
+/** Log a reported balance; write ONE ledger note per low threshold per provider per day. */
+function noteCredits(
+  ctx: ToolContext, provider: ProviderName, bal: Balance | null, source: string, generationsUsed: number | null = null,
+): { provider: ProviderName; remaining: number | null; unit: Balance["unit"] | null; total: number | null; generations_used: number | null; low_notes: string[] } {
+  if (bal === null || !Number.isFinite(bal.remaining)) return { provider, remaining: null, unit: null, total: null, generations_used: generationsUsed, low_notes: [] };
+  const paths = statePaths(ctx.runsDir);
+  const ledgerFile = ctx.ledgerFile ?? LEDGER_FILE;
+  const noted = (ref: string) => ledgerRead(ledgerFile).some((e) => e.kind === "decision" && e.topic === "art.credits_low" && (e.refs ?? []).includes(ref));
+  const line = { ts: new Date().toISOString(), provider, remaining: bal.remaining, unit: bal.unit, total: bal.total, generations_used: generationsUsed, run_id: ctx.run_id ?? "unknown", source };
+  const notes = recordCredit(paths.credits, line, noted);
+  const what = bal.unit === "generations" ? `${bal.remaining} generations left${bal.total !== null ? ` of ${bal.total}` : ""}` : `${bal.remaining} USD left`;
+  for (const n of notes)
+    ledgerAppend({
+      kind: "decision", ts: new Date().toISOString(), agent: ctx.agent ?? "art_generate", run_id: ctx.run_id ?? "unknown", topic: "art.credits_low",
+      decision: n.threshold === "zero"
+        ? `${provider} is out (${what}): generation moves to the other provider or the procedural floor`
+        : n.threshold === "low400"
+          ? `${provider} is low: ${what} (at or under ${LOW_GENERATIONS})`
+          : `${provider} credits are low: ${what}, under ${LOW_PCT}% of today's first reading ${n.first_today}`,
+      rationale: "Credits are not topped up by the harness (no purchases). Conserve: anchors only for bake-offs, quote batches, cap regenerations and candidates.",
+      refs: [n.ref, statePaths(ctx.runsDir).credits],
+    }, ledgerFile);
+  return { provider, remaining: bal.remaining, unit: bal.unit, total: bal.total, generations_used: generationsUsed, low_notes: notes.map((n) => n.threshold) };
+}
+const LOW_PCT = 20;
+
+const artGenerate: ToolImpl = {
+  description:
+    "Generate pixel art with a paid provider (PixelLab or Retro Diffusion) and write PNGs into the workspace. " +
+    "Every call reports cost_micro_usd and is charged to the run budget — no raw generations land unprocessed when " +
+    "postprocess is set: snap downscales to the manifest grid, lock forces the manifest palette, outline takes the " +
+    "style bible's outline color. The manifest must be locked (game_clone) before postprocess can run. " +
+    `Credits are free-trial and never topped up: omit provider to use the reference anchor's winning provider; an exhausted provider falls back to the other once; with both gone the result is {exhausted:"all", fallback:"procedural"} at no cost. ` +
+    `Each asset gets one generation plus ${MAX_REGENERATIONS} regenerations. Animation (frames or rd_animation/rd_advanced_animation styles) needs justify. Quote batches with art_quote first. ` +
+    `max_candidates (default ${DEFAULT_CANDIDATES}, max ${MAX_CANDIDATES}) caps the images kept per call to keep the gallery reviewable; it does not save generations. ` +
+    "PixelLab results report generations_used (subscription balance before vs after).",
+  input: z
+    .object({
+      provider: providerEnum.optional().describe("omit to use the anchor-winning provider of `reference` (art_anchor_winner)"),
+      prompt: z.string().min(1).max(2000),
+      width: z.number().int().min(12).max(792),
+      height: z.number().int().min(12).max(792),
+      out: z.string().min(1).regex(/\.png$/i, "out must end in .png").describe("workspace-relative output PNG"),
+      reference: z.string().min(1).optional().describe("workspace-relative reference/anchor PNG"),
+      seed: z.number().int().nonnegative().optional(),
+      frames: z.number().int().optional().describe("animation frames_duration (Retro Diffusion only: 4|6|8|10|12|16)"),
+      transparent: z.boolean().optional().describe("transparent background (default true)"),
+      style: z.string().max(120).optional().describe("Retro Diffusion prompt_style id"),
+      max_candidates: z.number().int().min(1).max(MAX_CANDIDATES).default(DEFAULT_CANDIDATES).describe(`keep at most this many returned images (default ${DEFAULT_CANDIDATES}); extras are discarded unwritten. Keeps the gallery reviewable; it does NOT save generations (the provider bills what it made)`),
+      justify: z.string().min(10).max(300).optional().describe("required for animation: why the cheaper ladder steps (cutout parts, in-engine motion) won't do"),
+      postprocess: z
+        .object({
+          snap: z.boolean().optional().describe("downscale to the manifest entry's full size (size × frames) by majority vote"),
+          lock: z.boolean().optional().describe("force the manifest palette (OKLab nearest)"),
+          outline: hexColor.optional().describe("outline color from the style bible; omit to skip outlining"),
+        })
+        .strict()
+        .optional(),
+    })
+    .strict(),
+  async run(i, ctx) {
+    const paths = statePaths(ctx.runsDir);
+    const done = generationCount(paths.gallery, i.out);
+    if (done >= 1 + MAX_REGENERATIONS)
+      return { content: `refused: ${i.out} has had ${done} paid generations (1 + ${MAX_REGENERATIONS} regenerations is the cap). Fix the prompt/reference or cut to the fallback ladder.`, is_error: true };
+    if (isAnimation(i) && !i.justify)
+      return { content: "refused: animation endpoints (frames, rd_animation__*, rd_advanced_animation__*) are the expensive ones; pass justify with why cutout parts or in-engine motion won't do", is_error: true };
+    const winner = i.reference ? anchorWinner(paths.gallery, i.reference) : undefined;
+    let requested: ProviderName | undefined = i.provider;
+    if (!requested) {
+      if (!winner) return { content: `provider is required: no anchor winner is recorded${i.reference ? ` for ${i.reference}` : " (no reference given)"}. Bake-offs are for anchors; record the winner with art_anchor_winner.`, is_error: true };
+      requested = winner;
+    } else if (winner && requested !== winner && !isExhausted(paths.providers, winner)) {
+      return { content: `refused: ${i.reference}'s anchor bake-off was won by ${winner}; batch generation uses it (omit provider). Only anchors are generated on both.`, is_error: true };
+    }
+
+    const exhausted: ProviderName[] = [];
+    const notes: string[] = [];
+    let result: GenerateResult | null = null;
+    let credits: ReturnType<typeof noteCredits> | null = null;
+    let before: Balance | null = null;
+    for (const p of [requested, other(requested)]) {
+      if (isExhausted(paths.providers, p)) {
+        exhausted.push(p);
+        continue;
+      }
+      if (p !== requested && i.frames !== undefined && p === "pixellab") {
+        notes.push("pixellab cannot animate through this interface, so there is no animation fallback");
+        continue;
+      }
+      if (p !== requested) notes.push(`${requested} is exhausted; tried ${p} once instead (same prompt and size)`);
+      try {
+        const { justify: _j, postprocess: _p, max_candidates, ...gen } = i;
+        // PixelLab: read the (free) balance before and after, so the result says what the call used
+        before = p === "pixellab" ? await providerBalance("pixellab", {}).catch(() => null) : null;
+        result = await generate({ ...gen, provider: p, maxCandidates: max_candidates }, { workspace: ctx.workspace });
+        break;
+      } catch (e) {
+        if (e instanceof ProviderExhausted) {
+          markExhausted(paths.providers, p, { remaining_balance: e.remaining_balance, reason: e.message });
+          noteCredits(ctx, p, { remaining: e.remaining_balance ?? 0, unit: p === "pixellab" && before?.unit === "generations" ? "generations" : "usd", total: before?.total ?? null }, "exhausted");
+          exhausted.push(p);
+          continue;
+        }
+        if (e instanceof ChargedFailure) {
+          countGeneration(paths.gallery, i.out); // it billed
+          return { content: errText(e), is_error: true, cost_micro_usd: e.cost_micro_usd };
+        }
+        return { content: errText(e), is_error: true };
+      }
+    }
+    if (!result) {
+      const all = PROVIDERS.every((p) => exhausted.includes(p));
+      return {
+        content: JSON.stringify({
+          exhausted: all ? "all" : exhausted, fallback: "procedural", cost_micro_usd: 0, notes,
+          next: "Take the fallback ladder's floor: simple shapes animated in engine (bob, flash, squash-and-stretch, particles). Log it with log_decision (topic art.provider_fallback). This is a guaranteed outcome, not a failure.",
+        }),
+        cost_micro_usd: 0,
+      };
+    }
+    const generation = countGeneration(paths.gallery, i.out);
+    const after: Balance | null = typeof result.metadata.remaining_balance === "number"
+      ? { remaining: result.metadata.remaining_balance as number, unit: "usd", total: null }
+      : await providerBalance(result.provider, {}).catch(() => null);
+    const used = before && after && before.unit === "generations" && after.unit === "generations" ? Math.round((before.remaining - after.remaining) * 1000) / 1000 : null;
+    credits = noteCredits(ctx, result.provider, after, "generation", used);
+    const extra = { generation: `${generation} of ${1 + MAX_REGENERATIONS}`, credits, ...(used !== null ? { generations_used: used } : {}), ...(result.provider !== requested ? { fallback_from: requested } : {}), ...(notes.length ? { notes } : {}) };
+    try {
+      let postprocess: Record<string, unknown> | null = null;
+      if (i.postprocess && (i.postprocess.snap || i.postprocess.lock || i.postprocess.outline))
+        postprocess = await applyArtPostprocess(ctx.workspace, i.postprocess, result.images);
+      return { content: JSON.stringify({ ...result, postprocess, ...extra }), cost_micro_usd: result.cost_micro_usd };
+    } catch (e) {
+      // generation succeeded and was paid; postprocess failing must not erase the charge
+      return { content: `generated ${result.images.join(", ")} but postprocess failed: ${errText(e)} ${JSON.stringify(extra)}`, is_error: true, cost_micro_usd: result.cost_micro_usd };
+    }
+  },
+};
+
+const artQuote: ToolImpl = {
+  description:
+    "Free cost check before a batch: Retro Diffusion's check_cost dry run (generates and charges nothing) or PixelLab's price table, " +
+    "times count, with the remaining balance. Run it before any batch of art_generate calls.",
+  input: z
+    .object({
+      provider: providerEnum,
+      prompt: z.string().min(1).max(2000),
+      width: z.number().int().min(12).max(792),
+      height: z.number().int().min(12).max(792),
+      count: z.number().int().min(1).max(200).describe("how many calls the batch will make"),
+      reference: z.string().min(1).optional(),
+      frames: z.number().int().optional(),
+      style: z.string().max(120).optional(),
+    })
+    .strict(),
+  async run({ count, ...i }, ctx) {
+    const paths = statePaths(ctx.runsDir);
+    if (isExhausted(paths.providers, i.provider)) return { content: JSON.stringify({ provider: i.provider, exhausted: true, per_call_usd: null, total_usd: null }) };
+    try {
+      const q = await providerQuote({ ...i, out: "quote.png" }, { workspace: ctx.workspace });
+      const credits = noteCredits(ctx, q.provider, q.remaining_balance === null ? null : { remaining: q.remaining_balance, unit: q.unit, total: q.total ?? null }, "quote");
+      const total = Math.round(q.per_call_usd * count * 1e6) / 1e6;
+      return { content: JSON.stringify({ ...q, count, total_usd: total, affordable: q.remaining_balance === null || q.unit !== "usd" ? null : q.remaining_balance >= total, credits }) };
+    } catch (e) {
+      if (e instanceof ProviderExhausted) {
+        markExhausted(paths.providers, i.provider, { remaining_balance: e.remaining_balance, reason: e.message });
+        noteCredits(ctx, i.provider, { remaining: e.remaining_balance ?? 0, unit: "usd", total: null }, "exhausted");
+      }
+      return { content: errText(e), is_error: true };
+    }
+  },
+};
+
+const artAnchorWinner: ToolImpl = {
+  description: "Record which provider won an anchor's bake-off. art_generate then defaults to it for every asset that references that anchor.",
+  input: z.object({ anchor: z.string().min(1).describe("workspace-relative anchor PNG, as you pass it to reference"), provider: providerEnum, why: z.string().min(3).max(300) }).strict(),
+  async run({ anchor, provider, why }, ctx) {
+    recordAnchorWinner(statePaths(ctx.runsDir).gallery, anchor, provider, ctx.run_id ?? "unknown", why);
+    return { content: JSON.stringify({ anchor, provider, recorded: true }) };
+  },
+};
+
+const artProviders: ToolImpl = {
+  description: "Read-only: which providers are exhausted, the latest reported balance of each, anchor winners, and per-asset generation counts.",
+  input: z.object({}).strict(),
+  async run(_i, ctx) {
+    const paths = statePaths(ctx.runsDir);
+    const credits = readCredits(paths.credits);
+    const latest = Object.fromEntries(PROVIDERS.map((p) => [p, credits.filter((c) => c.provider === p).at(-1) ?? null]));
+    const g = readGallery(paths.gallery);
+    return { content: clip(JSON.stringify({ providers: readProviders(paths.providers), latest_balance: latest, anchors: g.anchors, generations: g.generations, max_regenerations: MAX_REGENERATIONS })) };
+  },
+};
+
 // ---------- itch_push / itch_status: butler sends (ask-gated by spec) ----------
 // butler reads BUTLER_API_KEY from env itself, so the key is never in argv, results, or the ledger.
 
@@ -1029,6 +1446,148 @@ const siteStatus: ToolImpl = {
   },
 };
 
+// ---------- media_capture (tools/media): stills, footage, and deterministic edits for marketing ----------
+// Built against docs/contracts only. Inputs are workspace-relative (the game clone is <workspace>/game);
+// outputs land under <workspace>/media/. The game is launched from the clone with cwd = the clone, and
+// the launch command must be a file inside the clone or the engine binary (GODOT_BIN, default "godot").
+
+const MEDIA_NAME = /^[a-z0-9][a-z0-9_-]{0,47}$/;
+
+/** A workspace path under media/ (outputs). */
+function mediaOut(workspace: string, rel: string): string {
+  const norm = path.posix.normalize(rel.replace(/\\/g, "/"));
+  if (!norm.startsWith("media/") || norm.includes("/../")) throw new Error(`outputs go under media/ in your workspace, got "${rel}"`);
+  return resolveInWorkspace(workspace, norm);
+}
+
+// Launch args are allowlisted (review R16-2): engine flags that pick a renderer/driver or a window
+// mode only. Anything that runs other code or another project (--script/-s, --main-pack, --editor,
+// --path elsewhere, -e, --debug-server…) is refused.
+const LAUNCH_FLAGS = new Set(["--headless", "--windowed"]);
+const LAUNCH_VALUE_FLAGS = new Set(["--rendering-method", "--rendering-driver", "--display-driver", "--audio-driver"]);
+const LAUNCH_VALUE = /^[A-Za-z0-9_.-]{1,40}$/;
+
+/**
+ * The launch argv: the engine binary by name (GODOT_BIN, default "godot") run on the clone, or a
+ * built desktop export under the clone's dist/ (build.md). Trust note: dist/ is inside an
+ * agent-writable clone, so an agent that can also write there could plant its own executable.
+ */
+export function mediaLaunch(clone: string, launch: string[]): string[] {
+  const [bin, ...rest] = launch;
+  const engine = process.env.GODOT_BIN ?? "godot";
+  const isEngine = bin === engine;
+  let exe = bin;
+  if (!isEngine) {
+    exe = resolveInWorkspace(clone, bin);
+    if (!exe.startsWith(path.join(clone, "dist") + path.sep)) throw new Error(`launch[0] must be the engine ("${engine}") or a desktop build under the clone's dist/ (build.sh output); "${bin}" is neither`);
+    if (!existsSync(exe)) throw new Error(`launch[0] ${bin} does not exist in the clone (run build.sh first)`);
+  }
+  const out: string[] = [];
+  for (let k = 0; k < rest.length; k++) {
+    const a = rest[k];
+    if (LAUNCH_FLAGS.has(a)) out.push(a);
+    else if (LAUNCH_VALUE_FLAGS.has(a) && LAUNCH_VALUE.test(rest[k + 1] ?? "")) out.push(a, rest[++k]);
+    else if (isEngine && a === "--path") {
+      const target = rest[++k] ?? "";
+      if (resolveInWorkspace(clone, target) !== clone) throw new Error(`--path must be the game clone itself (".") , got "${target}"`);
+      out.push(a, clone);
+    } else throw new Error(`launch argument "${a}" is not allowed (allowed: ${[...LAUNCH_FLAGS, ...LAUNCH_VALUE_FLAGS].join(", ")}${isEngine ? ", --path ." : ""})`);
+  }
+  return [exe, ...out];
+}
+
+const mediaTools: Record<string, ToolImpl> = {
+  media_capture: {
+    description:
+      "Capture from the running desktop build through the harness contracts: launches it from the game clone with " +
+      "--qa --seed --time-scale --autoplay --policy --resolution. mode 'ticks': pause, step to each tick, screenshot. " +
+      "mode 'events': screenshot when listed events fire (pause → dump_state → screenshot → resume). mode 'movie': engine " +
+      "movie mode (--write-movie) until --exit-after-ticks. Stills/footage go to media/<name>/. Timeouts kill the game.",
+    input: z
+      .object({
+        name: z.string().regex(MEDIA_NAME).describe("output folder media/<name>/"),
+        mode: z.enum(["ticks", "events", "movie"]),
+        launch: z.array(z.string().min(1)).min(1).max(12).describe('argv prefix: ["godot", "--path", "."] (engine on the clone) or ["dist/<target>/<game>"]; extra args only --headless, --windowed, --rendering-method/--rendering-driver/--display-driver/--audio-driver <name>'),
+        separator: z.literal("--").optional().describe('put "--" between engine args and game flags (Godot user args)'),
+        seed: z.number().int().nonnegative(),
+        time_scale: z.number().min(0.1).max(20).default(1),
+        policy: z.string().regex(MEDIA_POLICY).describe("random | greedy | script:PATH (PATH relative to the game clone)"),
+        width: z.number().int().min(64).max(3840).default(1280),
+        height: z.number().int().min(64).max(2160).default(720),
+        ticks: z.array(z.number().int().nonnegative()).min(1).max(60).optional().describe("mode ticks"),
+        triggers: z.array(z.object({ event: z.string().min(1).max(40), every: z.number().int().min(1).optional(), max: z.number().int().min(1).optional() }).strict()).min(1).max(10).optional().describe("mode events"),
+        max_shots: z.number().int().min(1).max(60).default(12),
+        exit_after_ticks: z.number().int().min(1).optional().describe("mode movie (required)"),
+        movie_file: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,47}\.avi$/).default("footage.avi"),
+        timeout_s: z.number().int().min(5).max(1800).default(300),
+      })
+      .strict(),
+    async run(i, ctx) {
+      try {
+        const clone = path.join(ctx.workspace, "game");
+        if (!existsSync(clone)) throw new Error("no clone yet; call game_clone first");
+        if (i.policy.startsWith("script:")) {
+          const script = resolveInWorkspace(clone, i.policy.slice("script:".length));
+          if (!existsSync(script)) throw new Error(`policy script ${i.policy.slice(7)} does not exist in the game clone`);
+        }
+        const outDir = mediaOut(ctx.workspace, `media/${i.name}`);
+        let mode: CaptureMode;
+        if (i.mode === "ticks") {
+          if (!i.ticks) throw new Error("mode ticks needs ticks");
+          mode = { kind: "ticks", ticks: i.ticks };
+        } else if (i.mode === "events") {
+          if (!i.triggers) throw new Error("mode events needs triggers");
+          mode = { kind: "events", triggers: i.triggers, max_shots: i.max_shots };
+        } else {
+          if (!i.exit_after_ticks) throw new Error("mode movie needs exit_after_ticks");
+          mode = { kind: "movie", file: path.join(outDir, i.movie_file), exit_after_ticks: i.exit_after_ticks };
+        }
+        const r = await mediaCapture({
+          gameDir: clone, launch: mediaLaunch(clone, i.launch), separator: i.separator, seed: i.seed, timeScale: i.time_scale,
+          policy: i.policy, resolution: { w: i.width, h: i.height }, outDir, mode, timeoutMs: i.timeout_s * 1000,
+        });
+        const rel = (f: string) => path.relative(ctx.workspace, f);
+        return {
+          content: clip(JSON.stringify({
+            shots: r.shots.map((s) => ({ ...s, file: rel(s.file) })),
+            movie: r.movie ? { file: rel(r.movie.file), bytes: r.movie.bytes } : undefined,
+            exit: r.exit, events_seen: r.events_seen, notes: r.notes,
+          })),
+        };
+      } catch (e) {
+        return { content: clip(errText(e), 4000), is_error: true };
+      }
+    },
+  },
+  media_edit: {
+    description:
+      "Execute an edit plan (a JSON file you wrote in your workspace) with ffmpeg: clips {source,start_s,end_s} or " +
+      "{still: PNG, duration_s} in order, nearest-neighbour scaling to output width×height (letterboxed), fixed fps, " +
+      "mp4 (H.264 yuv420p) or GIF (palettegen/paletteuse), optional max_bytes/max_duration_s caps. Output path under media/.",
+    input: z.object({ plan: z.string().min(1).describe("workspace-relative plan JSON: {schema_version:1, clips:[…], output:{path,format,width,height,fps,max_bytes?,max_duration_s?}}") }).strict(),
+    async run({ plan }, ctx) {
+      try {
+        const planJson = JSON.parse(await readFile(resolveInWorkspace(ctx.workspace, plan), "utf8"));
+        const r = await mediaEdit(planJson, { resolveInput: (rel) => resolveInWorkspace(ctx.workspace, rel), resolveOutput: (rel) => mediaOut(ctx.workspace, rel) });
+        return { content: JSON.stringify({ ...r, out: path.relative(ctx.workspace, r.out) }) };
+      } catch (e) {
+        return { content: clip(errText(e), 4000), is_error: true };
+      }
+    },
+  },
+  media_probe: {
+    description: "ffprobe summary of a media file in your workspace: format, duration, size, video codec/size/fps/pix_fmt/frames, audio.",
+    input: z.object({ path: z.string().min(1) }).strict(),
+    async run({ path: rel }, ctx) {
+      try {
+        return { content: JSON.stringify(await mediaProbe(resolveInWorkspace(ctx.workspace, rel))) };
+      } catch (e) {
+        return { content: clip(errText(e), 2000), is_error: true };
+      }
+    },
+  },
+};
+
 /** Each capability provides one or more model-facing tools. */
 export const IMPLS: Record<CapabilityName, Record<string, ToolImpl>> = {
   catalog_query: catalogTools,
@@ -1040,14 +1599,17 @@ export const IMPLS: Record<CapabilityName, Record<string, ToolImpl>> = {
   web_search: { web_search: webSearch },
   workspace_read: { workspace_read: workspaceRead },
   workspace_write: { workspace_write: workspaceWrite },
+  image_view: { art_view: artView },
   game_repo: gameRepoTools,
   art_tools: artTools,
+  art_generate: { art_generate: artGenerate, art_quote: artQuote, art_anchor_winner: artAnchorWinner, art_providers: artProviders },
   itch_push: { itch_push: itchPush },
   itch_status: { itch_status: itchStatus },
   email_send: { email_send: emailSend },
   site_deploy: { site_deploy: siteDeploy },
   site_status: { site_status: siteStatus },
   board: boardTools,
+  media_capture: mediaTools,
 };
 
 /** Model-facing tool name → its capability and implementation. */

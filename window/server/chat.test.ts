@@ -132,9 +132,11 @@ test("chat: interventions are ledgered only from the event start, with the messa
     await f.waitFor(() => f.events().filter((e) => e.type === "agent.message").length === 2, "second answer");
     const ledger = readFileSync(w.ledgerFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
     assert.equal(ledger.length, 1);
-    assert.deepEqual(ledger[0], { kind: "intervention", ts: "2026-11-07T21:00:01.000Z", who: "operator", action: "chat message to studio-head", reason: "pause the art loop" });
-    const summary = await (await fetch(`${base}/interventions`)).json() as { count: number; entries: Array<{ reason: string }> };
+    assert.deepEqual(ledger[0], { kind: "intervention", ts: "2026-11-07T21:00:01.000Z", who: "operator", action: "chat message to studio-head", reason: "pause the art loop", category: "steering" });
+    const summary = await (await fetch(`${base}/interventions`)).json() as { count: number; by_category: Record<string, number>; steering: number; entries: Array<{ reason: string }> };
     assert.equal(summary.count, 1);
+    assert.deepEqual(summary.by_category, { steering: 1 });
+    assert.equal(summary.steering, 1);
     assert.equal(summary.entries[0].reason, "pause the art loop");
     f.stop();
   } finally {

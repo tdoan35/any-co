@@ -34,7 +34,7 @@ test("weave shows board cards read-only: doing → presence, blocked → pulse +
   const at = "2026-11-07T22:00:00.000Z";
   const card = (id: string, status: "todo" | "doing" | "blocked" | "done", assignee: string, note: string | null = null) =>
     ({ id, title: `Card ${id}`, body: "", note, status, assignee, blocked_by: [], created_at: at, updated_at: at });
-  const snap = buildWeave([], ["market-analyst", "tech-lead", "qa-lead", "playtester"], f, [
+  const snap = buildWeave([], ["market-analyst", "tech-lead", "qa-lead", "playtester"], f, undefined, [
     card("c1", "doing", "market-analyst"),
     card("c2", "blocked", "tech-lead", "error: run r-1 — build failed"),
     card("c3", "todo", "qa-lead"),

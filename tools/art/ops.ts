@@ -260,3 +260,17 @@ export function splitStrip(img: RgbaImage, frames: number): RgbaImage[] {
   }
   return out;
 }
+
+/** Nearest-neighbour integer upscale, pixel-art style: each pixel becomes a k×k block (art_view). */
+export function upscaleNearest(img: RgbaImage, k: number): RgbaImage {
+  if (!Number.isInteger(k) || k < 1) throw new Error(`upscale factor must be a positive integer, got ${k}`);
+  const out = makeImage(img.width * k, img.height * k);
+  for (let y = 0; y < out.height; y++) {
+    const sy = (y / k) | 0;
+    for (let x = 0; x < out.width; x++) {
+      const si = (sy * img.width + ((x / k) | 0)) * 4;
+      out.data.set(img.data.subarray(si, si + 4), (y * out.width + x) * 4);
+    }
+  }
+  return out;
+}

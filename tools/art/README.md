@@ -14,6 +14,7 @@ outline <in.png> <out.png> --color "#rrggbb" [--mode outer]
 strip   <in.png> --frames N [--out-dir DIR]        (default: <in>-frames/)
 sheet   <out.png> --frames "a.png,b.png,..." [--anchor N] [--scale N] [--gap N]
 gate    <game-repo-dir> [--schema <asset.schema.json>]
+providers [--clear <pixellab|retrodiffusion>]   credit state; clearing an exhausted provider is human-only
 ```
 
 Exit codes: 0 = ok, 1 = gate verdict fail, 2 = usage error or crash (bad args, unreadable file). `sheet` also writes
@@ -72,6 +73,12 @@ Report shape: `{ ok, manifest, files, assets: [{ id, path, type, pass, checks[],
 `ok` is false when the manifest is invalid, files are missing/unlisted, or any check fails.
 
 ## Runner capability
+
+`art_generate` (generate.ts + credits.ts) is credit-aware because both providers run on free
+trials (PROVIDERS.md "Credits"): `art_generate`, `art_quote` (free cost check), `art_anchor_winner`,
+`art_providers` (read-only state). State: `runs/art-providers.json`, `runs/art-credits.jsonl`,
+`runs/art-gallery.json` (env `ART_PROVIDERS_FILE` / `ART_CREDITS_FILE` / `ART_GALLERY_FILE`).
+
 
 `art_tools` (runner/tools/registry.ts) exposes `art_lock`, `art_snap`, `art_outline`,
 `art_strip`, `art_sheet`, `art_gate` as model-facing tools. All paths are

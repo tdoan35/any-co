@@ -43,7 +43,9 @@ If the task includes the Critic's review, revise all three pitches:
 
 ## Rules
 - `gap_label` must be one of the gap labels in the task, exactly.
-- `wants_addressed[].want` must copy a want statement from the player findings exactly.
+- `wants_addressed[].want` names a player finding by its id in the task (the `[W3]` before the
+  statement): write just `W3`. If you write the statement instead, copy all of it exactly, up to
+  the sizing in parentheses: a shortened or reworded statement fails the check.
 - `comparables` must be real games (use the catalog tools for their appids).
 - Be concrete. "Satisfying combat" is not a hook; "each card you play shoves enemies one tile,
   and chain-shoves into spikes" is.
