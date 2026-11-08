@@ -1598,12 +1598,12 @@ export function validateLaunchArgv(argv: unknown, clone: string): string[] {
   return argv;
 }
 
-type QaMode = "smoke" | "check" | "determinism" | "export-check";
+type QaMode = "smoke" | "check" | "determinism" | "export-check" | "ui-lint";
 
 async function runQa(mode: QaMode, input: Record<string, unknown>, ctx: ToolContext): Promise<{ content: string; is_error?: boolean }> {
   try {
     const clone = path.join(ctx.workspace, "game");
-    if (!existsSync(path.join(clone, "project.godot")) && mode !== "check") {
+    if (!existsSync(path.join(clone, "project.godot")) && mode !== "check" && mode !== "ui-lint") {
       throw new Error(`no game clone at ${path.relative(ctx.workspace, clone)}; call game_clone first`);
     }
     if (mode === "export-check") {
@@ -1629,19 +1629,25 @@ async function runQa(mode: QaMode, input: Record<string, unknown>, ctx: ToolCont
       if (!Number.isFinite(n) || n < 0) throw new Error(`${k} must be a non-negative number`);
       return n;
     };
-    if (mode !== "check") {
+    if (mode === "check" || mode === "ui-lint") {
+      const dir = input["qa_dir"];
+      // ui-lint wants the clone root (its CLI resolves <dir>/state.json); check wants <dir>/qa.
+      cli["dir"] = typeof dir === "string" ? resolveInWorkspace(ctx.workspace, path.join("game", dir)) : mode === "ui-lint" ? clone : path.join(clone, "qa");
+    } else {
       const cmd = validateLaunchArgv(input["cmd"], clone);
       cli["cmd"] = JSON.stringify(cmd);
       cli["dir"] = clone;
       cli["seed"] = numArg("seed", input["seed"] ?? 0);
       cli["ticks"] = numArg("ticks", input["ticks"] ?? 0);
       if (input["policy"] !== undefined) cli["policy"] = String(input["policy"]);
-    } else {
-      const dir = input["qa_dir"];
-      cli["dir"] = typeof dir === "string" ? resolveInWorkspace(ctx.workspace, path.join("game", dir, "qa")) : path.join(clone, "qa");
     }
     // Mandatory caps (ms): a QA run can't hang the agent loop.
     cli["ack-timeout-ms"] = numArg("ack_timeout_ms", input["ack_timeout_ms"] ?? 30_000);
+    if (mode === "ui-lint") {
+      if (input["viewport"] !== undefined) cli["viewport"] = String(input["viewport"]);
+      if (input["min_text_px"] !== undefined) cli["min-text-px"] = numArg("min_text_px", input["min_text_px"]);
+      if (input["grid_px"] !== undefined) cli["grid-px"] = numArg("grid_px", input["grid_px"]);
+    }
     if (input["ready_timeout_ms"] !== undefined) cli["ready-timeout-ms"] = numArg("ready_timeout_ms", input["ready_timeout_ms"]);
     cli["end-wait-ms"] = numArg("end_wait_ms", input["end_wait_ms"] ?? 120_000);
     if (input["step_frames"] !== undefined) cli["step-frames"] = numArg("step_frames", input["step_frames"]);
@@ -1738,7 +1744,23 @@ const qaExportCheck: ToolImpl = {
   },
 };
 
-const qaHarnessTools = { qa_smoke: qaSmoke, qa_check: qaCheck, qa_determinism: qaDeterminism, qa_export_check: qaExportCheck };
+const qaUiLint: ToolImpl = {
+  description:
+    "UI layout lint over the ui[] of the clone's qa/state.json (release-gate layer when the game emits ui[]): overlapping visible non-overlay elements, off-screen/clipped rects, text below min px, optional grid snap. Absent ui[] => ui_lint_not_implemented (reported, not a pass). Verdict JSON {ok, exitCode, checks[], ui:{status,findings[],dumpsChecked}} — findings carry {check, ids, rects, tick, detail}.",
+  input: z
+    .object({
+      qa_dir: z.string().optional().describe("game-clone dir holding qa/; default the clone root"),
+      viewport: z.string().optional().describe("WxH, default 1280x720 (the --resolution backbuffer)"),
+      min_text_px: z.number().min(1).max(72).optional().describe("minimum font size (default 10)"),
+      grid_px: z.number().min(1).max(512).optional().describe("require x/y on this grid, e.g. 8"),
+    })
+    .strict(),
+  async run(input, ctx) {
+    return runQa("ui-lint", input, ctx);
+  },
+};
+
+const qaHarnessTools = { qa_smoke: qaSmoke, qa_check: qaCheck, qa_determinism: qaDeterminism, qa_export_check: qaExportCheck, qa_ui_lint: qaUiLint };
 
 // ---------- media_capture (tools/media): stills, footage, and deterministic edits for marketing ----------
 // Built against docs/contracts only. Inputs are workspace-relative (the game clone is <workspace>/game);

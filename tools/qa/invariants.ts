@@ -217,6 +217,7 @@ export function firstDifference(a: unknown, b: unknown, at = "$"): string | null
 const SUPPORTED_KEYWORDS: Record<string, true> = {
   $schema: true, $id: true, title: true, description: true,
   type: true, const: true, enum: true, minLength: true, maxLength: true, minimum: true,
+  minItems: true, maxItems: true,
   items: true, properties: true, required: true, additionalProperties: true,
 };
 
@@ -253,8 +254,14 @@ export function validateValue(schema: unknown, value: unknown, at: string): stri
     const min = num(schema["minimum"]);
     if (min !== undefined && value < min) errors.push(`${at}: ${value} below minimum ${min}`);
   }
-  if (Array.isArray(value) && schema["items"] !== undefined) {
-    value.forEach((item, i) => errors.push(...validateValue(schema["items"], item, `${at}[${i}]`)));
+  if (Array.isArray(value)) {
+    const minItems = num(schema["minItems"]);
+    const maxItems = num(schema["maxItems"]);
+    if (minItems !== undefined && value.length < minItems) errors.push(`${at}: fewer than minItems ${minItems}`);
+    if (maxItems !== undefined && value.length > maxItems) errors.push(`${at}: more than maxItems ${maxItems}`);
+    if (schema["items"] !== undefined) {
+      value.forEach((item, i) => errors.push(...validateValue(schema["items"], item, `${at}[${i}]`)));
+    }
   }
   // Object keywords apply to every object value, with or without `properties` (D6: `resources` has none).
   if (isObj(value)) {
