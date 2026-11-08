@@ -907,3 +907,103 @@ test("T46 dispatcher: STUDIO_AUTO_ART_MERGE=off, complete:false, or a non-artist
   const { board, card } = await ticketRig([submitWith({ complete: true, summary: "Built and pushed." })]);
   assert.deepEqual((await board.comments(card.id)).filter((c) => c.body.startsWith("art-merge:")), [], "ticket-agent is not an artist");
 });
+
+// ---- T48: a card's files hand off to the cards that depend on it ----
+
+import { mkdirSync, symlinkSync, readFileSync as readFs } from "node:fs";
+import { snapshotRun, handoffDir, HANDOFF_CAPS } from "./handoff.ts";
+
+/** The workspace of the (only) run in `runsDir` whose dir name ends with `-<agent>`. */
+const wsOf = (runsDir: string, agent: string) => {
+  const run = readdirSync(runsDir).find((d) => d.endsWith(`-${agent}`) && existsSync(path.join(runsDir, d, "workspace")))!;
+  return path.join(runsDir, run, "workspace");
+};
+const put = (ws: string, rel: string, content: string | Buffer) => {
+  mkdirSync(path.dirname(path.join(ws, rel)), { recursive: true });
+  writeFileSync(path.join(ws, rel), content);
+};
+
+test("T48: a writer card's files reach its dependent's run at upstream/<id>/ (read via workspace_read); game clone, symlink escapes, secrets and over-cap files stay behind", async () => {
+  const runsDir = tmpDir();
+  const board = new LocalBoard(path.join(runsDir, "board.jsonl"));
+  const writer = await loadAgent("handoff-writer", FIX);
+  const reader = await loadAgent("handoff-reader", FIX);
+  const outside = path.join(tmpDir(), "outside-secret.txt");
+  writeFileSync(outside, "not yours");
+  const writerProvider = new FakeProvider([
+    () => {
+      const ws = wsOf(runsDir, "handoff-writer");
+      put(ws, "store/itch-page.md", "# Caravan Cargo Cult\nA store page.\n");
+      put(ws, "social/caption-1.txt", "caption one");
+      put(ws, "marketing/huge.md", "x".repeat(HANDOFF_CAPS.textBytes + 1));
+      put(ws, ".env", "OPENAI_API_KEY=sk-nope");
+      put(ws, "game/README.md", "the game clone");
+      put(ws, "game/media_tmp/trailer.txt", "rendered trailer stand-in");
+      put(ws, "contracts/README.md", "harness contracts");
+      symlinkSync(outside, path.join(ws, "store", "linked.txt"));
+      return submitWith({ complete: true, files: [{ path: "game/media_tmp/trailer.txt" }], summary: "store page written" });
+    },
+  ]);
+  let readerTask = "";
+  const readerProvider = new FakeProvider([
+    (req) => {
+      readerTask = String(req.messages.at(-1)?.content);
+      return { content: [{ type: "tool_use", id: "r1", name: "workspace_read", input: { path: `upstream/${aId}/store/itch-page.md` } }], stop_reason: "tool_use" };
+    },
+    submitWith({ answer: "read it" }, "s2"),
+  ]);
+  const d = new Dispatcher({ board, specs: new Map([["handoff-writer", writer], ["handoff-reader", reader]]), provider: (s) => (s.name === "handoff-writer" ? writerProvider : readerProvider), runsDir, maxParallel: 4 });
+  const a = await board.create({ title: "Write the store page", assignee: "handoff-writer" });
+  const aId = a.card.id;
+  await board.create({ title: "Check the store page", assignee: "handoff-reader", blocked_by: [aId] });
+  await d.pass();
+  await d.wait();
+  await d.pass();
+  await d.wait();
+
+  // the snapshot and its manifest
+  const snap = handoffDir(runsDir, aId);
+  const manifest = JSON.parse(readFs(path.join(snap, "manifest.json"), "utf8"));
+  const copied = manifest.files.filter((f: { copied: boolean }) => f.copied).map((f: { path: string }) => f.path).sort();
+  assert.deepEqual(copied, ["game/media_tmp/trailer.txt", "social/caption-1.txt", "store/itch-page.md"]);
+  const skipped = Object.fromEntries(manifest.files.filter((f: { copied: boolean }) => !f.copied).map((f: { path: string; skipped: string }) => [f.path, f.skipped]));
+  assert.match(skipped["marketing/huge.md"], /over the 256 KB per-file cap/);
+  assert.match(skipped[".env"], /secret-looking name/);
+  assert.match(skipped["store/linked.txt"], /resolves outside the run's workspace/);
+  assert.ok(!existsSync(path.join(snap, "game", "README.md")), "the game clone is not copied");
+  assert.ok(!existsSync(path.join(snap, "contracts")), "contracts are not copied");
+  assert.equal(manifest.files.find((f: { path: string }) => f.path === "store/itch-page.md").sha256.length, 64);
+
+  // the dependent run: files in its workspace, named in its task, and read through the real workspace_read tool
+  const rws = wsOf(runsDir, "handoff-reader");
+  assert.equal(readFs(path.join(rws, "upstream", aId, "store", "itch-page.md"), "utf8"), "# Caravan Cargo Cult\nA store page.\n");
+  assert.match(readerTask, new RegExp(`files from ${aId} \\(handoff-writer\\): upstream/${aId}/ — game/media_tmp/trailer\\.txt, social/caption-1\\.txt, store/itch-page\\.md`));
+  const toolResult = JSON.stringify(readerProvider.requests[1].messages.at(-1));
+  assert.match(toolResult, /# Caravan Cargo Cult/, "workspace_read returned the upstream file");
+  assert.doesNotMatch(toolResult, /is_error/);
+});
+
+test("T48: a re-run of the same card replaces its snapshot; image_view reads an upstream PNG", async () => {
+  const runsDir = tmpDir();
+  const ws1 = path.join(runsDir, "r1", "workspace");
+  const ws2 = path.join(runsDir, "r2", "workspace");
+  put(ws1, "old.md", "first run");
+  put(ws2, "new.md", "second run");
+  snapshotRun(runsDir, "r1", "crd_same", "x", {});
+  snapshotRun(runsDir, "r2", "crd_same", "x", {});
+  assert.ok(existsSync(path.join(handoffDir(runsDir, "crd_same"), "new.md")));
+  assert.ok(!existsSync(path.join(handoffDir(runsDir, "crd_same"), "old.md")), "latest run wins");
+
+  const { encodePng, makeImage } = await import("../tools/art/png.ts");
+  const ws3 = path.join(runsDir, "r3", "workspace");
+  put(ws3, "art/cover.png", Buffer.from(encodePng(makeImage(8, 8))));
+  snapshotRun(runsDir, "r3", "crd_art", "art-director", {});
+  const { handIn } = await import("./handoff.ts");
+  const consumer = path.join(runsDir, "r4", "workspace");
+  mkdirSync(consumer, { recursive: true });
+  handIn(runsDir, consumer, [{ id: "crd_art" }]);
+  const { IMPLS } = await import("./tools/impl.ts");
+  const v = await IMPLS.image_view.art_view.run({ path: "upstream/crd_art/art/cover.png" }, { workspace: consumer, naive: null, runsDir, run_id: "r4" });
+  assert.equal(v.is_error, undefined, v.content);
+  assert.match(v.content, /^8×8 PNG/);
+});
