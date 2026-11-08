@@ -88,6 +88,15 @@ export const AgentSpecInput = z
 export type AgentSpecInput = z.input<typeof AgentSpecInput>;
 export type AgentSpec = z.output<typeof AgentSpecInput> & { system: string; dir: string };
 
+/**
+ * Required in the output of every agent that does ticket work (T29). The dispatcher closes the card as done
+ * only when this is true; false blocks the card with the agent's own summary, so "ran to the end" is never
+ * mistaken for "the work is done". One shared field, so the description is identical in every spec.
+ */
+export const COMPLETE_DESCRIPTION =
+  "true only if the ticket's done criteria are met and the work is committed and pushed; false if anything is left (out of budget or turns, blocked, partial, uncommitted)";
+export const COMPLETE = z.boolean().describe(COMPLETE_DESCRIPTION);
+
 /** Identity helper so spec files get type checking. Validation happens in the loader. */
 export function defineAgent(spec: AgentSpecInput): AgentSpecInput {
   return spec;

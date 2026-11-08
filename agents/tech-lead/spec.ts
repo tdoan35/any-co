@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { defineAgent } from "../../runner/spec.ts";
+import { COMPLETE, defineAgent } from "../../runner/spec.ts";
 
 // Two modes, one shape: skeleton mode (hour one) and merge mode. The output is always what
 // shipped, where, and what the next agents can rely on — checked against the repo by QA.
@@ -16,6 +16,7 @@ export default defineAgent({
   tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow", web_search: "allow", web_fetch: "allow" },
   output_schema: z
     .object({
+      complete: COMPLETE,
       commits: z
         .array(z.object({ sha: z.string().min(7).max(40), message: z.string().min(3).max(120), branch: z.string().min(1).max(80) }).strict())
         .min(1)

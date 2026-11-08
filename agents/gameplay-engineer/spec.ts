@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { defineAgent } from "../../runner/spec.ts";
+import { COMPLETE, defineAgent } from "../../runner/spec.ts";
 
 // One ticket per task, own clone + branch, never merges. Self-test evidence is copied from
 // game_exec output; QA re-runs it. (Roster runs two instances of this spec.)
@@ -14,6 +14,7 @@ export default defineAgent({
   tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow" },
   output_schema: z
     .object({
+      complete: COMPLETE,
       ticket: z.string().min(3).max(120).describe("The ticket id/title from the task, copied exactly"),
       summary: z.string().min(20).max(600).describe("What you built and the design choices worth knowing"),
       files: z

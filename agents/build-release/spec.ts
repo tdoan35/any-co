@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { defineAgent } from "../../runner/spec.ts";
+import { COMPLETE, defineAgent } from "../../runner/spec.ts";
 
 // Builds and staging are local work. Sends that leave the machine go through gated tools the
 // operator approves one by one: itch_push (dry-run by default) and site_deploy (the studio site
@@ -15,6 +15,7 @@ export default defineAgent({
   tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow", web_fetch: "allow", itch_push: "ask", itch_status: "allow", site_deploy: "ask", site_status: "allow" },
   output_schema: z
     .object({
+      complete: COMPLETE,
       build_id: z.string().min(1).max(60).describe("From dist/build_id, exactly"),
       builds: z
         .array(

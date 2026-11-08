@@ -215,6 +215,18 @@ export function cardTask(card: BoardCard, blockers: BoardCard[]): string {
   return parts.join("\n\n");
 }
 
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** The agent's own words about what's left: its summary or notes (top level, else one level down), else the output. */
+function agentNote(r: RunResult): string {
+  const o = r.output as Record<string, unknown>;
+  const pick = (x: Record<string, unknown>) => [x.summary, x.notes].find((v): v is string => typeof v === "string" && v.trim().length > 0);
+  const nested = Object.values(o).filter(isObject).map(pick).find(Boolean);
+  const text = pick(o) ?? nested;
+  if (!text) return summary(r);
+  return text.length > 600 ? text.slice(0, 600) + "…" : text;
+}
+
 function summary(r: RunResult): string {
   if (r.output === null || r.output === undefined) return "(no output)";
   const text = typeof r.output === "string" ? r.output : JSON.stringify(r.output);
@@ -363,7 +375,11 @@ export class Dispatcher {
       return;
     }
     const money = `$${(r.spent_micro_usd / 1e6).toFixed(4)}`;
-    if (r.status === "done") {
+    if (r.status === "done" && isObject(r.output) && r.output.complete === false) {
+      // ran to the end but says the work isn't done (T29): never close it as done
+      await close("blocked", `not complete: run ${r.run_id}, ${money} — ${agentNote(r)}`);
+      this.opts.log?.(`■ card ${card.id} blocked: run ${r.run_id} reported complete:false`);
+    } else if (r.status === "done") {
       await close("done", `done: run ${r.run_id}, ${money} — ${summary(r)}`);
       this.opts.log?.(`✓ card ${card.id} done: run ${r.run_id}, ${money}`);
     } else if (r.status === "killed") {

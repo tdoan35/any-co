@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { defineAgent } from "../../runner/spec.ts";
+import { COMPLETE, defineAgent } from "../../runner/spec.ts";
 
 // Tilesets, UI and capsule art: more stills, fewer animation retries than characters, but
 // sheet styles (tilesets, ui panels) are single higher-priced calls — $12/day, $4/task.
@@ -15,6 +15,7 @@ export default defineAgent({
   tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", art_tools: "allow", art_generate: "allow", studio_ledger: "allow" },
   output_schema: z
     .object({
+      complete: COMPLETE,
       generated: z
         .array(
           z

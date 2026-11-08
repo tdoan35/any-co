@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { defineAgent } from "../../runner/spec.ts";
+import { COMPLETE, defineAgent } from "../../runner/spec.ts";
 
 // The player proxy: drives the game through the contracts, reads states/events, and reports
 // what a human would feel — confusion, dead time, unfair deaths. No vision tool yet, so
@@ -16,6 +16,7 @@ export default defineAgent({
   tools: { game_repo: "allow", qa_harness: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow" },
   output_schema: z
     .object({
+      complete: COMPLETE,
       runs: z
         .array(
           z

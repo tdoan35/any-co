@@ -653,3 +653,55 @@ test("T20c b: an absent lock under the mutex is wx'd, never rm'd — a fast take
   await worker.terminate();
   assert.notEqual(winner, "unknown", "some taker held the lock");
 });
+
+// ---- T29: a card closes as done only when the agent says the work is done ----
+
+async function ticketRig(replies: Array<Partial<ModelReply>>) {
+  const runsDir = tmpDir();
+  const board = new LocalBoard(path.join(runsDir, "board.jsonl"));
+  const spec = await loadAgent("ticket-agent", FIX);
+  const provider = new FakeProvider(replies);
+  const d = new Dispatcher({ board, specs: new Map([["ticket-agent", spec]]), provider: () => provider, runsDir });
+  const { card } = await board.create({ title: "Build the thing", assignee: "ticket-agent" });
+  const { card: next } = await board.create({ title: "Use the thing", assignee: "ticket-agent", blocked_by: [card.id] });
+  await d.pass();
+  await d.wait();
+  return { board, card: await board.get(card.id), next, provider, d };
+}
+const submitWith = (input: Record<string, unknown>, id = "s1"): Partial<ModelReply> => ({ content: [{ type: "tool_use", id, name: "submit_result", input }], stop_reason: "tool_use" });
+
+test("T29: complete:false blocks the card with a 'not complete' note in the agent's words; downstream stays waiting", async () => {
+  const { card, board, next, d } = await ticketRig([submitWith({ complete: false, summary: "NOT DONE, nothing committed: ran out of budget before the battle scene" })]);
+  assert.equal(card.status, "blocked");
+  assert.match(card.note ?? "", /^not complete: run \S+-ticket-agent, \$[\d.]+ — NOT DONE, nothing committed: ran out of budget/);
+  const res = await d.pass();
+  assert.equal(res.started, 0, "the downstream card does not start on a not-complete blocker");
+  assert.equal((await board.get(next.id)).status, "blocked", "it waits on a blocker that is not done");
+});
+
+test("T29: complete:true closes the card as done", async () => {
+  const { card, board, next } = await ticketRig([submitWith({ complete: true, summary: "Built and pushed." })]);
+  assert.equal(card.status, "done");
+  assert.match(card.note ?? "", /^done: run/);
+  assert.equal((await board.get(next.id)).status, "todo", "the downstream card is released");
+});
+
+test("T29: a submit without `complete` fails the spec's schema on the runner's submit path", async () => {
+  const { card, provider } = await ticketRig([submitWith({ summary: "forgot the flag" }), submitWith({ complete: true, summary: "now with the flag" }, "s2")]);
+  const rejected = JSON.stringify(provider.requests[1].messages.at(-1));
+  assert.match(rejected, /complete/, "the runner sent the schema error back to the model");
+  assert.equal(card.status, "done", "the corrected submit then closes it");
+});
+
+test("T29: every ticket-work agent requires `complete` with the same description", async () => {
+  const { COMPLETE_DESCRIPTION } = await import("./spec.ts");
+  const AGENTS = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "agents");
+  for (const name of ["gameplay-engineer", "gameplay-engineer-b", "tech-lead", "level-content-designer", "art-director", "sprite-artist", "env-ui-artist", "qa-lead", "playtester", "build-release"]) {
+    const spec = await loadAgent(name, AGENTS);
+    const js = JSON.stringify((await import("zod")).z.toJSONSchema(spec.output_schema!));
+    const schema = JSON.parse(js) as { required?: string[]; properties?: Record<string, { type?: string; description?: string }> };
+    assert.ok(schema.required?.includes("complete"), `${name}: complete is required`);
+    assert.equal(schema.properties?.complete?.type, "boolean", name);
+    assert.equal(schema.properties?.complete?.description, COMPLETE_DESCRIPTION, name);
+  }
+});
