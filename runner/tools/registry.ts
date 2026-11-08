@@ -109,6 +109,12 @@ export const CAPABILITIES = {
     local: true,
     note: "Needs STUDIO_SITE_APP_ID in env.",
   },
+  art_signoff: {
+    summary: "Human checkpoint before batch art: the operator approves or denies the anchor set (style bible + contact sheet) via the approval queue",
+    naive: [],
+    local: true,
+    note: "Ask-gated: blocks in the approvals queue (T1). Grant art_signoff: 'ask' to art-director only. A denial returns its note as a normal result so the anchors get revised.",
+  },
 } as const satisfies Record<string, Capability>;
 
 export type CapabilityName = keyof typeof CAPABILITIES;

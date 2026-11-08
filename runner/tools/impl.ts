@@ -18,6 +18,7 @@ import {
   MAX_REGENERATIONS, PROVIDERS, anchorWinner, countGeneration, generationCount, isExhausted, markExhausted, other, readCredits, readGallery,
   readProviders, recordAnchorWinner, recordCredit, statePaths,
 } from "../../tools/art/credits.ts";
+import { GALLERY_DIR, nextGalleryOrdinal, recordGalleryImage } from "../../tools/art/gallery.ts";
 import { append as ledgerAppend, read as ledgerRead, LEDGER_FILE } from "../../tools/ledger/ledger.ts";
 import type { ImageBlock } from "../types.ts";
 import { AGENTS_DIR } from "../load.ts";
@@ -1145,6 +1146,77 @@ const artProviders: ToolImpl = {
   },
 };
 
+// ---------- gallery (T18): never overwrite — art/gallery/<asset>/<n>-<provider>-<verdict>.png ----------
+// The Art Director (or the runner helpers below) copies a candidate/sheet into the clone's gallery
+// and indexes it; the asset gate ignores art/ (review material, not game assets) and exports never
+// see it (it is not under assets/ and not inside dist/).
+
+/** Next gallery path for an asset: lowest unused ordinal, so a write never clobbers an earlier one. */
+export function nextGalleryPath(repoRoot: string, asset: string, provider: string, verdict: string): string {
+  const n = nextGalleryOrdinal(repoRoot, asset);
+  return `${GALLERY_DIR}/${asset}/${n}-${provider}-${verdict}.png`;
+}
+
+/** Copy one PNG into the clone's gallery and index it. Throws when the source is missing or not a PNG. */
+export async function galleryRecord(
+  clone: string,
+  entry: { asset: string; source: string; provider: string; verdict: "accepted" | "rejected"; reason: string; gate?: Record<string, unknown> | null },
+  runId: string,
+): Promise<{ file: string; entry: unknown }> {
+  const bytes = await readFile(path.join(clone, entry.source));
+  if (bytes.length < 8 || bytes.subarray(1, 4).toString("latin1") !== "PNG") throw new Error(`gallery source is not a PNG: ${entry.source}`);
+  const file = nextGalleryPath(clone, entry.asset, entry.provider, entry.verdict);
+  const abs = path.join(clone, file);
+  await mkdir(path.dirname(abs), { recursive: true });
+  await writeFile(abs, bytes);
+  const recorded = recordGalleryImage(clone, {
+    asset: entry.asset,
+    file,
+    provider: entry.provider === "contact-sheet" ? "contact-sheet" : (entry.provider as "pixellab" | "retrodiffusion"),
+    verdict: entry.verdict,
+    reason: entry.reason,
+    gate: entry.gate ?? null,
+    run_id: runId,
+  });
+  return { file, entry: recorded };
+}
+
+// ---------- art_signoff (T18): the human checkpoint before any batch beyond the anchors ----------
+// ask-gated by the spec (art-director only): the call blocks in the approvals queue (T1) until the
+// operator approves or denies it. Approval → continue; denial → the note comes back as a normal
+// result the model can act on (revise the anchors), not a dead end.
+
+const artSignoff: ToolImpl = {
+  description:
+    "Ask the human operator to sign off on the anchor set before ANY batch generation beyond the anchors. " +
+    "Pass the style bible path and the anchor contact sheet path (both inside your clone); the call blocks until the operator decides.",
+  input: z
+    .object({
+      style_bible_path: z.string().min(3).max(200).describe("repo-relative style bible, e.g. docs/style-bible.md"),
+      contact_sheet_path: z.string().min(3).max(200).describe("repo-relative anchor contact sheet PNG"),
+    })
+    .strict(),
+  async run(i, ctx) {
+    // Inputs are recorded in the approval request (the queue shows them to the operator); the body
+    // only restates what was signed off, so the transcript carries the checkpoint too.
+    return {
+      content: JSON.stringify({
+        signoff: "granted",
+        style_bible: i.style_bible_path,
+        contact_sheet: i.contact_sheet_path,
+        next: "Continue the batch: generate non-anchor assets against the anchors.",
+      }),
+    };
+  },
+};
+
+const deniedSignoff = (note: string) =>
+  JSON.stringify({
+    signoff: "denied",
+    note,
+    next: "Revise the anchors (regenerate, re-lock the manifest if the palette or grid changed), then ask again.",
+  });
+
 // ---------- itch_push / itch_status: butler sends (ask-gated by spec) ----------
 // butler reads BUTLER_API_KEY from env itself, so the key is never in argv, results, or the ledger.
 
@@ -1396,6 +1468,7 @@ export const IMPLS: Record<CapabilityName, Record<string, ToolImpl>> = {
   email_send: { email_send: emailSend },
   site_deploy: { site_deploy: siteDeploy },
   site_status: { site_status: siteStatus },
+  art_signoff: { art_signoff: artSignoff },
   board: boardTools,
 };
 

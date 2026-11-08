@@ -12,7 +12,7 @@ export default defineAgent({
   runner: "local",
   model: "z-ai/glm-5.3",
   budget: { cap_usd: 12, max_task_usd: 4, period: "day" },
-  tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", art_tools: "allow", art_generate: "allow", image_view: "allow", studio_ledger: "allow" },
+  tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", art_tools: "allow", art_generate: "allow", image_view: "allow", art_signoff: "ask", studio_ledger: "allow" },
   output_schema: z
     .object({
       style_bible: z.string().min(3).max(200).describe("Repo path of the style bible (docs/style-bible.md)"),
