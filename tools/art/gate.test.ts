@@ -487,25 +487,52 @@ test("style: the outline color comes from the entry, else the manifest; outline 
   assert.equal(tile.asset.numbers.outlineShare, null);
 });
 
-test("style: a color mix or contrast far from the anchor fails style_similarity", () => {
-  // all-RED fill (no BODY) with the outline: the color mix shares only the outline with the anchor
-  const flat = familyRepo(shape(BOMB, () => RED, DARK), { anchor_mode: "style" });
-  assert.ok(flat.asset.numbers.paletteDistance! > 0.5);
+test("style: the color mix ignores the outline; an alien-interior recolor fails, a shared mix passes", () => {
+  // Real-shaped asset (outlined bomb), interior recolored to palette colors the anchor never uses.
+  // Outline and contrast still match, so only the non-outline color mix can catch it.
+  const alien = familyRepo(shape(BOMB, (x) => (x % 3 === 0 ? "#99aabb" : "#667788"), DARK), { anchor_mode: "style" });
+  const n = alien.asset.numbers;
+  assert.equal(n.paletteDistance, 1);
+  assert.ok(Math.abs(n.lumaRange! - n.anchorLumaRange!) <= DEFAULT_THRESHOLDS.maxLumaRangeDelta, "contrast alone would pass");
+  assert.equal(alien.check("style_outline")!.pass, true, "outline alone would pass");
+  assert.equal(alien.check("style_similarity")!.pass, false);
+  assert.match(alien.check("style_similarity")!.detail!, /non-outline color-mix distance 1\.0000/);
+  assert.equal(alien.report.ok, false);
+
+  // Same interior as the anchor, much more outline: the outline share does not move the distance.
+  const same = familyRepo(shape((x, y) => x <= 3 && y <= 3, () => BODY, DARK), { anchor_mode: "style" });
+  assert.equal(same.asset.numbers.paletteDistance, 0);
+
+  // Thresholds are options: a tighter cap fails the (passing by default) BODY+RED bomb.
+  const bomb = shape(BOMB, bombFill, DARK);
   const tight = runGate(writeRepo(
     { ...goodManifest(), assets: [
       { id: "jar", type: "sprite", path: "assets/goods/jar.png", size: { w: 16, h: 16 }, palette: [DARK, BODY, RED], anchor: null },
       { id: "bomb", type: "sprite", path: "assets/goods/bomb.png", size: { w: 16, h: 16 }, palette: [DARK, BODY, RED], anchor: "jar", anchor_mode: "style" },
     ] },
-    { "assets/goods/jar.png": encodePng(shape(JAR, () => BODY, DARK)), "assets/goods/bomb.png": encodePng(shape(BOMB, () => RED, DARK)) },
-  ), { thresholds: { maxPaletteDistance: 0.5 } });
+    { "assets/goods/jar.png": encodePng(shape(JAR, () => BODY, DARK)), "assets/goods/bomb.png": encodePng(bomb) },
+  ), { thresholds: { maxPaletteDistance: 0.3 } });
   assert.equal(tight.assets.find((a) => a.id === "bomb")!.checks.find((c) => c.name === "style_similarity")!.pass, false);
+});
+
+test("a strip that defaults to same-subject names the style fix when it drifts", () => {
+  const files = {
+    ...goodFiles(),
+    "assets/sprites/enemy-slug.png": encodePng(strip(2, 16, 16, (f, x, y) => (f === 0 ? RED : x >= 4 && x < 12 && y >= 4 && y < 12 ? RED : null))),
+  };
+  const slug = runGate(writeRepo(goodManifest(), files)).assets.find((a) => a.id === "enemy-slug")!;
+  assert.match(slug.checks.find((c) => c.name === "anchor_drift")!.detail!, /defaulted to same-subject for a strip; set anchor_mode: "style"/);
+  const declared = goodManifest();
+  declared.assets[1].anchor_mode = "same-subject";
+  const slug2 = runGate(writeRepo(declared, files)).assets.find((a) => a.id === "enemy-slug")!;
+  assert.doesNotMatch(slug2.checks.find((c) => c.name === "anchor_drift")!.detail!, /defaulted/);
 });
 
 test("anchor_mode is declared, never guessed: a single-frame asset with an anchor and no mode is refused", () => {
   const missing = familyRepo(shape(BOMB, bombFill, DARK), {});
   const c = missing.check("anchor_mode")!;
   assert.equal(c.pass, false);
-  assert.match(c.detail!, /must declare anchor_mode/);
+  assert.match(c.detail!, /Fix: set anchor_mode: "style" for cross-subject family members.*"same-subject" for frames of one subject/);
   assert.equal(missing.asset.numbers.anchorMode, null);
   assert.equal(missing.asset.numbers.anchorDrift, null);
   assert.equal(missing.report.ok, false);

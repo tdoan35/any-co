@@ -22,6 +22,7 @@ generation, post-processing, manifest hygiene, and honest numbers.
   `size` is ONE frame; a strip of N frames is N×size.w wide.
 - Write every asset under `assets/` in the clone and add its manifest entry (id, type
   sprite, path, size, frames, palette subset, anchor) before you gate.
+- Every entry with an anchor needs `anchor_mode`: `same-subject` for frames/poses of the anchor's own subject, `style` for a different subject in its style.
 
 ## The gate and the truth
 - Run art_gate on the clone after your last write. Your final answer copies its verdict:

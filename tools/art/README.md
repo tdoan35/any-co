@@ -60,7 +60,7 @@ truth, without loading the game:
 | frame_drift | max fraction of differing pixels between consecutive frames ≤ threshold |
 | anchor_mode | an asset with an anchor has a drift basis: declared `same-subject` / `style`, or `same-subject` by default for strips; a single-frame asset with an anchor and no mode fails, and so does a mode on an anchor sheet |
 | anchor_drift | `same-subject`: asset frame 0 vs anchor frame 0 differing fraction ≤ threshold (null/skip when frame sizes differ or the anchor layout is invalid); `style`: skipped |
-| style_similarity | `style` only: color-mix distance (total variation of opaque-pixel color histograms, 0 = same mix, 1 = no color shared) ≤ `maxPaletteDistance`, and \|luma range − anchor luma range\| ≤ `maxLumaRangeDelta` (range = p95 − p5 of opaque-pixel luma, 0..1); sizes may differ |
+| style_similarity | `style` only: color-mix distance (total variation of the color histograms of **non-outline** opaque pixels, 0 = same mix, 1 = no color shared; the resolved outline color is excluded) ≤ `maxPaletteDistance`, and \|luma range − anchor luma range\| ≤ `maxLumaRangeDelta` (range = p95 − p5 of opaque-pixel luma, 0..1); sizes may differ |
 | style_outline | `style` only: share of frame-0 edge pixels (opaque, 4-adjacent to transparent) in the outline color ≥ `minOutlineShare`. Color = entry `outline`, else manifest `outline`, else the anchor's dominant edge color (when it covers ≥ `minOutlineShare` of the anchor's edge); `null` = no outline expected |
 
 Non-PNG assets (audio, .ttf fonts) are checked for existence only; malformed frame
@@ -70,7 +70,7 @@ Thresholds (options to `runGate` / defaults):
 
 ```json
 { "maxOffPaletteShare": 0, "maxFrameDrift": 0.5, "maxAnchorDrift": 0.5,
-  "maxPaletteDistance": 0.85, "maxLumaRangeDelta": 0.4, "minOutlineShare": 0.8 }
+  "maxPaletteDistance": 0.95, "maxLumaRangeDelta": 0.4, "minOutlineShare": 0.8 }
 ```
 
 Report shape: `{ ok, manifest, files, assets: [{ id, path, type, pass, checks[], numbers }], thresholds }`.

@@ -59,7 +59,7 @@ all read it — the gate never loads the game.
     (`anchor_drift`, frame 0 vs anchor frame 0). The default for strips (`frames` > 1).
   - `"style"`: a different subject in the anchor's style (another item in the same icon set,
     another character in the same portrait framing, a tile). Pixel drift is skipped; the gate checks the
-    color mix (`paletteDistance`), contrast span (`lumaRange` vs `anchorLumaRange`) and outline
+    non-outline color mix (`paletteDistance`), contrast span (`lumaRange` vs `anchorLumaRange`) and outline
     (`outlineShare`) against the anchor, on top of the palette, size, grid and frame checks.
   - A single-frame asset with an `anchor` must declare one; the gate refuses it otherwise.
     Anchor sheets (`anchor: null`) take none. Different silhouettes can hang off different anchors.
