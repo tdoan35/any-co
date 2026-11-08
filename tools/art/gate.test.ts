@@ -42,6 +42,8 @@ interface AssetFixture {
   frames?: number;
   palette: string[];
   anchor: string | null;
+  anchor_mode?: "same-subject" | "style";
+  outline?: string | null;
   anim?: Record<string, unknown>;
   notes?: string;
   duration_s?: number;
@@ -52,6 +54,7 @@ interface ManifestFixture {
   style_bible: string;
   grid: { w: number; h: number };
   palette: string[];
+  outline?: string | null;
   assets: AssetFixture[];
 }
 
@@ -383,4 +386,151 @@ test("validator implements exclusiveMinimum and exclusiveMaximum (every whitelis
   assert.deepEqual(validateSchema(10, schema), ["$: must be < 10"]);
   assert.deepEqual(validateSchema(11, schema), ["$: must be < 10"]);
   assert.deepEqual(validateSchema(0, schema), ["$: must be > 0"]);
+});
+
+// ---- anchor_mode (T30): same-subject drift vs cross-subject style ----
+
+/** A single 16x16 frame: `inside(x, y)` pixels get `fill(x, y)`, and inside pixels touching outside ones get `edge` (null: no outline). */
+function shape(inside: (x: number, y: number) => boolean, fill: (x: number, y: number) => string, edge: string | null): RgbaImage {
+  return strip(1, 16, 16, (_f, x, y) => {
+    if (!inside(x, y)) return null;
+    const rim = [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]].some(([nx, ny]) => nx < 0 || ny < 0 || nx > 15 || ny > 15 || !inside(nx, ny));
+    return rim && edge ? edge : fill(x, y);
+  });
+}
+const JAR = (x: number, y: number) => x <= 6 && y <= 6; // small top-left subject
+const BOMB = (x: number, y: number) => x >= 2 && y >= 6; // big bottom subject: a different silhouette
+const bombFill = (x: number) => (x % 3 === 0 ? BODY : RED);
+
+/** Anchor "jar" (outlined) + one single-frame "bomb" family member that is a different subject. */
+function familyRepo(bomb: RgbaImage, entry: Partial<AssetFixture>, top?: Partial<ManifestFixture>) {
+  const manifest: ManifestFixture = {
+    ...goodManifest(),
+    ...top,
+    assets: [
+      { id: "jar", type: "sprite", path: "assets/goods/jar.png", size: { w: 16, h: 16 }, palette: [DARK, BODY, RED], anchor: null },
+      { id: "bomb", type: "sprite", path: "assets/goods/bomb.png", size: { w: 16, h: 16 }, palette: [DARK, BODY, RED], anchor: "jar", ...entry },
+    ],
+  };
+  const files = {
+    "assets/goods/jar.png": encodePng(shape(JAR, () => BODY, DARK)),
+    "assets/goods/bomb.png": encodePng(bomb),
+  };
+  const report = runGate(writeRepo(manifest, files));
+  const asset = report.assets.find((a) => a.id === "bomb")!;
+  return { report, asset, check: (name: string) => asset.checks.find((c) => c.name === name) };
+}
+
+test("same-subject: a strip defaults to same-subject and still fails real anchor drift", () => {
+  const files = {
+    ...goodFiles(),
+    // frame 0 is a full RED block, nothing like the player's frame 0 → drift 1
+    "assets/sprites/enemy-slug.png": encodePng(strip(2, 16, 16, (f, x, y) => (f === 0 ? RED : x >= 4 && x < 12 && y >= 4 && y < 12 ? RED : null))),
+  };
+  const report = runGate(writeRepo(goodManifest(), files));
+  const slug = report.assets.find((a) => a.id === "enemy-slug")!;
+  assert.equal(slug.numbers.anchorMode, "same-subject");
+  assert.equal(slug.checks.find((c) => c.name === "anchor_mode")!.detail, "same-subject (default for strips)");
+  assert.equal(slug.numbers.anchorDrift, 1);
+  assert.equal(slug.checks.find((c) => c.name === "anchor_drift")!.pass, false);
+  assert.equal(report.ok, false);
+});
+
+test("style: a different subject passes on-palette with the anchor's outline, where same-subject drift fails it", () => {
+  const bomb = shape(BOMB, bombFill, DARK);
+  const same = familyRepo(bomb, { anchor_mode: "same-subject" });
+  assert.ok((same.asset.numbers.anchorDrift ?? 0) > 0.5, `drift ${same.asset.numbers.anchorDrift}`);
+  assert.equal(same.check("anchor_drift")!.pass, false);
+
+  const style = familyRepo(bomb, { anchor_mode: "style" });
+  assert.equal(style.report.ok, true, JSON.stringify(style.asset.checks.filter((c) => !c.pass)));
+  const n = style.asset.numbers;
+  assert.equal(n.anchorMode, "style");
+  assert.equal(n.anchorDrift, null);
+  assert.match(style.check("anchor_drift")!.detail!, /skipped: anchor_mode style/);
+  assert.equal(n.offPaletteShare, 0);
+  assert.equal(n.outlineColor, DARK); // inferred from the anchor's edge
+  assert.equal(n.outlineShare, 1);
+  assert.ok(n.paletteDistance! > 0 && n.paletteDistance! <= DEFAULT_THRESHOLDS.maxPaletteDistance, `distance ${n.paletteDistance}`);
+  assert.ok(Math.abs(n.lumaRange! - n.anchorLumaRange!) <= DEFAULT_THRESHOLDS.maxLumaRangeDelta);
+  assert.equal(style.check("style_similarity")!.pass, true);
+  assert.equal(style.check("style_outline")!.pass, true);
+});
+
+test("style: fails off-palette, and fails with no outline", () => {
+  const off = shape(BOMB, bombFill, DARK);
+  off.data.set([0x12, 0x34, 0x56, 255], (10 * 16 + 8) * 4); // one interior pixel off the locked palette
+  const offPalette = familyRepo(off, { anchor_mode: "style" });
+  assert.equal(offPalette.check("pixels_in_palette")!.pass, false);
+  assert.equal(offPalette.asset.pass, false);
+
+  const bare = familyRepo(shape(BOMB, bombFill, null), { anchor_mode: "style" });
+  assert.equal(bare.asset.numbers.outlineShare, 0);
+  assert.equal(bare.check("style_outline")!.pass, false);
+  assert.match(bare.check("style_outline")!.detail!, /outline #111111 \(anchor edge/);
+  assert.equal(bare.report.ok, false);
+});
+
+test("style: the outline color comes from the entry, else the manifest; outline null expects none", () => {
+  const bomb = shape(BOMB, bombFill, DARK);
+  const wrong = familyRepo(bomb, { anchor_mode: "style" }, { outline: RED });
+  assert.equal(wrong.asset.numbers.outlineColor, RED);
+  assert.equal(wrong.check("style_outline")!.pass, false);
+  assert.match(wrong.check("style_outline")!.detail!, /\(manifest;/);
+
+  const entry = familyRepo(bomb, { anchor_mode: "style", outline: DARK }, { outline: RED });
+  assert.equal(entry.check("style_outline")!.pass, true);
+  assert.match(entry.check("style_outline")!.detail!, /\(entry;/);
+
+  const tile = familyRepo(shape(() => true, bombFill, null), { anchor_mode: "style", outline: null });
+  assert.equal(tile.check("style_outline")!.pass, true);
+  assert.equal(tile.asset.numbers.outlineShare, null);
+});
+
+test("style: a color mix or contrast far from the anchor fails style_similarity", () => {
+  // all-RED fill (no BODY) with the outline: the color mix shares only the outline with the anchor
+  const flat = familyRepo(shape(BOMB, () => RED, DARK), { anchor_mode: "style" });
+  assert.ok(flat.asset.numbers.paletteDistance! > 0.5);
+  const tight = runGate(writeRepo(
+    { ...goodManifest(), assets: [
+      { id: "jar", type: "sprite", path: "assets/goods/jar.png", size: { w: 16, h: 16 }, palette: [DARK, BODY, RED], anchor: null },
+      { id: "bomb", type: "sprite", path: "assets/goods/bomb.png", size: { w: 16, h: 16 }, palette: [DARK, BODY, RED], anchor: "jar", anchor_mode: "style" },
+    ] },
+    { "assets/goods/jar.png": encodePng(shape(JAR, () => BODY, DARK)), "assets/goods/bomb.png": encodePng(shape(BOMB, () => RED, DARK)) },
+  ), { thresholds: { maxPaletteDistance: 0.5 } });
+  assert.equal(tight.assets.find((a) => a.id === "bomb")!.checks.find((c) => c.name === "style_similarity")!.pass, false);
+});
+
+test("anchor_mode is declared, never guessed: a single-frame asset with an anchor and no mode is refused", () => {
+  const missing = familyRepo(shape(BOMB, bombFill, DARK), {});
+  const c = missing.check("anchor_mode")!;
+  assert.equal(c.pass, false);
+  assert.match(c.detail!, /must declare anchor_mode/);
+  assert.equal(missing.asset.numbers.anchorMode, null);
+  assert.equal(missing.asset.numbers.anchorDrift, null);
+  assert.equal(missing.report.ok, false);
+
+  // a mode on an anchor sheet has nothing to compare against
+  const manifest = goodManifest();
+  manifest.assets[0].anchor_mode = "style";
+  const sheet = runGate(writeRepo(manifest, goodFiles())).assets.find((a) => a.id === "player")!;
+  assert.equal(sheet.checks.find((x) => x.name === "anchor_mode")!.pass, false);
+
+  // an unknown anchor still fails, whatever the mode
+  const unknown = familyRepo(shape(BOMB, bombFill, DARK), { anchor: "nope", anchor_mode: "style" });
+  assert.equal(unknown.check("anchor")!.pass, false);
+  assert.equal(unknown.check("style_similarity"), undefined);
+});
+
+test("validator accepts anchor_mode and outline, rejects other values", () => {
+  const m = goodManifest();
+  m.outline = DARK;
+  m.assets[1].anchor_mode = "style";
+  m.assets[1].outline = null;
+  assert.deepEqual(validateSchema(m, schema), []);
+  const bad = goodManifest();
+  (bad.assets[1] as unknown as Record<string, unknown>).anchor_mode = "subject";
+  assert.match(validateSchema(bad, schema).join("; "), /anchor_mode/);
+  const badOutline = { ...goodManifest(), outline: "black" };
+  assert.match(validateSchema(badOutline, schema).join("; "), /outline/);
 });

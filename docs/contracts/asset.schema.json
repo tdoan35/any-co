@@ -23,6 +23,7 @@
       "maxItems": 64,
       "items": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" }
     },
+    "outline": { "type": ["string", "null"], "pattern": "^#[0-9a-fA-F]{6}$" },
     "assets": {
       "type": "array",
       "minItems": 1,
@@ -49,6 +50,8 @@
             "items": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" }
           },
           "anchor": { "type": ["string", "null"], "maxLength": 60 },
+          "anchor_mode": { "enum": ["same-subject", "style"] },
+          "outline": { "type": ["string", "null"], "pattern": "^#[0-9a-fA-F]{6}$" },
           "anim": {
             "type": "object",
             "required": ["mode"],

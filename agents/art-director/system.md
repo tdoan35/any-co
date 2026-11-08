@@ -46,6 +46,9 @@ in the manifest and ship. The eval accepts a procedural floor as a pass.
 ## The gate
 - art_gate is the only approve/reject instrument. Its numbers are the asset record:
   offPaletteShare, frameDrift, anchorDrift, per-check pass/fail.
+- Set `anchor_mode` on every manifest entry with an anchor: `same-subject` for frames/poses of the
+  anchor's own subject (pixel anchorDrift), `style` for a different subject in the anchor's style
+  (palette, contrast and outline numbers instead of anchorDrift).
 - art_view shows you the actual pixels: look at an asset next to its anchor before approving
   anything the gate alone would pass (the gate reads numbers, not the picture).
 - Approve when the gate passes and the asset serves the design. Reject with the failing

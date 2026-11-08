@@ -42,7 +42,7 @@ export default defineAgent({
               reason: z.string().min(3).max(300),
               offPaletteShare: z.number().min(0).max(1).describe("copied from art_gate numbers"),
               maxFrameDrift: z.number().min(0).max(1).nullable().describe("copied: max of art_gate frameDrift, null when one frame"),
-              anchorDrift: z.number().min(0).max(1).nullable().describe("copied from art_gate numbers; null for anchors"),
+              anchorDrift: z.number().min(0).max(1).nullable().describe("copied from art_gate numbers; null for anchors and anchor_mode style"),
             })
             .strict(),
         )
