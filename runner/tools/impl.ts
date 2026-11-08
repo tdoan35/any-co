@@ -1054,7 +1054,8 @@ const artGenerate: ToolImpl = {
     "PixelLab results report generations_used (subscription balance before vs after). " +
     "provider comfy = the local lab ComfyUI (frozen IP-Adapter recipe on `reference`, seed = identity, default 42): free (cost 0, cost_source local), stills only, " +
     "always 768x768 with an opaque background, so pass postprocess (snap/lock/outline) to reach the manifest size and palette. Use it when the task or the anchor " +
-    "winner names comfy; when the lab is down the call falls back to pixellab once and comfy is tried again next call.",
+    "winner names comfy; when the lab is down the call falls back to pixellab once and comfy is tried again next call. " +
+    "Cost rule: comfy is free/local and needs a reference; pixellab costs 10-30 generations per call — default to comfy, spend pixellab only where it earns it, and pass max_candidates 1 with a justification when you do.",
   input: z
     .object({
       provider: providerEnum.optional().describe("omit to use the anchor-winning provider of `reference` (art_anchor_winner); comfy = the local lab (free, stills, 768x768)"),
