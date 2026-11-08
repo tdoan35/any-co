@@ -6,7 +6,7 @@ import { STUDIO_PROJECT_ID, teamIdOf } from "./runs.ts";
 
 const TONES = ["bg-ok-soft text-ok", "bg-run-soft text-run", "bg-warn-soft text-warn"];
 const DEPT_ORDER = ["head", "greenlight", "design", "art", "audio", "eng", "qa", "marketing", "ops", "test"];
-const titleCase = (s: string) => s.split(/[-_]/).map((w) => w[0]?.toUpperCase() + w.slice(1)).join(" ");
+export const titleCase = (s: string) => s.split(/[-_]/).map((w) => w[0]?.toUpperCase() + w.slice(1)).join(" ");
 /** Chart and role labels. Spec `dept` ids stay as they are. */
 const DEPT_LABEL: Record<string, string> = {
   head: "Studio Head",
@@ -92,7 +92,7 @@ export function buildRegistry(specs: AgentSpec[], busy: ReadonlySet<string>, ses
     return !(head && t.members.length === 1 && t.members[0].agentId === head.name);
   });
   const organizations: Organization[] = specs.length
-    ? [{ id: "studio", name: "any-co studio", headId: head?.name ?? "", slots: drawn.map((t) => ({ key: t.id, teamId: t.id })), handoffs: [] }]
+    ? [{ id: "studio", name: "Studio", headId: head?.name ?? "", slots: drawn.map((t) => ({ key: t.id, teamId: t.id })), handoffs: [] }]
     : [];
 
   return {

@@ -101,9 +101,12 @@ test("chat: a turn streams tool calls, one final agent.message, and keeps conver
     assert.deepEqual(seen, ["what's running?", "Nothing is running.", "and now?"]);
 
     // the sidebar lists the thread; the turn is also a normal run on the Work page
-    const reg = await (await fetch(`${base}/registry`)).json() as { sessions: Array<{ id: string; title: string; messages: number }> };
-    assert.deepEqual(reg.sessions.map((s) => [s.id, s.title, s.messages]), [[sessionId, "what's running?", 4]]);
-    assert.equal((reg.sessions[0] as unknown as { updated: string }).updated, "now");
+    const reg = await (await fetch(`${base}/registry`)).json() as { sessions: Array<{ id: string; title: string; messages: number; updated: string }> };
+    const rows = reg.sessions.map((s) => [s.id, s.title, s.messages] as const);
+    // The live thread leads; behind it the five seeded lead-agent threads, newest first.
+    assert.deepEqual(rows[0], [sessionId, "what's running?", 4]);
+    assert.deepEqual(rows.slice(1).map((r) => r[1]), ["Studio Head", "Greenlight Chair", "Game Design Director", "Art Director", "Marketing Lead"]);
+    assert.equal(reg.sessions[0].updated, "now");
     const runs = await (await fetch(`${base}/runs`)).json() as Array<{ id: string; teamId: string }>;
     assert.equal(runs.filter((r) => r.id.includes("studio-head")).length, 2);
     f.stop();

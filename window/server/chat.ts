@@ -22,6 +22,7 @@ import type { Block, Message, Provider } from "../../runner/types.ts";
 import type { Board } from "../../runner/board/index.ts";
 import type { NaiveClient } from "../../runner/providers.ts";
 import { append as ledgerAppend, LEDGER_FILE, read as ledgerRead, type DecisionEntry, type InterventionEntry } from "../../tools/ledger/ledger.ts";
+import { titleCase } from "./registry.ts";
 
 /** 1:00 PM PT on Sat Nov 7 2026 (PST, UTC-8). Messages before this are practice, not interventions. */
 export const DEFAULT_EVENT_START = "2026-11-07T21:00:00.000Z";
@@ -57,11 +58,28 @@ interface LiveSession {
   agentId: string;
   incognito: boolean;
   createdAt: string;
+  /** Fixed row title (the seeded lead threads); derived from the first message otherwise. */
+  title?: string;
+  /** Seeded lead threads live in memory until their first event writes them to disk. */
+  materialized: boolean;
   events: SessionEvent[];
   subscribers: Set<(f: Frame) => void>;
   queue: Promise<void>;
   turns: number;
 }
+
+/**
+ * The standing lead-agent threads in the sidebar — one per department voice, mock for now:
+ * each seeds in memory with a greeting and becomes a real persisted thread on the first
+ * message sent in it (that message runs that lead's own spec, like any chat turn).
+ */
+const LEAD_THREADS: Array<{ dept: string; ageMin: number; greeting: string }> = [
+  { dept: "head", ageMin: 18, greeting: "Studio Head here — ask me for the pulse, the board, or where the night went." },
+  { dept: "greenlight", ageMin: 60, greeting: "Greenlight Chair here — I can walk you through the shortlist and the pick." },
+  { dept: "design", ageMin: 180, greeting: "Game Design Director here — ask me about the design doc or the latest playtest." },
+  { dept: "art", ageMin: 480, greeting: "Art Director here — palette locks, sprite sheets, art review: what do you need?" },
+  { dept: "marketing", ageMin: 26 * 60, greeting: "Marketing Lead here — store page, posts, launch timing: ask away." },
+];
 
 const newId = () => `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 const text = (v: unknown) => (typeof v === "string" ? v : undefined);
@@ -77,6 +95,28 @@ export class ChatEngine {
     this.eventStart = Date.parse(opts.eventStart ?? DEFAULT_EVENT_START);
     this.ledgerFile = opts.ledgerFile ?? LEDGER_FILE;
     this.loadFromDisk();
+    this.seedLeadThreads();
+  }
+
+  /** One in-memory thread per lead department, so the sidebar opens onto voices, not session debris. */
+  private seedLeadThreads() {
+    const specs = this.opts.specs();
+    for (const lead of LEAD_THREADS) {
+      // A department can hold more than the lead (feasibility-critic, community-outreach):
+      // the thread belongs to the role-named spec, falling back to the department's only member.
+      const spec = specs.find((sp) => sp.dept === lead.dept && /(head|chair|director|lead)$/.test(sp.name))
+        ?? specs.find((sp) => sp.dept === lead.dept);
+      if (!spec) continue;
+      const id = `lead-${spec.name}`;
+      // Already on disk: the thread was seeded on an earlier boot and then messaged.
+      if (this.sessions.has(id)) continue;
+      const createdAt = new Date(this.now().getTime() - lead.ageMin * 60_000).toISOString();
+      const greeting: SessionEvent = { seq: 1, type: "agent.message", class: "fact", payload: { text: lead.greeting }, ts: createdAt };
+      this.sessions.set(id, {
+        id, agentId: spec.name, incognito: false, createdAt, title: titleCase(spec.name),
+        materialized: false, events: [greeting], subscribers: new Set(), queue: Promise.resolve(), turns: 0,
+      });
+    }
   }
 
   // ---- persistence ---------------------------------------------------------------------------------
@@ -87,7 +127,7 @@ export class ChatEngine {
       if (!d.isDirectory()) continue;
       try {
         const dir = path.join(this.opts.chatDir, d.name);
-        const meta = JSON.parse(readFileSync(path.join(dir, "meta.json"), "utf8")) as { agentId: string; incognito: boolean; createdAt: string };
+        const meta = JSON.parse(readFileSync(path.join(dir, "meta.json"), "utf8")) as { agentId: string; incognito: boolean; createdAt: string; title?: string };
         const events: SessionEvent[] = [];
         const file = path.join(dir, "events.jsonl");
         if (existsSync(file)) {
@@ -96,7 +136,7 @@ export class ChatEngine {
             try { events.push(JSON.parse(line) as SessionEvent); } catch { /* torn last line */ }
           }
         }
-        const s: LiveSession = { id: d.name, ...meta, events, subscribers: new Set(), queue: Promise.resolve(), turns: events.filter((e) => e.type === "message.received").length };
+        const s: LiveSession = { id: d.name, ...meta, materialized: true, events, subscribers: new Set(), queue: Promise.resolve(), turns: events.filter((e) => e.type === "message.received").length };
         this.sessions.set(s.id, s);
         // Crash recovery: the last human message never got its answer.
         const lastUser = [...events].reverse().find((e) => e.type === "message.received");
@@ -111,12 +151,22 @@ export class ChatEngine {
   }
 
   private append(s: LiveSession, type: string, payload: Record<string, unknown>, cls: "fact" | "telemetry" = "fact"): SessionEvent {
+    if (!s.materialized) this.materialize(s);
     const event: SessionEvent = { seq: (s.events.at(-1)?.seq ?? 0) + 1, type, class: cls, payload, ts: this.now().toISOString() };
     s.events.push(event);
     appendFileSync(path.join(this.opts.chatDir, s.id, "events.jsonl"), JSON.stringify(event) + "\n");
     for (const sub of s.subscribers) sub({ kind: "event", event });
     this.opts.onChange?.(s.id, `msg:${event.seq}`);
     return event;
+  }
+
+  /** A seeded lead thread's first event turns it into a real one: write what memory holds, then keep appending. */
+  private materialize(s: LiveSession) {
+    const dir = path.join(this.opts.chatDir, s.id);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "meta.json"), JSON.stringify({ agentId: s.agentId, incognito: s.incognito, createdAt: s.createdAt, ...(s.title ? { title: s.title } : {}) }));
+    if (s.events.length) writeFileSync(path.join(dir, "events.jsonl"), s.events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+    s.materialized = true;
   }
 
   // ---- commands ------------------------------------------------------------------------------------
@@ -128,7 +178,7 @@ export class ChatEngine {
     mkdirSync(dir, { recursive: true });
     const meta = { agentId, incognito, createdAt: this.now().toISOString() };
     writeFileSync(path.join(dir, "meta.json"), JSON.stringify(meta));
-    this.sessions.set(id, { id, ...meta, events: [], subscribers: new Set(), queue: Promise.resolve(), turns: 0 });
+    this.sessions.set(id, { id, ...meta, materialized: true, events: [], subscribers: new Set(), queue: Promise.resolve(), turns: 0 });
     return id;
   }
 
@@ -248,8 +298,10 @@ export class ChatEngine {
       .filter((s) => !s.incognito)
       .map((s) => {
         const first = s.events.find((e) => e.type === "message.received");
+        const p = first?.payload;
+        const firstText = p && typeof p === "object" && "text" in p ? text(p.text) : undefined;
         const last = s.events.at(-1);
-        const title = (text((first?.payload as { text?: string } | undefined)?.text) ?? "New thread").replace(/\s+/g, " ").slice(0, 48);
+        const title = s.title ?? (firstText ?? "New thread").replace(/\s+/g, " ").slice(0, 48);
         return {
           id: s.id,
           title,
@@ -258,9 +310,11 @@ export class ChatEngine {
           messages: s.events.filter((e) => e.type === "message.received" || e.type === "agent.message").length,
           updated: ago(last?.ts ?? s.createdAt, this.now()),
           status: "idle" as const,
+          ts: Date.parse(last?.ts ?? s.createdAt), // sort key; stripped below
         };
       })
-      .sort((a, b) => b.updated.localeCompare(a.updated));
+      .sort((a, b) => b.ts - a.ts)
+      .map(({ ts, ...row }) => row);
   }
 
   /** Interventions the ledger holds from the event start on (what judges will count). */
