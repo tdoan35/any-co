@@ -25,6 +25,7 @@ import { SESSION_PARAM, sessionHref } from "@/lib/chat/session";
 import { httpMode } from "@/lib/api";
 import { TabsProvider } from "./tabs";
 import { StudioBrand } from "./studio-switcher";
+import { StudioProjects } from "./studio-projects";
 import { TitleBar } from "./title-bar";
 
 const nav = [
@@ -362,7 +363,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </SidebarMenu>
           </SidebarGroup>
           <CollapsibleSection title="Projects" scroll="capped">
-            {projects().filter((p) => !p.archived).map((p) => <ProjectFolder key={p.id} project={p} />)}
+            {httpMode
+              ? <StudioProjects />
+              : projects().filter((p) => !p.archived).map((p) => <ProjectFolder key={p.id} project={p} />)}
           </CollapsibleSection>
           <CollapsibleSection title="Threads" scroll="fill">
             {ordered.map((x) => (
