@@ -273,8 +273,9 @@ export class Dispatcher {
 /** One Studio Head cycle turn: the spec, a fixed mechanical task, and a provider. */
 export interface HeadCycle {
   spec: AgentSpec;
-  /** Mechanism only — the CLI's task names no game, genre, or design content. */
-  task: string;
+  /** Mechanism only — the CLI's task names no game, genre, or design content. A function is called per turn
+   *  (so the task can carry the current time). */
+  task: string | (() => string);
   provider: (spec: AgentSpec) => Provider;
 }
 
@@ -328,7 +329,7 @@ export async function studioLoop(opts: StudioLoopOptions): Promise<void> {
         log("▶ studio-head cycle turn");
         try {
           const r = await runAgent(h.spec, {
-            task: h.task,
+            task: typeof h.task === "function" ? h.task() : h.task,
             provider: h.provider(h.spec),
             naive: opts.naive ?? null,
             approver: opts.approver ?? denyAll,

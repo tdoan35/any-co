@@ -15,7 +15,7 @@ import { naiveClient, providerFor } from "../runner/providers.ts";
 import { boardFromEnv } from "../runner/board/index.ts";
 import { studioLoop } from "../runner/dispatch.ts";
 import { buildApprover } from "./approver.ts";
-import { HEAD_TASK, hasGreenlightPick } from "../runner/head-cycle.ts";
+import { headTask, hasGreenlightPick } from "../runner/head-cycle.ts";
 import type { Approver } from "../runner/run.ts";
 
 const { values } = parseArgs({
@@ -90,7 +90,7 @@ await studioLoop({
   ...(head && headEveryMin !== undefined
     ? {
         headEveryMin,
-        head: { spec: head, task: HEAD_TASK, provider: (spec: typeof head) => providerFor(spec, naive) },
+        head: { spec: head, task: () => headTask(), provider: (spec: typeof head) => providerFor(spec, naive) },
         hasGreenlightPick: () => hasGreenlightPick(),
         headNow: values["head-now"],
       }
