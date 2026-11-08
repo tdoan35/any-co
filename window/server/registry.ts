@@ -7,6 +7,19 @@ import { STUDIO_PROJECT_ID, teamIdOf } from "./runs.ts";
 const TONES = ["bg-ok-soft text-ok", "bg-run-soft text-run", "bg-warn-soft text-warn"];
 const DEPT_ORDER = ["head", "greenlight", "design", "art", "audio", "eng", "qa", "marketing", "ops", "test"];
 const titleCase = (s: string) => s.split(/[-_]/).map((w) => w[0]?.toUpperCase() + w.slice(1)).join(" ");
+/** Chart and role labels. Spec `dept` ids stay as they are. */
+const DEPT_LABEL: Record<string, string> = {
+  head: "Studio Head",
+  greenlight: "Concept",
+  design: "Game Design",
+  art: "Art",
+  audio: "Audio",
+  eng: "Engineering",
+  qa: "QA",
+  marketing: "Marketing",
+  ops: "Operations",
+};
+const deptLabel = (dept: string) => DEPT_LABEL[dept] ?? titleCase(dept);
 const POLICY = { allow: "allowed", ask: "approval", deny: "blocked" } as const;
 
 export const PROJECT: Project = { id: STUDIO_PROJECT_ID, name: "Studio", goal: "Run the autonomous studio." };
@@ -17,7 +30,7 @@ export function profileOf(spec: AgentSpec): StudioProfile {
     agent: {
       id: spec.name,
       name: titleCase(spec.name),
-      role: titleCase(spec.dept),
+      role: deptLabel(spec.dept),
       tone,
       summary: spec.description,
       personality: "",
@@ -57,7 +70,7 @@ export function buildRegistry(specs: AgentSpec[], busy: ReadonlySet<string>, ses
     const members = byDept.get(dept)!;
     return {
       id: teamIdOf(dept),
-      name: titleCase(dept),
+      name: deptLabel(dept),
       tagline: `${members.length} agent${members.length === 1 ? "" : "s"}`,
       purpose: members.map((m) => m.description).join(" "),
       status: members.some((m) => busy.has(m.name)) ? "active" : "idle",
@@ -73,7 +86,11 @@ export function buildRegistry(specs: AgentSpec[], busy: ReadonlySet<string>, ses
   // The Studio Head tops the chart once a `head` spec exists. Until then headId is "" and the UI
   // shows a placeholder: no other agent stands in. A team made only of the head isn't drawn twice.
   const head = specs.find((s) => s.dept === "head");
-  const drawn = teams.filter((t) => !(head && t.members.length === 1 && t.members[0].agentId === head.name));
+  // The head is not drawn twice. `test` is the harness toy, not a studio department: it stays on the Agents tab.
+  const drawn = teams.filter((t) => {
+    if (t.id === teamIdOf("test")) return false;
+    return !(head && t.members.length === 1 && t.members[0].agentId === head.name);
+  });
   const organizations: Organization[] = specs.length
     ? [{ id: "studio", name: "any-co studio", headId: head?.name ?? "", slots: drawn.map((t) => ({ key: t.id, teamId: t.id })), handoffs: [] }]
     : [];

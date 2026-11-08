@@ -131,7 +131,7 @@ const goodDoc = [
 ].join("\n");
 
 const goodOut: DesignManifest = {
-  branch: "agent/game-director-design",
+  branch: "agent/game-design-director",
   commit: "0123456789abcdef",
   doc_path: "docs/design.md",
   should_count: 1,
@@ -213,7 +213,7 @@ test("docAtCommit reads the doc at the reported commit, only from the reported b
   writeFileSync(path.join(clone, "README.md"), "x\n");
   git("add", "-A");
   git("commit", "--quiet", "-m", "init");
-  git("checkout", "--quiet", "-b", "agent/game-director-design");
+  git("checkout", "--quiet", "-b", "agent/game-design-director");
   mkdirSync(path.join(clone, "docs"));
   writeFileSync(path.join(clone, "docs", "design.md"), goodDoc);
   git("add", "-A");
@@ -227,10 +227,10 @@ test("docAtCommit reads the doc at the reported commit, only from the reported b
   git("commit", "--quiet", "-m", "other");
   const other = git("rev-parse", "HEAD").trim();
 
-  const branch = "agent/game-director-design";
+  const branch = "agent/game-design-director";
   assert.equal(docAtCommit(clone, sha, "docs/design.md", branch).doc, goodDoc);
   assert.equal(docAtCommit(clone, sha.slice(0, 10), "docs/design.md", branch).doc, goodDoc); // short sha
-  assert.match(docAtCommit(clone, other, "docs/design.md", branch).error ?? "", /not on branch agent\/game-director-design/);
+  assert.match(docAtCommit(clone, other, "docs/design.md", branch).error ?? "", /not on branch agent\/game-design-director/);
   assert.match(docAtCommit(clone, sha, "docs/design.md", "agent/nobody").error ?? "", /branch agent\/nobody is not in the clone/);
   assert.match(docAtCommit(clone, "deadbeef", "docs/design.md", branch).error ?? "", /deadbeef/);
   assert.match(docAtCommit(clone, sha, "docs/missing.md", branch).error ?? "", /missing/);

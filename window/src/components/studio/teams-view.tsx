@@ -112,7 +112,7 @@ function OrgView({ orgs, teams, onOpen }: { orgs: Organization[]; teams: StudioT
       <SectionHead
         title="Organization"
         count={orgs.length}
-        hint="The Studio Head sits at the top; each box is a department and its agents. A green dot means the agent is running a task right now. Click a department to open it."
+        hint="The Studio Head sits at the top. Each card is a department, and everyone in it reports to the Head. A green dot means the agent is running a task right now. Click a department to open it."
       />
       <div className="flex flex-col gap-8">
         {orgs.map((o) => <OrgFolder key={o.id} org={o} teams={teams} onOpen={onOpen} />)}
@@ -314,12 +314,6 @@ function WorkflowTab({ team }: { team: StudioTeam }) {
 type Live = ReadonlyMap<string, Presence>;
 const DOT: Record<PresenceState, string> = { working: "bg-ok", waiting: "bg-warn", blocked: "bg-destructive", idle: "bg-muted-foreground/40" };
 const line = "bg-foreground/20";
-/** Org-chart rail: each child draws its half on either side; the ends trim theirs. */
-const branch = cn(
-  "relative flex flex-col items-center",
-  "before:absolute before:left-0 before:top-0 before:h-px before:w-1/2 before:bg-foreground/20 after:absolute after:right-0 after:top-0 after:h-px after:w-1/2 after:bg-foreground/20",
-  "first:before:hidden last:after:hidden",
-);
 
 /** An org drawn as a file folder: the name on the tab, the org chart inside. Live presence comes from Weave. */
 function OrgFolder({ org, teams, onOpen }: { org: Organization; teams: StudioTeam[]; onOpen: (teamId: string) => void }) {
@@ -344,23 +338,23 @@ function OrgFolder({ org, teams, onOpen }: { org: Organization; teams: StudioTea
       </div>
 
       <div style={{ borderRadius: 16, borderTopLeftRadius: 0 }} className={cn("border border-foreground/10 px-6 pb-6 pt-7 shadow-sm", folderBg)}>
-        <div className="flex flex-col items-center">
+        <div className="mx-auto flex max-w-3xl flex-col items-center">
           {head
             ? <OrgNode agent={head} size="size-16" subtitle={head.role} emphasis state={live.get(head.id)} />
             : <HeadPlaceholder />}
-          {orgTeams.length > 0 && <span className={cn("h-6 w-px", line)} />}
+          {head && orgTeams.length > 0 && (
+            <p className="mt-2 max-w-sm text-center text-xs text-muted-foreground">Decides scope, budget, and what ships. Every department reports here.</p>
+          )}
+          {orgTeams.length > 0 && <span className={cn("mt-1 h-6 w-px", line)} />}
         </div>
 
-        <div className="-mx-6 overflow-x-auto px-6 pb-1 [scrollbar-width:none] hover:[scrollbar-width:thin]">
-          <ul className="mx-auto flex w-max">
-            {orgTeams.map(({ key, team }) => (
-              <li key={key} className={cn(branch, "px-1.5 pt-6")}>
-                <span className={cn("absolute left-1/2 top-0 h-6 w-px", line)} />
-                <OrgTeamBox team={team} live={live} sharedIds={sharedIds} onOpen={() => onOpen(team.id)} />
-              </li>
-            ))}
-          </ul>
-        </div>
+        <ul className="mx-auto grid w-full max-w-3xl grid-cols-1 gap-3 sm:grid-cols-2">
+          {orgTeams.map(({ key, team }) => (
+            <li key={key} className="min-w-0">
+              <OrgTeamBox team={team} live={live} sharedIds={sharedIds} onOpen={() => onOpen(team.id)} />
+            </li>
+          ))}
+        </ul>
 
         {httpMode && org.handoffs.filter((edge) => orgTeams.some((slot) => slot.team.id === edge.from) && orgTeams.some((slot) => slot.team.id === edge.to)).map((edge) => (
           <div key={`${edge.from}-${edge.to}`} className="mx-auto mt-5 flex max-w-[510px] items-center gap-3 text-xs text-muted-foreground">
@@ -388,62 +382,70 @@ function HeadPlaceholder() {
   );
 }
 
-/** A department. With an explicit lead it is drawn lead-over-members; without one, as a row of peers. */
+/** A department. Agents stack downward, lead first, so the card grows taller instead of wider. */
 function OrgTeamBox({ team, live, sharedIds, onOpen }: { team: StudioTeam; live: Live; sharedIds: Set<string>; onOpen: () => void }) {
-  const lead = team.members.find((m) => m.lead);
-  const rest = team.members.filter((m) => !m.lead);
+  const members = [...team.members].sort((a, b) => Number(b.lead === true) - Number(a.lead === true));
   const active = team.members.some((m) => live.get(m.agentId)?.state === "working");
-  const node = (agentId: string, rest: Partial<Parameters<typeof OrgNode>[0]>) => {
-    const { agent } = profileById(agentId);
-    return <OrgNode agent={agent} size="size-10" subtitle={agent.role} state={live.get(agentId)} shared={sharedIds.has(agentId)} {...rest} />;
-  };
   return (
     <button
       type="button"
       onClick={onOpen}
-      className={cn(panel, "flex min-w-[200px] flex-col items-center px-3 pb-4 pt-3 outline-none transition-colors hover:border-foreground/20 hover:bg-background/80 focus-visible:ring-2 focus-visible:ring-ring", lead ? "min-h-[236px]" : "min-h-[150px]", !active && "border-dashed")}
+      className={cn(panel, "flex h-full w-full min-w-0 flex-col items-stretch px-3 py-3 text-left outline-none transition-colors hover:border-foreground/20 hover:bg-background/80 focus-visible:ring-2 focus-visible:ring-ring", !active && "border-dashed")}
     >
-      <div className="mb-3 flex h-5 items-center gap-2 text-sm font-medium">
+      <div className="mb-2 flex items-center gap-2 text-sm font-medium">
         {team.name}
         <StatusPill team={{ ...team, status: active ? "active" : "idle" }} />
       </div>
-      {lead ? (
-        <>
-          {node(lead.agentId, { size: "size-14", lead: true, subtitle: `${profileById(lead.agentId).agent.role} · Lead` })}
-          {rest.length > 0 && (
-            <>
-              <span className={cn("h-4 w-px", line)} />
-              <ul className="flex">
-                {rest.map((m) => (
-                  <li key={m.agentId} className={cn(branch, "px-0.5 pt-4")}>
-                    <span className={cn("absolute left-1/2 top-0 h-4 w-px", line)} />
-                    {node(m.agentId, { compact: true })}
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
-        </>
-      ) : (
-        <ul className="flex gap-1">
-          {team.members.map((m) => <li key={m.agentId}>{node(m.agentId, { size: "size-12", compact: true, subtitle: profileById(m.agentId).agent.model.split("/").pop() ?? "" })}</li>)}
-        </ul>
-      )}
+      <ul className="flex flex-col gap-2">
+        {members.map((m) => {
+          const { agent } = profileById(m.agentId);
+          return (
+            <li key={m.agentId}>
+              <OrgNode
+                agent={agent}
+                size="size-10"
+                row
+                lead={m.lead}
+                subtitle={m.lead ? `${agent.role} · Lead` : agent.role}
+                state={live.get(m.agentId)}
+                shared={sharedIds.has(m.agentId)}
+              />
+            </li>
+          );
+        })}
+      </ul>
     </button>
   );
 }
 
-function OrgNode({ agent, size, subtitle, emphasis, lead, compact, shared, state }: {
-  agent: ReturnType<typeof profileById>["agent"]; size: string; subtitle: string; emphasis?: boolean; lead?: boolean; compact?: boolean; shared?: boolean; state?: Presence;
+function OrgNode({ agent, size, subtitle, emphasis, lead, compact, row, shared, state }: {
+  agent: ReturnType<typeof profileById>["agent"]; size: string; subtitle: string; emphasis?: boolean; lead?: boolean; compact?: boolean; row?: boolean; shared?: boolean; state?: Presence;
 }) {
   const s = state?.state ?? "idle";
-  return (
-    <div className={cn("flex flex-col items-center text-center", compact ? "w-[88px]" : "w-36")} title={state && s !== "idle" ? `${agent.name}: ${state.activity}` : agent.name}>
-      <div className="relative">
-        <Portrait agent={agent} working={s === "working"} className={cn(size, emphasis || lead ? ring : "border-2 border-foreground/25")} />
-        {lead && <Crown className="absolute -left-1 -top-1 size-4 rounded-full bg-background p-0.5 text-warn shadow-sm ring-1 ring-foreground/10" />}
-        <span className={cn("absolute bottom-0 right-0 size-3 rounded-full ring-2 ring-background", DOT[s], s === "working" && "animate-pulse")} aria-label={s} />
+  const portrait = (
+    <div className="relative shrink-0">
+      <Portrait agent={agent} working={s === "working"} className={cn(size, emphasis || lead ? ring : "border-2 border-foreground/25")} />
+      {lead && <Crown className="absolute -left-1 -top-1 size-4 rounded-full bg-background p-0.5 text-warn shadow-sm ring-1 ring-foreground/10" />}
+      <span className={cn("absolute bottom-0 right-0 size-3 rounded-full ring-2 ring-background", DOT[s], s === "working" && "animate-pulse")} aria-label={s} />
+    </div>
+  );
+  const title = state && s !== "idle" ? `${agent.name}: ${state.activity}` : agent.name;
+  if (row) {
+    return (
+      <div className="flex min-w-0 items-center gap-2.5 text-left" title={title}>
+        {portrait}
+        <div className="min-w-0">
+          <div className="truncate text-sm font-medium">{agent.name}</div>
+          <div className="truncate text-xs text-muted-foreground">{subtitle}</div>
+          {s === "working" && state && <div className="truncate text-[11px] text-ok">{state.activity}</div>}
+          {shared && <span className={cn(pill, "mt-1")}>shared</span>}
+        </div>
       </div>
+    );
+  }
+  return (
+    <div className={cn("flex flex-col items-center text-center", compact ? "w-[88px]" : "w-36")} title={title}>
+      {portrait}
       <span className={cn("mt-1.5 font-medium", compact ? "text-xs" : "text-sm")}>{agent.name}</span>
       <span className={cn("max-w-full truncate text-muted-foreground", compact ? "text-[10px]" : "text-xs")}>{subtitle}</span>
       {s === "working" && !compact && state && <span className="mt-0.5 max-w-full truncate text-[11px] text-ok">{state.activity}</span>}

@@ -6,7 +6,7 @@ import { read as ledgerRead, LEDGER_FILE } from "../tools/ledger/ledger.ts";
 // the head reads the actual state from its tools. Nov 7: the first version only reacted to cards ("never invent work
 // nobody asked for") and left every department idle while two art runs were in flight; this one drives the plan.
 const PIPELINE = `Pipeline (docs/plan.md): each stage starts when its input exists, and stages run in parallel.
-- design (game-director-design, level-content-designer): design doc, content data.
+- design (game-design-director, level-content-designer): design doc, content data. The pitch-writer's three pitches are already done by the time the Chair has picked.
 - engineering (tech-lead merges agent branches into the game's main and keeps the build green; gameplay-engineer builds features from the tech lead's tickets).
 - art (art-director: anchors, gate verdicts, fallback ladder; sprite-artist, env-ui-artist: batch assets from the anchors). Artists share one generation budget: at most one card per artist at a time.
 - integration: when an agent branch (art, content, gameplay) has finished work, the tech-lead merges it into main and wires it into the build.

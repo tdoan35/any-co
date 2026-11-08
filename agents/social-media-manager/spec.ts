@@ -1,30 +1,35 @@
 import { z } from "zod";
 import { defineAgent } from "../../runner/spec.ts";
 
-// Release step, after marketing-lead. Cuts and captions are workspace files. Uploads are ask-gated
-// and dry-run by default (youtube_upload, tiktok_upload). Numbers in this output are copied from
-// those tools and from media_probe.
+// Release step, after marketing-lead. Policy: docs/marketing/social.md.
+// Video, photo, and text publish through Naïve Social. The lane upload tools are dry-run
+// stand-ins for a video file, not the send. Skills load on a hosted session only.
 const post = z
   .object({
-    platform: z.enum(["youtube", "tiktok"]),
-    caption_path: z.string().min(3).max(120).describe("Workspace path of the caption file, e.g. social/youtube.md"),
-    cut_path: z.string().max(160).describe("Workspace path of the mp4, under media/; empty if you could not make one"),
-    privacy: z.enum(["public", "unlisted", "private", "none"]).describe("The privacy you passed to the upload tool, or none if you did not call it"),
-    rules: z.string().min(4).max(300).describe("What the platform's own page says about AI content and promotional uploads, or unchecked"),
+    format: z.enum(["video", "photo", "text"]),
+    platforms: z
+      .array(z.enum(["youtube", "tiktok", "instagram", "x", "bluesky", "facebook", "linkedin", "mastodon", "threads"]))
+      .min(1)
+      .max(4)
+      .describe("Networks this post targets. Instagram, TikTok, and YouTube require a media file"),
+    caption_path: z.string().min(3).max(120).describe("Workspace path of the caption file"),
+    media_path: z.string().max(160).describe("mp4 or still under media/; empty for a text post"),
+    visibility: z.enum(["public", "unlisted", "private", "omit"]).describe("YouTube or Mastodon only. omit on any other network"),
     status: z.enum(["draft", "dry-run", "sent", "blocked"]),
-    bytes: z.number().int().nonnegative().describe("Copied from the upload tool or media_probe; 0 if there is no file"),
-    video_id: z.string().max(40).describe("YouTube id from the tool when status is sent; empty otherwise"),
+    bytes: z.number().int().nonnegative().describe("Copied from media_probe or the upload tool; 0 for text"),
+    post_id: z.string().max(80).describe("Id from social.post when status is sent; empty otherwise"),
     blocker: z.string().max(250).describe("Why it did not send, or empty when status is sent"),
   })
   .strict();
 
 export default defineAgent({
   name: "social-media-manager",
-  description: "Marketing: after the Marketing Lead, cuts release videos from the approved trailer plan and publishes them to YouTube and TikTok through approval-gated uploads.",
+  description: "Marketing: after the Marketing Lead, packages a release campaign in video, photo, and text and publishes it through Naïve Social. Sends wait for approval.",
   dept: "marketing",
   runner: "local",
   model: "z-ai/glm-5.3",
   budget: { cap_usd: 6, max_task_usd: 2, period: "day" },
+  skills: ["naive/short-video-hooks", "naive/clip-selection", "naive/caption-writing", "naive/video-assembly"],
   tools: {
     game_repo: "allow",
     media_capture: "allow",
@@ -51,7 +56,7 @@ export default defineAgent({
             .strict(),
         )
         .max(3),
-      posts: z.array(post).length(2),
+      posts: z.array(post).min(3).max(6),
       files: z
         .array(
           z
@@ -66,9 +71,9 @@ export default defineAgent({
     })
     .strict()
     .superRefine((out, ctx) => {
-      const seen = new Set(out.posts.map((p) => p.platform));
-      for (const need of ["youtube", "tiktok"] as const) {
-        if (!seen.has(need)) ctx.addIssue({ code: "custom", message: `posts must include ${need}` });
+      const seen = new Set(out.posts.map((p) => p.format));
+      for (const need of ["video", "photo", "text"] as const) {
+        if (!seen.has(need)) ctx.addIssue({ code: "custom", message: `posts must include a ${need} post` });
       }
     }),
   limits: { max_turns: 40, max_output_tokens: 12288 },
