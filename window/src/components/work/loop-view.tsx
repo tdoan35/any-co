@@ -301,7 +301,7 @@ function WaitingOnYou({ summary }: { summary: TaskSummary }) {
                 <NameRole id={a.agentId} className="block" />
                 <span className="block truncate text-[13px]">{a.title}</span>
               </span>
-              <span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground group-hover:text-foreground">Decide in Weave<ArrowRight className="size-3" /></span>
+              <span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground group-hover:text-foreground">Decide in Studio<ArrowRight className="size-3" /></span>
             </Link>
           </li>
         ))}
@@ -404,7 +404,7 @@ function Callouts({ run, view, report, summary }: { run: Run; view: RunView; rep
             {run.teamId === "dana"
               ? <><span className="font-medium">Browser stopped.</span> {view.blocked.reason}</>
               : <><span className="font-medium">Stopped on its budget.</span> {view.blocked.reason}. The escalation went member → lead → Studio Head → you, and nothing else runs until you decide.</>}
-            {summary?.outcome && <span className="mt-1 block text-xs text-muted-foreground">You decided in Weave: {summary.outcome.text}</span>}
+            {summary?.outcome && <span className="mt-1 block text-xs text-muted-foreground">You decided in Studio: {summary.outcome.text}</span>}
           </span>
         </motion.section>
       )}
@@ -446,8 +446,8 @@ function ProposedScreen({ task, project, summary }: TaskData & { summary: TaskSu
             )}
             <div className="flex flex-wrap items-center gap-2 border-t border-foreground/10 pt-4">
               {summary.proposal
-                ? <Button size="sm" asChild><Link to={`/weave?item=${summary.proposal.id}`}><Sparkles />Decide in Weave<ArrowRight /></Link></Button>
-                : <span className="text-xs text-muted-foreground">{summary.note ?? "Decided in Weave."}</span>}
+                ? <Button size="sm" asChild><Link to={`/weave?item=${summary.proposal.id}`}><Sparkles />Decide in Studio<ArrowRight /></Link></Button>
+                : <span className="text-xs text-muted-foreground">{summary.note ?? "Decided in Studio."}</span>}
               {task.preview && <span className="text-xs text-muted-foreground">Preview: no Product Team loop is recorded yet, so there's nothing to play here.</span>}
             </div>
           </article>

@@ -397,9 +397,9 @@ function TeamsLens({ team, projects, summaries, onTeam }: { team: StudioTeam; pr
   const loops = mine.reduce((n, s) => n + s.loops.length, 0);
   return (
     <>
-      <div className={cn(panelHeader, "h-12 gap-4")}>
-        <Segmented value={team.id} options={YOUR_TEAMS} onChange={onTeam} />
-        <p className="ml-auto min-w-0 truncate text-xs text-muted-foreground">
+      <div className={cn(panelHeader, "h-12 min-w-0 gap-4")}>
+        <Segmented fit className="min-w-0 flex-1" value={team.id} options={YOUR_TEAMS} onChange={onTeam} />
+        <p className="ml-auto hidden max-w-[17rem] shrink-0 truncate text-xs text-muted-foreground sm:block">
           Led by {agentOf(leadOf(team)).name} · rework budget {team.reworkBudget} · {mine.length} {mine.length === 1 ? "task" : "tasks"}, {loops} {loops === 1 ? "loop" : "loops"} ·{" "}
           <Link to={`/agents?team=${team.id}`} className="underline decoration-foreground/25 underline-offset-2 hover:text-foreground hover:decoration-foreground">How this team works</Link>
         </p>
