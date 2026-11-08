@@ -78,7 +78,8 @@ TODO: fill in as they exist.
 - art pipeline: `npm run art -- lock|snap|outline|strip|sheet|gate ...` (`tools/art/README.md`); art credits: `npm run art -- providers [--clear <provider>]`
 - media capture: `npm run media -- probe <file> | edit <plan.json>`; agents capture via the `media_capture` capability (`tools/media/README.md`, needs ffmpeg)
 - eval Market Analyst: `npm run eval:market-analyst -- runs/<run_id>` (see `agents/market-analyst/eval/`)
-- eval Game Director design doc: `npm run eval:game-director-design -- runs/<run_id>` (design hand-off: `node --import tsx scripts/greenlight-handoff.ts --design runs/<chair-run>`)
+- eval Pitch Writer pitches: `npm run eval:pitch-writer -- runs/<run_id>`
+- eval Game Design Director design doc: `npm run eval:game-design-director -- runs/<run_id>` (design hand-off: `node --import tsx scripts/greenlight-handoff.ts --design runs/<chair-run>`)
 - kill switch: `touch runs/KILL` (remove to resume); or `STUDIO_KILL=1`
 
 ## Conventions

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { defineAgent } from "../../runner/spec.ts";
 
-// The content itself lives in workspace files (validated against the Game Director's schemas
+// The content itself lives in workspace files (validated against the Game Design Director's schemas
 // by QA); this output is only the manifest the studio routes and the balance rationale.
 export default defineAgent({
   name: "level-content-designer",
@@ -33,7 +33,7 @@ export default defineAgent({
         })
         .strict(),
       questions: z
-        .array(z.object({ for: z.string().max(40).describe("Agent that should answer, e.g. 'game-director'"), question: z.string().min(10).max(300) }).strict())
+        .array(z.object({ for: z.string().max(40).describe("Agent that should answer, e.g. 'game-design-director'"), question: z.string().min(10).max(300) }).strict())
         .max(5)
         .describe("Schema gaps or design-doc contradictions blocking better content; empty if none"),
     })

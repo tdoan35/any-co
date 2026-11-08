@@ -1,6 +1,6 @@
-// Design-doc checks: the Game Director's design.md has fixed section names so code can check
-// it (agents/game-director-design). Everything here is pure and tested on neutral fixtures;
-// the eval script (scripts/eval-game-director-design.ts) wires these to a real run + clone.
+// Design-doc checks: the Game Design Director's design.md has fixed section names so code can check
+// it (agents/game-design-director). Everything here is pure and tested on neutral fixtures;
+// the eval script (scripts/eval-game-design-director.ts) wires these to a real run + clone.
 import { execFileSync } from "node:child_process";
 import { MUST_HOURS_BUDGET } from "./feasibility.ts";
 

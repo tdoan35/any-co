@@ -175,7 +175,7 @@ export function embeddedPick(chairOut: { pick: Record<string, unknown>; rejected
   };
 }
 
-/** Task for the Game Director's design-doc mode: everything docs/design.md must answer to. */
+/** Task for the Game Design Director: everything docs/design.md must answer to. */
 export function designTask(chairDir: string, runsRoot: string = RUNS): string {
   const chairAbs = path.resolve(runsRoot, chairDir);
   const chair = readRun(path.basename(chairAbs), path.dirname(chairAbs));
