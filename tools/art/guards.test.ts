@@ -78,7 +78,7 @@ async function withLab<T>(fn: (f: Fakes) => Promise<T>, opts: { generations?: nu
   try {
     return await fn(f);
   } finally {
-    for (const k of ["PIXELLAB_API_KEY", "PIXELLAB_BASE_URL", "COMFY_BASE_URL", "PIXELLAB_MIN_REMAINING", "ART_DEFAULT_PROVIDER"]) {
+    for (const k of ["PIXELLAB_API_KEY", "PIXELLAB_BASE_URL", "COMFY_BASE_URL", "PIXELLAB_MIN_REMAINING", "ART_DEFAULT_PROVIDER", "COMFY_REGEN_CAP"]) {
       if (prev[k] === undefined) delete process.env[k];
       else process.env[k] = prev[k];
     }
@@ -113,7 +113,7 @@ test("T39b1/b2: outs without a real file name, or outside the clone's assets/, a
     for (const out of [".png", "game/assets/.png", "game/assets/sprites/.hidden.png", "assets/x/.png"]) {
       const r = await gen(ctx, { out });
       assert.equal(r.is_error, true, out);
-      assert.match(r.content, /refused before any request: .*has no real file name/, out);
+      assert.match(r.content, /refused before any request: .*has no file name\. Fix: out must end in <name>\.png/, out);
     }
     for (const out of ["art/hero.png", "game/hero.png", "game/assets/../hero.png", "assets/hero.png", "/tmp/hero.png"]) {
       const r = await gen(ctx, { out });
@@ -378,5 +378,63 @@ test("T39b-fix (R46): with the studio default comfy, an EXPLICIT comfy (lab down
     assert.equal(out.provider, "pixellab");
     assert.equal(out.fallback_from, "retrodiffusion");
     assert.equal(f.plPosts(), 1);
+  });
+});
+
+// ---- T39c: free comfy has its own per-asset counter; paid stays 1 + 2 ----
+
+test("T39c-2: comfy is capped at COMFY_REGEN_CAP (default 7), separately from the paid 1 + 2; each refusal names its counter", async () => {
+  await withLab(async (f) => {
+    const ctx = ctxFor();
+    for (let n = 1; n <= 7; n++) {
+      const out = JSON.parse((await gen(ctx, { provider: "comfy" })).content);
+      assert.equal(out.generation, `${n} of 7`);
+      assert.equal(out.generation_counter, "comfy");
+    }
+    const before = f.requests();
+    const refused = await gen(ctx, { provider: "comfy" });
+    assert.equal(refused.is_error, true);
+    assert.match(refused.content, /has had 7 comfy generations \(7 is the comfy cap per out path, COMFY_REGEN_CAP/);
+    assert.doesNotMatch(refused.content, /paid generations/);
+    assert.equal(f.requests(), before, "the 8th comfy call made no request");
+    // the paid counter is untouched by the 7 comfy calls
+    const paid = JSON.parse((await gen(ctx, { provider: "pixellab" })).content);
+    assert.deepEqual([paid.provider, paid.generation, paid.generation_counter], ["pixellab", "1 of 3", "paid"]);
+    const g = readGallery(statePaths(ctx.runsDir).gallery);
+    assert.deepEqual([g.comfy_generations?.["assets/sprites/hero.png"], g.generations["assets/sprites/hero.png"]], [7, 1]);
+    for (let n = 2; n <= 3; n++) await gen(ctx, { provider: "pixellab" });
+    const paidRefused = await gen(ctx, { provider: "pixellab" });
+    assert.match(paidRefused.content, /has had 3 paid generations \(1 \+ 2 regenerations is the paid cap\)/);
+  });
+});
+
+test("T39c-2: COMFY_REGEN_CAP sets the comfy cap; a malformed value is an error before any request", async () => {
+  await withLab(async (f) => {
+    const ctx = ctxFor();
+    for (let n = 1; n <= 2; n++) assert.equal(JSON.parse((await gen(ctx, { provider: "comfy" })).content).generation, `${n} of 2`);
+    assert.match((await gen(ctx, { provider: "comfy" })).content, /has had 2 comfy generations \(2 is the comfy cap/);
+  }, { env: { COMFY_REGEN_CAP: "2" } });
+  await withLab(async (f) => {
+    const r = await gen(ctxFor(), { provider: "comfy" });
+    assert.equal(r.is_error, true);
+    assert.match(r.content, /COMFY_REGEN_CAP must be an integer from 1 to 100/);
+    assert.equal(f.requests(), 0);
+  }, { env: { COMFY_REGEN_CAP: "lots" } });
+});
+
+test("T39c-3: an out with no file name is refused with the exact fix, and 3 identical retries never reach a provider", async () => {
+  await withLab(async (f) => {
+    const ctx = ctxFor();
+    for (const out of ["game/assets/sprites/.png", "game/assets/sprites/ .png", "game/assets/sprites/\t.png"]) {
+      for (let n = 0; n < 3; n++) {
+        const r = await gen(ctx, { provider: "comfy", out });
+        assert.equal(r.is_error, true, out);
+        assert.match(r.content, /has no file name\. Fix: out must end in <name>\.png, e\.g\. game\/assets\/sprites\/hero\.png/, out);
+      }
+    }
+    assert.equal(f.requests(), 0, "9 refused calls, zero requests to the lab or PixelLab");
+    assert.deepEqual(readGallery(statePaths(ctx.runsDir).gallery).comfy_generations, {}, "nothing counted");
+    // a trailing slash never reaches run(): the input schema refuses it with the same fix
+    assert.throws(() => IMPLS.art_generate.art_generate.input.parse({ provider: "comfy", prompt: "x", width: 32, height: 32, out: "game/assets/sprites/" }), /out must end in <name>\.png/);
   });
 });

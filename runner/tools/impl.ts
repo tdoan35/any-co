@@ -18,9 +18,10 @@ import { addOutline, contactSheet, lockPalette, snapToGrid, splitStrip, upscaleN
 import { runGate } from "../../tools/art/gate.ts";
 import { ChargedFailure, DEFAULT_CANDIDATES, MAX_CANDIDATES, ProviderExhausted, ProviderUnavailable, balance as providerBalance, generate, type Balance, isAnimation, quote as providerQuote, type GenerateResult, type ProviderName } from "../../tools/art/generate.ts";
 import {
-  LOW_GENERATIONS, MAX_REGENERATIONS, PROVIDERS, anchorWinner, checkPixellabFloor, pixellabCallEstimate, pixellabFloor, type FloorVerdict, generationsUsedSinceRedo, grantRedo, outPathProblem, releaseGeneration, reserveGeneration, isExhausted, markExhausted, other, readCredits, readGallery, recordLocalGeneration, comfyLaneStats,
+  LOW_GENERATIONS, MAX_REGENERATIONS, PROVIDERS, anchorWinner, checkPixellabFloor, pixellabCallEstimate, pixellabFloor, type FloorVerdict, generationsUsedSinceRedo, grantRedo, outPathProblem, releaseGeneration, reserveGeneration, comfyRegenCap, counterFor, type GenCounter, isExhausted, markExhausted, other, readCredits, readGallery, recordLocalGeneration, comfyLaneStats,
   readProviders, recordAnchorWinner, recordCredit, statePaths,
 } from "../../tools/art/credits.ts";
+import { GAMES_DIR, execEnv, execRefusal, sandboxPrefix, scopedArgv } from "./exec-scope.ts";
 import { capture as mediaCapture, POLICY as MEDIA_POLICY, type CaptureMode } from "../../tools/media/capture.ts";
 import { edit as mediaEdit, probe as mediaProbe } from "../../tools/media/edit.ts";
 import { track as trackGroup } from "../../tools/proc/reaper.ts";
@@ -50,9 +51,9 @@ export function compactJson(text: string): string {
   }
 }
 
-function execText(cmd: string, args: string[], timeoutMs: number): Promise<{ out: string; err: string; code: number }> {
+function execText(cmd: string, args: string[], timeoutMs: number, env?: NodeJS.ProcessEnv): Promise<{ out: string; err: string; code: number }> {
   return new Promise((resolve) => {
-    execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024 }, (error, stdout, stderr) => {
+    execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024, ...(env ? { env } : {}) }, (error, stdout, stderr) => {
       const code = error ? (typeof (error as any).code === "number" ? (error as any).code : 1) : 0;
       resolve({ out: String(stdout), err: String(stderr), code });
     });
@@ -639,7 +640,9 @@ const gameWrite: ToolImpl = {
 const gameExec: ToolImpl = {
   description:
     "Run a command inside your game clone (git, build.sh targets, engine CLI, tests). No shell: give the command as a list, e.g. [\"git\",\"status\"]. " +
-    "Exit code, stdout, and stderr come back; a non-zero exit is an error result you must fix, not retry unchanged.",
+    "Exit code, stdout, and stderr come back; a non-zero exit is an error result you must fix, not retry unchanged. " +
+    "Scoped (T40): it runs in your clone with a minimal env (no API keys), it cannot run harness files or harness npm scripts or cd above the clone, " +
+    "and on macOS it is sandboxed (no writes outside your clone except pushing to the game repo). For QA use the qa_harness tools.",
   input: z
     .object({
       command: z.array(z.string().min(1)).min(1).max(12).describe("Argv, e.g. [\"git\", \"log\", \"--oneline\", \"-5\"]"),
@@ -650,10 +653,13 @@ const gameExec: ToolImpl = {
     try {
       const cwd = path.join(ctx.workspace, "game");
       if (!existsSync(cwd)) throw new Error("no clone yet; call game_clone first");
-      const [cmd, ...args] = command;
+      const refusal = execRefusal(command, cwd);
+      if (refusal) return { content: `game_exec refused: ${refusal}`, is_error: true };
+      const [cmd, ...args] = scopedArgv(command, [cwd, GAMES_DIR]); // sandbox allows writing the clone and pushing to games/
       const { promise, resolve } = Promise.withResolvers<{ out: string; err: string; code: number }>();
-      // ANYCO_AGENT lets the game repo's pre-receive hook enforce the single-merger rule (tools/gamerepo/new-game.ts).
-      const env = { ...process.env, ANYCO_AGENT: ctx.agent ?? "unknown" };
+      // ANYCO_AGENT lets the game repo's pre-receive hook enforce the single-merger rule (tools/gamerepo/new-game.ts);
+      // the rest of the env is an allowlist: agent-run processes never see API keys (T40).
+      const env = execEnv(ctx.agent ?? "unknown", cwd);
       // Own process group + our own timeout: execFile's timeout only SIGTERMs the direct child, so a build.sh that
       // started Godot (or a Godot that ignores SIGTERM) left orphans running for hours. Kill the whole group instead.
       const limitMs = (timeout_s ?? 120) * 1000;
@@ -663,7 +669,7 @@ const gameExec: ToolImpl = {
       const out: Buffer[] = [];
       const err: Buffer[] = [];
       let outBytes = 0;
-      const child = spawn(cmd, args, { cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn(cmd, args, { cwd: env.PWD, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
       const reaper = child.pid ? trackGroup(child.pid) : null; // runner exit/signal/kill -9 reaps the group too
       const take = (sink: Buffer[]) => (b: Buffer) => { if (outBytes < MAX_OUT) { sink.push(b); outBytes += b.length; } };
       child.stdout?.on("data", take(out));
@@ -1078,8 +1084,11 @@ export function artDefaultProvider(env: Record<string, string | undefined> = pro
 }
 
 /** The cap refusal names the two ways forward that a human decided, never a way for the model to reset it. */
-function capRefusal(out: string, used: number): string {
-  return `refused: ${out} has had ${used} paid generations (1 + ${MAX_REGENERATIONS} regenerations is the cap). Fix the prompt/reference or cut to the ` +
+function capRefusal(out: string, used: number, kind: GenCounter = "paid", cap = 1 + MAX_REGENERATIONS): string {
+  const what = kind === "paid"
+    ? `${used} paid generations (1 + ${MAX_REGENERATIONS} regenerations is the paid cap)`
+    : `${used} comfy generations (${cap} is the comfy cap per out path, COMFY_REGEN_CAP; free, but capped against churn)`;
+  return `refused: ${out} has had ${what}. Fix the prompt/reference or cut to the ` +
     `fallback ladder. A redo needs a human decision: generate to a NEW out path (e.g. ${out.replace(/\.png$/i, "-v2.png")}) when the design calls for a new ` +
     `asset, or ask for art_redo (operator approval; grants a fresh allowance for this path).`;
 }
@@ -1135,7 +1144,7 @@ const artGenerate: ToolImpl = {
       prompt: z.string().min(1).max(2000),
       width: z.number().int().min(12).max(792),
       height: z.number().int().min(12).max(792),
-      out: z.string().min(1).regex(/\.png$/i, "out must end in .png").describe("workspace-relative output PNG"),
+      out: z.string().min(1).regex(/\.png$/i, "out must end in <name>.png, e.g. game/assets/sprites/hero.png").describe("workspace-relative output PNG: game/assets/<path>/<name>.png"),
       reference: z.string().min(1).optional().describe("workspace-relative reference/anchor PNG"),
       seed: z.number().int().nonnegative().optional(),
       frames: z.number().int().optional().describe("animation frames. retrodiffusion: frames_duration 4|6|8|10|12|16. pixellab: 4-16 even (4|6|8|10|12|14|16); animates `reference` (required, the start frame, at most 256x256, width/height = its size) with `prompt` as the action; w*h*frames <= 524288. Output: one horizontal strip (frames x width, 1 row)"),
@@ -1163,8 +1172,13 @@ const artGenerate: ToolImpl = {
     if (outIssue) return { content: `refused before any request: ${outIssue}`, is_error: true };
     const ppIssue = await postprocessProblem(ctx.workspace, i.out, i.postprocess);
     if (ppIssue) return { content: `refused before any request: ${ppIssue}`, is_error: true };
-    const done = generationsUsedSinceRedo(paths.gallery, i.out);
-    if (done >= 1 + MAX_REGENERATIONS) return { content: capRefusal(i.out, done), is_error: true };
+    let comfyCap: number;
+    try {
+      comfyCap = comfyRegenCap();
+    } catch (e) {
+      return { content: errText(e), is_error: true };
+    }
+    const capOf = (kind: GenCounter) => (kind === "paid" ? 1 + MAX_REGENERATIONS : comfyCap);
     if (isAnimation(i) && !i.justify)
       return { content: "refused: animation endpoints (frames, rd_animation__*, rd_advanced_animation__*) are the expensive ones; pass justify with why cutout parts or in-engine motion won't do", is_error: true };
     const winner = i.reference ? anchorWinner(paths.gallery, i.reference) : undefined;
@@ -1190,9 +1204,12 @@ const artGenerate: ToolImpl = {
       return { content: `refused: ${i.reference}'s anchor bake-off was won by ${winner}; batch generation uses it (omit provider). Only anchors are generated on both.`, is_error: true };
     }
 
-    // the slot is taken before any request and given back unless the call billed (no race past the cap)
-    const slot = reserveGeneration(paths.gallery, i.out);
-    if (!slot) return { content: capRefusal(i.out, generationsUsedSinceRedo(paths.gallery, i.out)), is_error: true };
+    // T39c: paid and free comfy generations have separate counters. The requested provider's counter is checked and its slot
+    // taken before any request (no race past the cap); the slot moves if the chain falls to the other kind, and is given back
+    // unless the call billed.
+    const kind0 = counterFor(requested);
+    let slot = reserveGeneration(paths.gallery, i.out, kind0, capOf(kind0));
+    if (!slot) return { content: capRefusal(i.out, generationsUsedSinceRedo(paths.gallery, i.out, kind0), kind0, capOf(kind0)), is_error: true };
     let billed = false;
     try {
     const exhausted: ProviderName[] = [];
@@ -1236,6 +1253,15 @@ const artGenerate: ToolImpl = {
       if (p !== requested && i.frames !== undefined && p === "pixellab" && !i.reference) {
         notes.push("pixellab animates only from a reference still, and none was given, so there is no animation fallback");
         continue;
+      }
+      const kindP = counterFor(p);
+      if (!slot || slot.kind !== kindP) {
+        if (slot) releaseGeneration(paths.gallery, i.out, slot.kind);
+        slot = reserveGeneration(paths.gallery, i.out, kindP, capOf(kindP));
+        if (!slot) {
+          notes.push(`${p} skipped: ${capRefusal(i.out, generationsUsedSinceRedo(paths.gallery, i.out, kindP), kindP, capOf(kindP))}`);
+          continue;
+        }
       }
       if (p !== requested) {
         const why = floored && requested === "pixellab" ? "at its floor" : unavailable.includes(requested) ? "unavailable" : "exhausted";
@@ -1284,7 +1310,7 @@ const artGenerate: ToolImpl = {
       };
     }
     billed = true;
-    const generation = slot.slot;
+    const generation = `${slot!.slot} of ${slot!.cap}`;
     // comfy is local: no balance read and no credits line
     const after: Balance | null = result.provider === "comfy"
       ? null
@@ -1302,7 +1328,7 @@ const artGenerate: ToolImpl = {
         ts: new Date().toISOString(), provider: "comfy", unit: "local", lane: result.metadata.lane, images: result.images.length,
         batch: typeof result.metadata.batch === "number" ? result.metadata.batch : null, run_id: ctx.run_id ?? "unknown", source: "generation",
       });
-    const extra = { generation: `${generation} of ${1 + MAX_REGENERATIONS}`, credits, ...(used !== null ? { generations_used: used } : {}), ...(result.provider !== requested ? { fallback_from: requested } : {}), ...(floored ? { pixellab_floor: floored } : {}), ...(notes.length ? { notes } : {}) };
+    const extra = { generation, generation_counter: slot!.kind, credits, ...(used !== null ? { generations_used: used } : {}), ...(result.provider !== requested ? { fallback_from: requested } : {}), ...(floored ? { pixellab_floor: floored } : {}), ...(notes.length ? { notes } : {}) };
     try {
       let postprocess: Record<string, unknown> | null = null;
       if (i.postprocess && (i.postprocess.snap || i.postprocess.lock || i.postprocess.outline))
@@ -1313,7 +1339,7 @@ const artGenerate: ToolImpl = {
       return { content: `generated ${result.images.join(", ")} but postprocess failed: ${errText(e)} ${JSON.stringify(extra)}`, is_error: true, cost_micro_usd: result.cost_micro_usd };
     }
     } finally {
-      if (!billed) releaseGeneration(paths.gallery, i.out);
+      if (!billed && slot) releaseGeneration(paths.gallery, i.out, slot.kind);
     }
   },
 };
@@ -1742,7 +1768,10 @@ async function runQa(mode: QaMode, input: Record<string, unknown>, ctx: ToolCont
       if (input["run"] === false) args.push("--run", "false");
       if (input["save_frames"] !== undefined) args.push("--save-frames", String(input["save_frames"]), "--save-dir", mediaOut(ctx.workspace, "media/export-frames"));
       const tsxLoader = fileURLToPath(import.meta.resolve("tsx"));
-      const proc = await execText(process.execPath, ["--import", `file://${tsxLoader}`, path.join(ROOT, "tools", "qa", "qa.ts"), "export-check", ...args], 15 * 60_000);
+      // the QA CLI runs agent-written game code (Godot): scrubbed env + the sandbox over the whole process tree, so the
+      // engine it spawns is confined too (writes limited to the run workspace; no .env or credential reads) (T40-fix)
+      const [cmd0, ...cmdRest] = scopedArgv([process.execPath, "--import", `file://${tsxLoader}`, path.join(ROOT, "tools", "qa", "qa.ts"), "export-check", ...args], [ctx.workspace]);
+      const proc = await execText(cmd0, cmdRest, 15 * 60_000, execEnv(ctx.agent ?? "unknown", clone));
       try {
         const result = JSON.parse(proc.out);
         // saved frames are reported workspace-relative, the paths image_view takes
@@ -1760,10 +1789,13 @@ async function runQa(mode: QaMode, input: Record<string, unknown>, ctx: ToolCont
     };
     if (mode === "check" || mode === "ui-lint") {
       const dir = input["qa_dir"];
-      // ui-lint wants the clone root (its CLI resolves <dir>/state.json); check wants <dir>/qa.
-      cli["dir"] = typeof dir === "string" ? resolveInWorkspace(ctx.workspace, path.join("game", dir)) : mode === "ui-lint" ? clone : path.join(clone, "qa");
+      // both subcommands read files inside a qa/ dir: check via its CLI, ui-lint via <dir>/state.json.
+      cli["dir"] = typeof dir === "string" ? resolveInWorkspace(ctx.workspace, path.join("game", dir, "qa")) : path.join(clone, "qa");
     } else {
       const cmd = validateLaunchArgv(input["cmd"], clone);
+      // belt-and-suspenders over validateLaunchArgv: realpath-based refusal catches a clone symlink to harness/.bin (T40-fix)
+      const refusal = execRefusal(cmd, clone);
+      if (refusal) throw new Error(`launch command refused: ${refusal}`);
       cli["cmd"] = JSON.stringify(cmd);
       cli["dir"] = clone;
       cli["seed"] = numArg("seed", input["seed"] ?? 0);
@@ -1785,9 +1817,12 @@ async function runQa(mode: QaMode, input: Record<string, unknown>, ctx: ToolCont
     if (input["tick_rate"] !== undefined) cli["tick-rate"] = numArg("tick_rate", input["tick_rate"]);
 
     const args = Object.entries(cli).flatMap(([k, v]) => [`--${k}`, String(v)]);
+    if (process.env.T42ARGS) console.error("ARGS", JSON.stringify(args));
     // tsx resolves from the cwd; the child runs in the clone, so import the loader by path.
     const tsxLoader = fileURLToPath(import.meta.resolve("tsx"));
-    const proc = await execText(process.execPath, ["--import", `file://${tsxLoader}`, path.join(ROOT, "tools", "qa", "qa.ts"), mode, ...args], 10 * 60_000);
+    // scrubbed env + the sandbox over the whole tree: the game this QA run spawns is confined too (T40-fix)
+    const [cmd0, ...cmdRest] = scopedArgv([process.execPath, "--import", `file://${tsxLoader}`, path.join(ROOT, "tools", "qa", "qa.ts"), mode, ...args], [ctx.workspace]);
+    const proc = await execText(cmd0, cmdRest, 10 * 60_000, execEnv(ctx.agent ?? "unknown", path.join(ctx.workspace, "game")));
     let parsed: unknown;
     try {
       parsed = JSON.parse(proc.out);
@@ -1878,7 +1913,7 @@ const qaUiLint: ToolImpl = {
     "UI layout lint over the ui[] of the clone's qa/state.json (release-gate layer when the game emits ui[]): overlapping visible non-overlay elements, off-screen/clipped rects, text below min px, optional grid snap. Absent ui[] => ui_lint_not_implemented (reported, not a pass). Verdict JSON {ok, exitCode, checks[], ui:{status,findings[],dumpsChecked}} — findings carry {check, ids, rects, tick, detail}.",
   input: z
     .object({
-      qa_dir: z.string().optional().describe("game-clone dir holding qa/; default the clone root"),
+      qa_dir: z.string().optional().describe("dir inside the clone holding qa/; default the clone root (its qa/)"),
       viewport: z.string().optional().describe("WxH, default 1280x720 (the --resolution backbuffer)"),
       min_text_px: z.number().min(1).max(72).optional().describe("minimum font size (default 10)"),
       grid_px: z.number().min(1).max(512).optional().describe("require x/y on this grid, e.g. 8"),
@@ -1987,9 +2022,14 @@ const mediaTools: Record<string, ToolImpl> = {
           if (!i.exit_after_ticks) throw new Error("mode movie needs exit_after_ticks");
           mode = { kind: "movie", file: path.join(outDir, i.movie_file), exit_after_ticks: i.exit_after_ticks };
         }
+        const launch = mediaLaunch(clone, i.launch);
+        const refusal = execRefusal(launch, clone); // realpath refusal catches a clone symlink to harness (T40-fix)
+        if (refusal) throw new Error(`launch refused: ${refusal}`);
         const r = await mediaCapture({
-          gameDir: clone, launch: mediaLaunch(clone, i.launch), separator: i.separator, seed: i.seed, timeScale: i.time_scale,
+          gameDir: clone, launch, separator: i.separator, seed: i.seed, timeScale: i.time_scale,
           policy: i.policy, resolution: { w: i.width, h: i.height }, outDir, mode, timeoutMs: i.timeout_s * 1000,
+          baseEnv: execEnv(ctx.agent ?? "unknown", clone), // the game is agent-written code: no secrets (T40)
+          sandboxPrefix: sandboxPrefix([ctx.workspace]), // confine the game and its children: writes limited to the run workspace (T40-fix)
         });
         const rel = (f: string) => path.relative(ctx.workspace, f);
         return {

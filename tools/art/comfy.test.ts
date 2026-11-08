@@ -278,7 +278,7 @@ test("T31 art_generate comfy: written and post-processed to the manifest grid an
       const out = JSON.parse(r.content);
       assert.equal(out.provider, "comfy");
       assert.equal(out.cost_source, "local");
-      assert.equal(out.generation, "1 of 3");
+      assert.equal(out.generation, "1 of 7"); // T39c: comfy has its own counter (COMFY_REGEN_CAP, default 7)
       assert.equal(out.generations_used, undefined, "comfy does not count toward PixelLab generations");
       assert.ok(out.postprocess.snap && out.postprocess.lock, JSON.stringify(out.postprocess));
       const img = decodePng(new Uint8Array(readFileSync(path.join(ws, "game/assets/merchant.png"))));
@@ -291,7 +291,7 @@ test("T31 art_generate comfy: written and post-processed to the manifest grid an
       const raw = readFileSync(statePaths(ctx.runsDir).credits, "utf8").trim().split("\n").map((l) => JSON.parse(l));
       assert.equal(raw.length, 1);
       assert.deepEqual([raw[0].provider, raw[0].unit, raw[0].lane, raw[0].images], ["comfy", "local", lab.base, 1]);
-      assert.equal(readGallery(statePaths(ctx.runsDir).gallery).generations["assets/merchant.png"], 1);
+      assert.equal(readGallery(statePaths(ctx.runsDir).gallery).comfy_generations?.["assets/merchant.png"], 1);
     });
   } finally {
     await lab.close();
@@ -418,7 +418,7 @@ test("T41 art_generate comfy: the default call (max_candidates 4) returns a batc
       const out = JSON.parse(r.content);
       assert.deepEqual(out.images, [0, 1, 2, 3].map((i) => `game/assets/merchant-${i}.png`));
       assert.equal(out.metadata.batch, 4);
-      assert.equal(out.generation, "1 of 3", "one call, one generation, however many candidates");
+      assert.equal(out.generation, "1 of 7", "one call, one comfy generation, however many candidates");
       for (const f of out.images) {
         const img = decodePng(new Uint8Array(readFileSync(path.join(ws, f))));
         assert.deepEqual([img.width, img.height], [16, 16], `${f} snapped to the merchant entry`);

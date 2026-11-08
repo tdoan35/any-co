@@ -8,7 +8,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { append as ledgerAppend, LEDGER_FILE } from "../ledger/ledger.ts";
+import { append as ledgerAppend, LEDGER_FILE, refuseAgentCli } from "../ledger/ledger.ts";
 import type { Approver } from "../../runner/run.ts";
 import { orphanStatus } from "../../runner/liveness.ts";
 
@@ -259,6 +259,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.log(`input:      ${JSON.stringify(r.input)}`);
     if (r.decided_ts) console.log(`${r.state} ${r.decided_ts} by ${r.who}${r.note ? ` — ${r.note}` : ""}`);
   } else if ((cmd === "approve" || cmd === "deny") && id) {
+    const refused = refuseAgentCli(`approvals ${cmd}`);
+    if (refused) { console.error(refused); process.exit(2); }
     const note = values.note;
     if (cmd === "deny" && !note) { console.error('deny needs a note: --note "why"'); process.exit(2); }
     const res = decideHuman(id, cmd === "approve", note);
