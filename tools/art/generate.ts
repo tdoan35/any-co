@@ -6,7 +6,8 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { decodePng } from "./png.ts";
+import { decodePng, encodePng } from "./png.ts";
+import { contactSheet } from "./ops.ts";
 
 export type ProviderName = "pixellab" | "retrodiffusion";
 
@@ -20,7 +21,8 @@ export interface GenerateInput {
   /** Workspace-relative reference/anchor PNG (subject consistency). */
   reference?: string;
   seed?: number;
-  /** Animation: Retro Diffusion frames_duration (4|6|8|10|12|16); unsupported on PixelLab here. */
+  /** Animation. Retro Diffusion: frames_duration 4|6|8|10|12|16. PixelLab: animates `reference` (required,
+   *  the first frame) with `prompt` as the action, 4–16 even frames (animate-with-text-v3). */
   frames?: number;
   /** Transparent background (default true). */
   transparent?: boolean;
@@ -81,6 +83,10 @@ export function retrodiffusionEstimateUsd(style: string, numImages = 1): number 
 }
 
 const PIXELLAB_ESTIMATE_USD = 0.02; // generate-image-v2 (the API's own usage examples)
+/** animate-with-text-v3 documents no per-call cost; a conservative placeholder until one live call measures it. */
+export const PIXELLAB_ANIMATION_ESTIMATE_USD = 0.1;
+/** animate-with-text-v3 limits (OpenAPI, read 2026-11-08): frame_count 4–16 and even; each side ≤ 256; w×h×frames ≤ 524,288. */
+export const PL_ANIM = { minFrames: 4, maxFrames: 16, maxSide: 256, pixelBudget: 524_288 } as const;
 
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47];
 
@@ -131,7 +137,7 @@ function failureCost(provider: ProviderName, input: GenerateInput, reportedUsd?:
   const style = input.style ?? "rd_pro__default";
   return provider === "retrodiffusion"
     ? { micro: usdToMicro(retrodiffusionEstimateUsd(style)), source: "estimated (failed after submit)" }
-    : { micro: usdToMicro(PIXELLAB_ESTIMATE_USD), source: "estimated (failed after submit)" };
+    : { micro: usdToMicro(input.frames !== undefined ? PIXELLAB_ANIMATION_ESTIMATE_USD : PIXELLAB_ESTIMATE_USD), source: "estimated (failed after submit)" };
 }
 
 /** Build the ChargedFailure for a post-submit throw (keeps the original message). */
@@ -387,6 +393,155 @@ function collectBase64Images(node: unknown, out: string[]): void {
   for (const value of Object.values(record)) collectBase64Images(value, out);
 }
 
+/** Poll a PixelLab background job to completion (same deadline and charged errors for stills and animations). */
+async function pollPixellabJob(
+  base: string, key: string, jobId: string, input: GenerateInput, opts: GenerateOptions,
+  fetchImpl: typeof fetch, deadline: number, sleep: (ms: number) => Promise<void>, submittedUsd: number | undefined,
+): Promise<any> {
+  for (;;) {
+    if (Date.now() > deadline) throw charged("pixellab", input, `pixellab generation timed out after ${opts.timeoutMs} ms (job ${jobId})`, submittedUsd);
+    const poll = await httpJson(fetchImpl, `${base}/v2/background-jobs/${jobId}`, { headers: { authorization: `Bearer ${key}` } }, deadline).catch((e: unknown) => {
+      throw charged("pixellab", input, `pixellab job poll failed: ${(e as Error).message}`, submittedUsd);
+    });
+    if (poll.status >= 400)
+      throw charged("pixellab", input, `pixellab job poll failed (${poll.status}): ${poll.body?.detail ?? JSON.stringify(poll.body).slice(0, 300)}`, submittedUsd);
+    if (poll.body?.status === "failed")
+      throw charged("pixellab", input, `pixellab job failed: ${JSON.stringify(poll.body?.last_response?.detail ?? poll.body?.last_response ?? poll.body).slice(0, 300)}`, usageUsd(poll.body?.usage) ?? submittedUsd);
+    if (poll.body?.status === "completed") return poll.body;
+    await sleep(opts.pollIntervalMs ?? 2000);
+  }
+}
+
+/** Raw base64 from a `data:image/png;base64,…` URI or a bare string. */
+const stripDataUri = (b64: string) => b64.replace(/^data:[^;,]+;base64,/, "");
+
+/** Validate a PixelLab animation request against the documented limits, before any request or spend. */
+export function validatePixellabAnimation(frames: number, ref: { width: number; height: number } | null): void {
+  if (!Number.isInteger(frames) || frames < PL_ANIM.minFrames || frames > PL_ANIM.maxFrames || frames % 2 !== 0)
+    throw new Error(`pixellab frames must be an even number from ${PL_ANIM.minFrames} to ${PL_ANIM.maxFrames} (4, 6, 8, 10, 12, 14, 16), got ${frames}`);
+  if (!ref) throw new Error("pixellab animation needs `reference`: the still to animate (it is the first frame; `prompt` is the action, e.g. 'walking')");
+  if (ref.width > PL_ANIM.maxSide || ref.height > PL_ANIM.maxSide)
+    throw new Error(`pixellab animation reference is ${ref.width}x${ref.height}; each side must be at most ${PL_ANIM.maxSide} px`);
+  if (ref.width * ref.height * frames > PL_ANIM.pixelBudget) {
+    const fit = Math.floor(PL_ANIM.pixelBudget / (ref.width * ref.height) / 2) * 2;
+    throw new Error(`pixellab animation budget: ${ref.width}x${ref.height} × ${frames} frames = ${ref.width * ref.height * frames} px, over ${PL_ANIM.pixelBudget}; at this size use at most ${fit} frames`);
+  }
+}
+
+/**
+ * Animate a reference still from a text action: `POST /v2/animate-with-text-v3` (first_frame + action +
+ * frame_count) → background job → `last_response.images`, written as ONE horizontal strip per
+ * animation (N frames of the reference's size, 1 row), the layout art_gate checks.
+ */
+async function pixellabAnimate(
+  input: GenerateInput,
+  opts: GenerateOptions,
+  env: Record<string, string | undefined>,
+  fetchImpl: typeof fetch,
+  deadline: number,
+  sleep: (ms: number) => Promise<void>,
+): Promise<GenerateResult> {
+  const frames = input.frames!;
+  validatePixellabAnimation(frames, input.reference ? { width: 1, height: 1 } : null); // frame count and reference first
+  const ref = await readReference(opts.workspace, input.reference!);
+  validatePixellabAnimation(frames, ref);
+  if (input.width !== ref.width || input.height !== ref.height)
+    throw new Error(`pixellab animation frames are the reference's size: pass width ${ref.width} and height ${ref.height} (got ${input.width}x${input.height})`);
+  const key = requireKey(env, "PIXELLAB_API_KEY");
+  const base = (opts.baseUrl?.pixellab ?? env.PIXELLAB_BASE_URL ?? "https://api.pixellab.ai").replace(/\/$/, "");
+
+  const body: Record<string, unknown> = {
+    first_frame: { type: "base64", base64: ref.base64, format: "png" },
+    action: input.prompt.slice(0, 1000),
+    frame_count: frames,
+    no_background: input.transparent ?? true,
+  };
+  if (input.seed !== undefined) body.seed = input.seed;
+
+  const submitted = await submitJson("pixellab", input, fetchImpl, `${base}/v2/animate-with-text-v3`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+    body: JSON.stringify(body),
+  }, deadline);
+  if (exhaustedAnswer(submitted.status, submitted.body))
+    throw new ProviderExhausted("pixellab", `${submitted.status} ${submitted.body?.detail ?? "Insufficient credits"}`);
+  if (submitted.status >= 400)
+    throw new Error(`pixellab rejected the animation (${submitted.status}): ${JSON.stringify(submitted.body?.detail ?? submitted.body).slice(0, 300)}`);
+  const jobId = submitted.body?.background_job_id;
+  if (!jobId) throw charged("pixellab", input, `pixellab returned no background_job_id: ${JSON.stringify(submitted.body).slice(0, 300)}`);
+  const submittedUsd = usageUsd(submitted.body?.usage);
+  const job = await pollPixellabJob(base, key, jobId, input, opts, fetchImpl, deadline, sleep, submittedUsd);
+
+  const usage = (job?.usage ?? submitted.body?.usage) as { type?: string; usd?: number; generations?: number } | null | undefined;
+  const reportedUsd = usageUsd(usage);
+  const notes: string[] = [];
+  let written: string[];
+  let discarded = 0;
+  let returned = 0;
+  let perStrip = frames;
+  try {
+    // frames in document order: base64 image objects, raw/data-URI strings, or hosted URLs
+    const items: unknown[] = Array.isArray(job?.last_response?.images) ? job.last_response.images : [];
+    const pngs: Uint8Array[] = [];
+    for (const it of items) {
+      const o = it as { base64?: unknown; url?: unknown } | string;
+      const url = typeof o === "string" ? (/^https?:\/\//.test(o) ? o : null) : typeof o?.url === "string" ? o.url : null;
+      if (url) pngs.push(await download(fetchImpl, url, deadline));
+      else {
+        const b64 = typeof o === "string" ? o : typeof o?.base64 === "string" ? o.base64 : null;
+        if (b64) pngs.push(new Uint8Array(Buffer.from(stripDataUri(b64), "base64")));
+      }
+    }
+    if (pngs.length === 0) {
+      const any: string[] = [];
+      collectBase64Images(job?.last_response, any);
+      for (const b64 of any) pngs.push(new Uint8Array(Buffer.from(stripDataUri(b64), "base64")));
+    }
+    returned = pngs.length;
+    if (returned === 0) throw new Error("pixellab animation completed but carried no frames");
+    // Group into animations. Docs: frames at last_response.images; whether the input frame is echoed
+    // and whether several candidates can come back is undocumented, so handle the shapes we can name.
+    let groups: Uint8Array[][];
+    if (returned === frames) groups = [pngs];
+    else if (returned === frames + 1) {
+      groups = [pngs.slice(1)];
+      notes.push(`received ${returned} frames for frame_count ${frames}; dropped index 0 (the echoed input frame)`);
+    } else if (returned % frames === 0) groups = Array.from({ length: returned / frames }, (_, k) => pngs.slice(k * frames, (k + 1) * frames));
+    else {
+      groups = [pngs];
+      perStrip = returned;
+      notes.push(`received ${returned} frames for frame_count ${frames}; wrote them all as one strip of ${returned} — check the manifest frames before gating`);
+    }
+    const cap = keepCandidates(groups, input.maxCandidates);
+    discarded = cap.discarded;
+    const strips: Uint8Array[][] = [];
+    for (const g of cap.kept) {
+      const imgs = g.map((b) => {
+        if (!isPng(b)) throw new Error("pixellab returned a non-PNG frame");
+        return decodePng(b);
+      });
+      if (imgs[0].width !== ref.width || imgs[0].height !== ref.height)
+        notes.push(`frames are ${imgs[0].width}x${imgs[0].height}, not the reference's ${ref.width}x${ref.height}`);
+      strips.push([encodePng(contactSheet(imgs).image)]); // horizontal, no gap, frame order kept
+    }
+    written = await writeImages(opts.workspace, input.out, strips);
+  } catch (e) {
+    throw charged("pixellab", input, (e as Error).message, reportedUsd);
+  }
+  const costUsd = reportedUsd ?? PIXELLAB_ANIMATION_ESTIMATE_USD;
+  return {
+    provider: "pixellab",
+    images: written,
+    cost_micro_usd: usdToMicro(costUsd),
+    cost_source: reportedUsd === undefined ? "estimated" : "reported",
+    metadata: {
+      endpoint: "animate-with-text-v3", background_job_id: jobId, usage: usage ?? null, created_at: job?.created_at,
+      frames_per_strip: perStrip, frame_size: { w: ref.width, h: ref.height }, frames_returned: returned, candidates_discarded: discarded,
+      ...(notes.length ? { notes } : {}),
+    },
+  };
+}
+
 async function pixellab(
   input: GenerateInput,
   opts: GenerateOptions,
@@ -395,7 +550,7 @@ async function pixellab(
   deadline: number,
   sleep: (ms: number) => Promise<void>,
 ): Promise<GenerateResult> {
-  if (input.frames !== undefined) throw new Error("frames are not supported for pixellab through this interface (animation endpoints are a later ticket; see PROVIDERS.md)");
+  if (input.frames !== undefined) return pixellabAnimate(input, opts, env, fetchImpl, deadline, sleep);
   const key = requireKey(env, "PIXELLAB_API_KEY");
   const base = (opts.baseUrl?.pixellab ?? env.PIXELLAB_BASE_URL ?? "https://api.pixellab.ai").replace(/\/$/, "");
 
@@ -423,22 +578,7 @@ async function pixellab(
   if (!jobId) throw charged("pixellab", input, `pixellab returned no background_job_id: ${JSON.stringify(submitted.body).slice(0, 300)}`);
   const submittedUsd = usageUsd(submitted.body?.usage);
 
-  let job: any = null;
-  for (;;) {
-    if (Date.now() > deadline) throw charged("pixellab", input, `pixellab generation timed out after ${opts.timeoutMs} ms (job ${jobId})`, submittedUsd);
-    const poll = await httpJson(fetchImpl, `${base}/v2/background-jobs/${jobId}`, { headers: { authorization: `Bearer ${key}` } }, deadline).catch((e: unknown) => {
-      throw charged("pixellab", input, `pixellab job poll failed: ${(e as Error).message}`, submittedUsd);
-    });
-    if (poll.status >= 400)
-      throw charged("pixellab", input, `pixellab job poll failed (${poll.status}): ${poll.body?.detail ?? JSON.stringify(poll.body).slice(0, 300)}`, submittedUsd);
-    if (poll.body?.status === "failed")
-      throw charged("pixellab", input, `pixellab job failed: ${JSON.stringify(poll.body?.last_response ?? poll.body).slice(0, 300)}`, usageUsd(poll.body?.usage) ?? submittedUsd);
-    if (poll.body?.status === "completed") {
-      job = poll.body;
-      break;
-    }
-    await sleep(opts.pollIntervalMs ?? 2000);
-  }
+  const job = await pollPixellabJob(base, key, jobId, input, opts, fetchImpl, deadline, sleep, submittedUsd);
 
   const usage = (job?.usage ?? submitted.body?.usage) as { type?: string; usd?: number } | null | undefined;
   const reportedUsd = usageUsd(usage);
@@ -473,6 +613,7 @@ export interface Quote {
   remaining_balance: number | null;
   unit: "usd" | "generations";
   total?: number | null;
+  note?: string;
 }
 
 /**
@@ -486,7 +627,12 @@ export async function quote(input: GenerateInput, opts: GenerateOptions): Promis
   const deadline = Date.now() + (opts.timeoutMs ?? 30_000);
   if (input.provider === "pixellab") {
     const b = await balance("pixellab", opts).catch(() => null);
-    return { provider: "pixellab", per_call_usd: PIXELLAB_ESTIMATE_USD, source: "price table", remaining_balance: b?.remaining ?? null, unit: b?.unit ?? "usd", total: b?.total ?? null };
+    const anim = input.frames !== undefined;
+    return {
+      provider: "pixellab", per_call_usd: anim ? PIXELLAB_ANIMATION_ESTIMATE_USD : PIXELLAB_ESTIMATE_USD, source: "price table",
+      remaining_balance: b?.remaining ?? null, unit: b?.unit ?? "usd", total: b?.total ?? null,
+      ...(anim ? { note: "PixelLab documents no generations cost for animate-with-text-v3 (and no dry run); the estimate is a placeholder. art_generate reports generations_used per call." } : {}),
+    };
   }
   const key = requireKey(env, "RETRO_DIFFUSION_API_KEY");
   const base = (opts.baseUrl?.retrodiffusion ?? env.RETRO_DIFFUSION_BASE_URL ?? "https://api.retrodiffusion.ai").replace(/\/$/, "");

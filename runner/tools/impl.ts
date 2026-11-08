@@ -1049,6 +1049,8 @@ const LOW_PCT = 20;
 const artGenerate: ToolImpl = {
   description:
     "Generate pixel art with a paid provider (PixelLab or Retro Diffusion) and write PNGs into the workspace. " +
+    "Animation: pass frames. On pixellab it animates a REFERENCE still (required: the start frame, width/height = its size) " +
+    "with prompt as the action ('walking', 'idle breathing') via animate-with-text-v3, and writes ONE horizontal strip (frames × width, 1 row). " +
     "Every call reports cost_micro_usd and is charged to the run budget — no raw generations land unprocessed when " +
     "postprocess is set: snap downscales to the manifest grid, lock forces the manifest palette, outline takes the " +
     "style bible's outline color. The manifest must be locked (game_clone) before postprocess can run. " +
@@ -1065,7 +1067,7 @@ const artGenerate: ToolImpl = {
       out: z.string().min(1).regex(/\.png$/i, "out must end in .png").describe("workspace-relative output PNG"),
       reference: z.string().min(1).optional().describe("workspace-relative reference/anchor PNG"),
       seed: z.number().int().nonnegative().optional(),
-      frames: z.number().int().optional().describe("animation frames_duration (Retro Diffusion only: 4|6|8|10|12|16)"),
+      frames: z.number().int().optional().describe("animation frames. retrodiffusion: frames_duration 4|6|8|10|12|16. pixellab: 4-16 even (4|6|8|10|12|14|16); animates `reference` (required, the start frame, at most 256x256, width/height = its size) with `prompt` as the action; w*h*frames <= 524288. Output: one horizontal strip (frames x width, 1 row)"),
       transparent: z.boolean().optional().describe("transparent background (default true)"),
       style: z.string().max(120).optional().describe("Retro Diffusion prompt_style id"),
       max_candidates: z.number().int().min(1).max(MAX_CANDIDATES).default(DEFAULT_CANDIDATES).describe(`keep at most this many returned images (default ${DEFAULT_CANDIDATES}); extras are discarded unwritten. Keeps the gallery reviewable; it does NOT save generations (the provider bills what it made)`),
@@ -1106,8 +1108,8 @@ const artGenerate: ToolImpl = {
         exhausted.push(p);
         continue;
       }
-      if (p !== requested && i.frames !== undefined && p === "pixellab") {
-        notes.push("pixellab cannot animate through this interface, so there is no animation fallback");
+      if (p !== requested && i.frames !== undefined && p === "pixellab" && !i.reference) {
+        notes.push("pixellab animates only from a reference still, and none was given, so there is no animation fallback");
         continue;
       }
       if (p !== requested) notes.push(`${requested} is exhausted; tried ${p} once instead (same prompt and size)`);
@@ -1145,7 +1147,11 @@ const artGenerate: ToolImpl = {
     const after: Balance | null = typeof result.metadata.remaining_balance === "number"
       ? { remaining: result.metadata.remaining_balance as number, unit: "usd", total: null }
       : await providerBalance(result.provider, {}).catch(() => null);
-    const used = before && after && before.unit === "generations" && after.unit === "generations" ? Math.round((before.remaining - after.remaining) * 1000) / 1000 : null;
+    // generations used: the balance delta (T21); else the job's own usage when it reports generations
+    const usage = result.metadata.usage as { type?: string; generations?: number } | null | undefined;
+    const used = before && after && before.unit === "generations" && after.unit === "generations"
+      ? Math.round((before.remaining - after.remaining) * 1000) / 1000
+      : usage?.type === "generations" && typeof usage.generations === "number" ? usage.generations : null;
     credits = noteCredits(ctx, result.provider, after, "generation", used);
     const extra = { generation: `${generation} of ${1 + MAX_REGENERATIONS}`, credits, ...(used !== null ? { generations_used: used } : {}), ...(result.provider !== requested ? { fallback_from: requested } : {}), ...(notes.length ? { notes } : {}) };
     try {
