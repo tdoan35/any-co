@@ -273,6 +273,19 @@ test("gate fails on unknown and self anchors", () => {
   assert.equal(r2.ok, false);
 });
 
+test("T45: Godot import sidecars (.png.import, .uid, .gdignore) are not unlisted art; a real stray png still is", () => {
+  const files: Record<string, Uint8Array | string> = { ...goodFiles() };
+  for (const p of Object.keys(goodFiles())) files[p + ".import"] = "[remap]\nimporter=\"texture\"\n";
+  files["assets/scripts/y.gd.uid"] = "uid://abc";
+  files["assets/.gdignore"] = "";
+  files["assets/sprites/.gdignore"] = "";
+  const report = runGate(writeRepo(goodManifest(), files));
+  assert.deepEqual(report.files.unlisted, []);
+  assert.equal(report.ok, true);
+  const r2 = runGate(writeRepo(goodManifest(), { ...files, "assets/sprites/stray.png": encodePng(frame0Sprite("#99aabb")), "assets/sprites/stray.png.import": "x" }));
+  assert.deepEqual(r2.files.unlisted, ["assets/sprites/stray.png"]);
+});
+
 test("gate fails on unlisted files under assets/ and missing manifest paths", () => {
   const files: Record<string, Uint8Array | string> = { ...goodFiles(), "assets/sprites/rogue.png": encodePng(frame0Sprite("#99aabb")) };
   const report = runGate(writeRepo(goodManifest(), files));

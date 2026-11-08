@@ -8,6 +8,9 @@ import { fileURLToPath } from "node:url";
 import { decodePng, type RgbaImage } from "./png.ts";
 import { splitStrip } from "./ops.ts";
 
+/** Godot engine sidecars under assets/: never counted as unlisted art (T45). */
+export const ENGINE_SIDECAR = /\.(import|uid)$|(^|\/)\.gdignore$/;
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const DEFAULT_SCHEMA_PATH = path.join(ROOT, "docs", "contracts", "asset.schema.json");
 
@@ -329,7 +332,8 @@ export function runGate(repoDir: string, opts?: GateOptions): GateReport {
   // every file under assets/ is listed (manifest.json itself exempt); symlinks are reported, not followed.
   const listed = new Set(manifest.assets.map((a) => a.path));
   const walked = walkAssets(path.join(repoDir, "assets"));
-  const onDisk = walked.files.filter((p) => p !== "assets/manifest.json");
+  // Godot writes import sidecars (<file>.png.import, *.uid, .gdignore) next to assets; they are engine metadata, not art (T45)
+  const onDisk = walked.files.filter((p) => p !== "assets/manifest.json" && !ENGINE_SIDECAR.test(p));
   report.files.symlinks = walked.symlinks.sort();
   report.files.missing = [...listed].filter((p) => assetPathIsSafe(p) && !existsSync(path.join(repoDir, p))).sort();
   report.files.unlisted = onDisk.filter((p) => !listed.has(p)).sort();
