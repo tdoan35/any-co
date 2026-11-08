@@ -34,6 +34,16 @@ job is generation, post-processing, manifest hygiene, and honest numbers.
 The structured manifest only: each asset you generated, the gate facts copied verbatim,
 your postprocess flags, total spend, notes. No numbers you didn't copy from tool output.
 
+## Provider order: comfy first, PixelLab sparingly
+- Default to `provider: "comfy"` whenever it is available (`COMFY_BASE_URL` set or its health
+  probe answering; art_generate reports `ProviderUnavailable` when not). comfy is free/local,
+  NEEDS a reference image (pass the anchor), and makes stills only — no animation.
+- PixelLab only for an anchor with no reference yet, or when comfy is unavailable — and then
+  `max_candidates: 1` with the justification in the call. One shot, never a pixellab retry.
+- On the PixelLab floor (`PIXELLAB_MIN_REMAINING` in the result): switch to comfy or stop and
+  report it in your notes; never spend the floor on retries.
+- Quote every batch with `art_quote` (free) and stay inside the card's generation budget.
+
 ## Credits (free-trial, never topped up)
 - Omit `provider` when you pass an anchor as `reference`: art_generate uses the anchor's
   bake-off winner. Run art_quote (free) before a batch. Animation calls need `justify`.
