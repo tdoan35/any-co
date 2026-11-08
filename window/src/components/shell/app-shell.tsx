@@ -29,8 +29,8 @@ import { TitleBar } from "./title-bar";
 
 const nav = [
   { href: "/", label: "New thread", icon: SquarePen, match: (p: string) => p === "/" },
-  { href: "/weave", label: "Weave", icon: Spool, match: (p: string) => p.startsWith("/weave"), badge: true },
-  { href: "/agents", label: "Studio", icon: Hammer, match: (p: string) => p.startsWith("/agents") },
+  { href: "/weave", label: "Studio", icon: Spool, match: (p: string) => p.startsWith("/weave"), badge: true },
+  { href: "/agents", label: "Agents", icon: Hammer, match: (p: string) => p.startsWith("/agents") },
   { href: "/schedule", label: "Schedule", icon: CalendarClock, match: (p: string) => p.startsWith("/schedule") },
   { href: "/work", label: "Work", icon: Briefcase, match: (p: string) => p.startsWith("/work") || p.startsWith("/runs") || p.startsWith("/reports") },
 ];

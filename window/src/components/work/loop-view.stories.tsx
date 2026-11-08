@@ -75,7 +75,7 @@ export const ProposedNoLoop: Story = {
     await waitFor(() => expect(canvas.getByRole("heading", { name: "Can these results drive a real product?" })).toBeInTheDocument());
     expect(canvas.getByText("Diego frames the bet, Lila looks for demand, and Maya sketches a first experience.")).toBeInTheDocument();
     expect(canvas.getByText("Preview")).toBeInTheDocument();
-    expect(canvas.getByRole("link", { name: /Decide in Weave/ })).toHaveAttribute("href", "/weave?item=handoff-product");
+    expect(canvas.getByRole("link", { name: /Decide in Studio/ })).toHaveAttribute("href", "/weave?item=handoff-product");
     // No loop to play: the transport is not mounted at all.
     expect(canvasElement.querySelector("input[aria-label='Scrub the loop']")).toBeNull();
   },

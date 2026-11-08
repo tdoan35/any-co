@@ -40,8 +40,8 @@ come from the config; the window never hard-codes studio or game names.
 
 ## Pages
 
-- **Studio**: the org chart. Departments, teams and agents with a live presence dot. The Studio Head sits at the top.
-- **Weave**: the studio deck. Who is working, a pulse of run starts and ends, and the intervention count. The approval inbox is empty until the approval ledger exists.
+- **Agents**: the org chart. Departments, teams and agents with a live presence dot. The Studio Head sits at the top.
+- **Studio**: the studio deck. Who is working, a pulse of run starts and ends, and the intervention count. The approval inbox is empty until the approval ledger exists.
 - **Work**: runs as a board. Open one to watch its loop (model replies, tool calls, results, wrap-up notes).
 - **Chat** (home): talk to the Studio Head. It answers from the studio's runs, spend and roster through read-only tools. It cannot start or stop agents yet.
 
