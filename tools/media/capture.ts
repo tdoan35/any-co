@@ -32,6 +32,8 @@ export interface CaptureOptions {
   graceMs?: number; // after quit (or the movie's exit), how long before SIGTERM, then SIGKILL
   pollMs?: number;
   env?: Record<string, string | undefined>;
+  /** The env the game starts from (default process.env); the runner passes a scrubbed one (T40). */
+  baseEnv?: Record<string, string | undefined>;
 }
 
 export interface Shot { file: string; tick: number; trigger: string }
@@ -91,7 +93,7 @@ export async function capture(o: CaptureOptions): Promise<CaptureResult> {
   const qa = new QaClient(o.gameDir, o.pollMs ?? 5, () => !exited());
   qa.clearHandshake();
   const spawnedAt = Date.now() - 1; // mtime granularity slack; the files were just removed anyway
-  const child = spawn(argv[0], argv.slice(1), { cwd: o.gameDir, env: { ...process.env, ...o.env }, detached: true, stdio: ["ignore", "ignore", "pipe"] });
+  const child = spawn(argv[0], argv.slice(1), { cwd: o.gameDir, env: { ...(o.baseEnv ?? process.env), ...o.env }, detached: true, stdio: ["ignore", "ignore", "pipe"] });
   // if the runner exits, is signalled, or is SIGKILLed mid-capture, the game's group goes with it
   const reaper = child.pid ? track(child.pid) : null;
   let stderr = "";

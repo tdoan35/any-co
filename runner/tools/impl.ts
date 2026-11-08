@@ -21,6 +21,7 @@ import {
   LOW_GENERATIONS, MAX_REGENERATIONS, PROVIDERS, anchorWinner, checkPixellabFloor, pixellabCallEstimate, pixellabFloor, type FloorVerdict, generationsUsedSinceRedo, grantRedo, outPathProblem, releaseGeneration, reserveGeneration, isExhausted, markExhausted, other, readCredits, readGallery,
   readProviders, recordAnchorWinner, recordCredit, statePaths,
 } from "../../tools/art/credits.ts";
+import { execEnv, execRefusal, scopedArgv } from "./exec-scope.ts";
 import { capture as mediaCapture, POLICY as MEDIA_POLICY, type CaptureMode } from "../../tools/media/capture.ts";
 import { edit as mediaEdit, probe as mediaProbe } from "../../tools/media/edit.ts";
 import { track as trackGroup } from "../../tools/proc/reaper.ts";
@@ -50,9 +51,9 @@ export function compactJson(text: string): string {
   }
 }
 
-function execText(cmd: string, args: string[], timeoutMs: number): Promise<{ out: string; err: string; code: number }> {
+function execText(cmd: string, args: string[], timeoutMs: number, env?: NodeJS.ProcessEnv): Promise<{ out: string; err: string; code: number }> {
   return new Promise((resolve) => {
-    execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024 }, (error, stdout, stderr) => {
+    execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024, ...(env ? { env } : {}) }, (error, stdout, stderr) => {
       const code = error ? (typeof (error as any).code === "number" ? (error as any).code : 1) : 0;
       resolve({ out: String(stdout), err: String(stderr), code });
     });
@@ -639,7 +640,9 @@ const gameWrite: ToolImpl = {
 const gameExec: ToolImpl = {
   description:
     "Run a command inside your game clone (git, build.sh targets, engine CLI, tests). No shell: give the command as a list, e.g. [\"git\",\"status\"]. " +
-    "Exit code, stdout, and stderr come back; a non-zero exit is an error result you must fix, not retry unchanged.",
+    "Exit code, stdout, and stderr come back; a non-zero exit is an error result you must fix, not retry unchanged. " +
+    "Scoped (T40): it runs in your clone with a minimal env (no API keys), it cannot run harness files or harness npm scripts or cd above the clone, " +
+    "and on macOS it is sandboxed (no writes outside your clone except pushing to the game repo). For QA use the qa_harness tools.",
   input: z
     .object({
       command: z.array(z.string().min(1)).min(1).max(12).describe("Argv, e.g. [\"git\", \"log\", \"--oneline\", \"-5\"]"),
@@ -650,10 +653,13 @@ const gameExec: ToolImpl = {
     try {
       const cwd = path.join(ctx.workspace, "game");
       if (!existsSync(cwd)) throw new Error("no clone yet; call game_clone first");
-      const [cmd, ...args] = command;
+      const refusal = execRefusal(command, cwd);
+      if (refusal) return { content: `game_exec refused: ${refusal}`, is_error: true };
+      const [cmd, ...args] = scopedArgv(command, cwd);
       const { promise, resolve } = Promise.withResolvers<{ out: string; err: string; code: number }>();
-      // ANYCO_AGENT lets the game repo's pre-receive hook enforce the single-merger rule (tools/gamerepo/new-game.ts).
-      const env = { ...process.env, ANYCO_AGENT: ctx.agent ?? "unknown" };
+      // ANYCO_AGENT lets the game repo's pre-receive hook enforce the single-merger rule (tools/gamerepo/new-game.ts);
+      // the rest of the env is an allowlist: agent-run processes never see API keys (T40).
+      const env = execEnv(ctx.agent ?? "unknown", cwd);
       // Own process group + our own timeout: execFile's timeout only SIGTERMs the direct child, so a build.sh that
       // started Godot (or a Godot that ignores SIGTERM) left orphans running for hours. Kill the whole group instead.
       const limitMs = (timeout_s ?? 120) * 1000;
@@ -663,7 +669,7 @@ const gameExec: ToolImpl = {
       const out: Buffer[] = [];
       const err: Buffer[] = [];
       let outBytes = 0;
-      const child = spawn(cmd, args, { cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn(cmd, args, { cwd: env.PWD, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
       const reaper = child.pid ? trackGroup(child.pid) : null; // runner exit/signal/kill -9 reaps the group too
       const take = (sink: Buffer[]) => (b: Buffer) => { if (outBytes < MAX_OUT) { sink.push(b); outBytes += b.length; } };
       child.stdout?.on("data", take(out));
@@ -1703,7 +1709,8 @@ async function runQa(mode: QaMode, input: Record<string, unknown>, ctx: ToolCont
       if (input["run"] === false) args.push("--run", "false");
       if (input["save_frames"] !== undefined) args.push("--save-frames", String(input["save_frames"]), "--save-dir", mediaOut(ctx.workspace, "media/export-frames"));
       const tsxLoader = fileURLToPath(import.meta.resolve("tsx"));
-      const proc = await execText(process.execPath, ["--import", `file://${tsxLoader}`, path.join(ROOT, "tools", "qa", "qa.ts"), "export-check", ...args], 15 * 60_000);
+      // the QA CLI runs agent-written game code (Godot): no secrets in its env (T40)
+      const proc = await execText(process.execPath, ["--import", `file://${tsxLoader}`, path.join(ROOT, "tools", "qa", "qa.ts"), "export-check", ...args], 15 * 60_000, execEnv(ctx.agent ?? "unknown", clone));
       try {
         const result = JSON.parse(proc.out);
         // saved frames are reported workspace-relative, the paths image_view takes
@@ -1748,7 +1755,7 @@ async function runQa(mode: QaMode, input: Record<string, unknown>, ctx: ToolCont
     const args = Object.entries(cli).flatMap(([k, v]) => [`--${k}`, String(v)]);
     // tsx resolves from the cwd; the child runs in the clone, so import the loader by path.
     const tsxLoader = fileURLToPath(import.meta.resolve("tsx"));
-    const proc = await execText(process.execPath, ["--import", `file://${tsxLoader}`, path.join(ROOT, "tools", "qa", "qa.ts"), mode, ...args], 10 * 60_000);
+    const proc = await execText(process.execPath, ["--import", `file://${tsxLoader}`, path.join(ROOT, "tools", "qa", "qa.ts"), mode, ...args], 10 * 60_000, execEnv(ctx.agent ?? "unknown", path.join(ctx.workspace, "game")));
     let parsed: unknown;
     try {
       parsed = JSON.parse(proc.out);
@@ -1951,6 +1958,7 @@ const mediaTools: Record<string, ToolImpl> = {
         const r = await mediaCapture({
           gameDir: clone, launch: mediaLaunch(clone, i.launch), separator: i.separator, seed: i.seed, timeScale: i.time_scale,
           policy: i.policy, resolution: { w: i.width, h: i.height }, outDir, mode, timeoutMs: i.timeout_s * 1000,
+          baseEnv: execEnv(ctx.agent ?? "unknown", clone), // the game is agent-written code: no secrets (T40)
         });
         const rel = (f: string) => path.relative(ctx.workspace, f);
         return {
