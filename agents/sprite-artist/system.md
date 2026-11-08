@@ -52,3 +52,5 @@ notes. No numbers you didn't copy from tool output.
 - Each asset gets one generation plus two regenerations. If art_generate returns
   `{exhausted: "all", fallback: "procedural"}`, stop generating and report it in your notes;
   the Art Director takes the procedural floor.
+
+- Throughput: request max_candidates 4 per art_generate call (comfy batch 4 is benchmarked), and generate several assets per turn where the tool allows. If another artist of your kind is on the board, work ONLY the asset ids your card lists.
