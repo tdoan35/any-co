@@ -9,12 +9,11 @@ export default defineAgent({
   description: "QA: plays the game through autoplay policies and scripted inputs; reports bugs with repro, confusion points, and where it stops being fun.",
   dept: "qa",
   runner: "local",
-  model: "anthropic/claude-opus-5.5", // Naïve catalogue id, used if this agent is ever hosted
-  // Nov 7: on GLM-5.3 the exploratory loop hit max_turns before reporting, and a human found a blank board the
-  // state-only checks passed. Opus via Neon can image_view the screenshots it captures (the Naïve proxy rejects images).
-  provider: { kind: "openai_compatible", model: "claude-opus-5-5", base_url_env: "NEON_AI_BASE_URL", api_key_env: "NEON_AI_API_KEY", usd_per_mtok: { input: 4, output: 20 } },
+  model: "z-ai/glm-5.3",
+  // Nov 7 6 PM: Neon credits ran out, so this agent is on GLM-5.3 through Naïve's proxy (real money; the cheaper model
+  // where quality allows, Ty via EA B). The proxy rejects image blocks, so no image_view: decisions use art_gate numbers.
   budget: { cap_usd: 25, max_task_usd: 4, period: "day" },
-  tools: { game_repo: "allow", qa_harness: "allow", workspace_read: "allow", workspace_write: "allow", image_view: "allow", studio_ledger: "allow" },
+  tools: { game_repo: "allow", qa_harness: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow" },
   output_schema: z
     .object({
       runs: z

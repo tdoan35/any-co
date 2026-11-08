@@ -9,9 +9,7 @@ export default defineAgent({
   dept: "eng",
   runner: "local",
   model: "anthropic/claude-opus-5.5", // Naïve catalogue id, used if this agent is ever hosted
-  // Local runs go through the Neon AI gateway (OpenAI-compatible): Eng may use non-Naïve inference (AGENTS.md).
-  // Price = Anthropic list for Opus 5.5 ($4/$20 per MTok); Neon billing may differ, so spend is an estimate.
-  provider: { kind: "openai_compatible", model: "claude-opus-5-5", base_url_env: "NEON_AI_BASE_URL", api_key_env: "NEON_AI_API_KEY", usd_per_mtok: { input: 4, output: 20 } },
+  // Nov 7 6 PM: Neon credits ran out ($0.99 left), so local runs go through Naïve's proxy (real money, billed per call). Ty via EA B.
   budget: { cap_usd: 80, max_task_usd: 15, period: "day" }, // Opus via Neon; one feature ticket per run; both engineer runs share this day cap
   tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow" },
   output_schema: z
