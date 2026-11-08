@@ -12,6 +12,7 @@ import type { AgentSpec } from "./spec.ts";
 import type { Provider } from "./types.ts";
 import type { NaiveClient } from "./providers.ts";
 import { artMerge, gameRepoOfClone, type ArtMergeOptions, type ArtMergeResult } from "../tools/art/merge.ts";
+import { handIn, handInLines, snapshotRun, type HandIn } from "./handoff.ts";
 import { BoardError, completeSupersedes, type Board, type BoardCard, type BoardComment } from "./board/index.ts";
 
 export interface DispatchOptions {
@@ -250,12 +251,14 @@ export function operatorNotes(comments: BoardComment[], cap = OPERATOR_NOTES_CAP
 }
 
 /** The task handed to an agent: the card, what its finished blockers produced, and the operator's comments on the card. */
-export function cardTask(card: BoardCard, blockers: BoardCard[], comments: BoardComment[] = []): string {
+export function cardTask(card: BoardCard, blockers: BoardCard[], comments: BoardComment[] = [], handins: HandIn[] = []): string {
   const parts = [`# ${card.title}`, card.body].filter(Boolean);
   if (blockers.length) {
+    const files = handInLines(handins);
     parts.push(
       "--- Upstream results (done cards this card waited on) ---\n" +
-        blockers.map((b) => `## ${b.title} (${b.id})\n${b.note ?? "(no note)"}`).join("\n\n"),
+        blockers.map((b) => `## ${b.title} (${b.id})\n${b.note ?? "(no note)"}`).join("\n\n") +
+        (files.length ? `\n\nUpstream files, copied into your workspace (read them with workspace_read):\n${files.join("\n")}` : ""),
     );
   }
   const notes = operatorNotes(comments);
@@ -379,7 +382,16 @@ export class Dispatcher {
       this.opts.log?.(`card ${card.id}: could not read comments (${errText(e)}); starting without operator notes`);
       return [] as BoardComment[];
     });
-    const task = cardTask(card, blockers, comments);
+    // T48: hand in the upstream cards' files at upstream/<card-id>/ in this run's workspace (runAgent keeps what is there)
+    let handins: HandIn[] = [];
+    try {
+      const workspace = path.join(this.opts.runsDir ?? RUNS_DIR, runId, "workspace");
+      mkdirSync(workspace, { recursive: true });
+      handins = handIn(this.opts.runsDir ?? RUNS_DIR, workspace, blockers.map((b) => ({ id: b.id, agent: b.assignee })));
+    } catch (e) {
+      this.opts.log?.(`card ${card.id}: upstream file hand-in failed (${errText(e)}); starting without upstream files`);
+    }
+    const task = cardTask(card, blockers, comments, handins);
     this.opts.log?.(`▶ ${spec.name} on card ${card.id}: ${card.title}`);
     const done = this.run(spec, card, task, runId);
     this.inflight.set(spec.name, done);
@@ -456,6 +468,16 @@ export class Dispatcher {
       return;
     }
     const money = `$${(r.spent_micro_usd / 1e6).toFixed(4)}`;
+    // T48: a run that finished (done, or done-but-not-complete: partial work hands on too) leaves its files for dependents
+    if (r.status === "done") {
+      try {
+        const m = snapshotRun(runsDir, r.run_id, card.id, spec.name, r.output);
+        const copied = m.files.filter((f) => f.copied).length;
+        if (copied || m.files.length) this.opts.log?.(`  card ${card.id}: handed off ${copied} file(s) (${m.files.length - copied} skipped) → runs/handoff/${card.id}/`);
+      } catch (e) {
+        this.opts.log?.(`card ${card.id}: file hand-off snapshot failed (${errText(e)})`);
+      }
+    }
     if (r.status === "done" && isObject(r.output) && r.output.complete === false) {
       // ran to the end but says the work isn't done (T29): never close it as done
       await close("blocked", `not complete: run ${r.run_id}, ${money} — ${agentNote(r)}`);

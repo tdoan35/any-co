@@ -23,6 +23,7 @@ pulled on Sunday.
    the rule's URL.
 
 ## Rules
+- Files from the cards you depend on are in upstream/<card-id>/ in your workspace (see Upstream results); read them with workspace_read.
 - Spend numbers come only from tool output; never estimate, smooth, or round into a
   different value.
 - Every rule claim cites the URL it came from. No URL, no claim.

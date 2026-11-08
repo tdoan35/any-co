@@ -35,6 +35,9 @@ The head turn runs outside `--max-parallel`: count N dispatched runs + 1 head tu
 - Steer a card with a comment (T37): the next run's task gets an "Operator notes" section with the card's comments by
   `operator`, `studio-head` (board_comment) or a person in the Naïve app (`usr_`), oldest first, capped at 4,000 chars (newest kept).
   Dispatcher and agent comments are left out. A note reaches the next run, not one already in progress.
+- Card files hand off (T48): when a card's run finishes (done, or complete:false), the files it wrote in its workspace are
+  copied to runs/handoff/<card-id>/ (not the game clone; no secrets; caps 256 KB text / 25 MB media / 60 MB per card; see its
+  manifest.json). Cards that depend on it get them at upstream/<card-id>/ in their workspace, listed in Upstream results.
 - Art-only branches land by themselves (T46): when an artist's card closes done (complete:true), the dispatcher merges
   agent/<artist> into the game's main with no LLM if it touches only assets/** and art/gallery/**, merges clean, and the gate
   passes on the merged tree; the card gets an "art-merge:" comment either way. On a refusal, card a tech-lead merge. Manual:
