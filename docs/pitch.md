@@ -22,23 +22,55 @@ We started the studio with a budget and the Steam catalog. Agents found a gap, p
 
 ## Two minutes
 
-Spoken. 280 words, about two minutes. Brackets are facts to drop in at freeze. Say the title on the play beat, then go back to the company.
+Video voiceover, about 220 words, roughly 85–90 seconds of speech. Fill `[N]`, `[P]`, and `[S]` from the live ledger at record time. Put an itch URL on screen only if that page is public.
 
----
+### 0:00–0:10
 
-any-co is a game studio run by agents. A budget and the Steam catalog go in. A shipped game comes out. Every time a human touches the studio, that touch is on the ledger.
+Any-co is a game studio run by AI agents. Since yesterday, the agents chose, built, and shipped two games.
 
-I pressed start at 1pm yesterday. After that, the company ran. About eighteen agents, each with a budget and a job. Market research scored gaps in the Steam catalog: demand, how crowded the shelf already is, and whether a weekend studio could build it. A pitch writer turned the best gaps into three games. A feasibility critic's job is to kill the ones we cannot finish, and it has a veto. The Studio Head picked one and wrote down why.
+On screen: the any-co logo for two seconds, then both games already playing, titles burned in. Caravan Cargo Cult: crates firing. Soul Shift: a swipe and the DENIED stamp.
 
-Then the rest of the studio worked. Design wrote the doc in must, should, and could. Art locked a style bible before a single sprite, and code snaps every asset onto that palette. Engineers built against a contract QA already knew. QA autoplayed the build. Marketing wrote the page and the posts. A message or a charge stops at an approval gate, and the decision is logged.
+### 0:10–0:22
 
-Steam will not release a new game in a weekend. Shipped means a playable build you can open right now, a live page on itch, and a Steam page submitted for review, with a Windows build uploaded and a release date set.
+Both games are live right now and each game cost ~$100 to make.
 
-[Title.] Play it from this code. [Downloads.] [Dollars, if any.] [Intervention count] human interventions, each with a reason. [Spend.]
+On screen: keep the gameplay running.
 
-Judge the company. The rejects are in the gallery. The cuts are on the timeline. The ledger is the argument: the studio kept going, and a person stepped in only when a platform, or a gate, required one.
+### 0:22–0:38
 
----
+The studio started with a budget and the Steam catalog. Agents found the gaps on Steam, wrote game pitches, and evaluated the ideas to decide which ones to green lit for build.
+
+On screen: the flow tab, four labels only — gap, three pitches, veto, pick. One frame of the veto on Last Garden on the Hill. Then the studio 1 / studio 2 switch, one beat each.
+
+### 0:38–0:54
+
+Caravan Cargo Cult is a auto battler game where the cargo you pack is what you fight with. Soul Shift is survival action game where you are a reaper working to swipe ghosts.
+
+On screen: seven or eight seconds of each real build, mouse only, no window chrome around it.
+
+### 0:54–1:14
+
+Design, art, code, QA, and the store page are cards on one board, with both games moving at once. Open a card: the agent reads the task, calls a tool, and commits. Art follows a locked style guide, and every asset is accepted or rejected before it ships.
+
+On screen: four seconds of the board, then one card only — the reasoning, one tool call, the commit. Then three gallery frames: candidate, reject, accept. Leave the provider badge readable. Do not name the providers.
+
+### 1:14–1:30
+
+People only do what a store or a bank requires. Every time, it's logged here with a reason. [N] so far.
+
+On screen: the live intervention counter and two real ledger entries. Use a real itch or YouTube approval if the ledger has one. Leave the inbox empty of anything staged for the camera.
+
+### 1:30–1:48
+
+And it doesn't stop at the demo. The Steam pages are in review, and the whole studio installs as one Naïve blueprint. Games came first because the store tells you exactly what's missing.
+
+On screen: the Steam page in its review state, then the blueprint.
+
+### 1:48–2:00
+
+Two games, one night, [N] human steps. Play them at these links.
+
+On screen: both itch pages, URLs readable, then an end card with the two links and the intervention count. No new idea.
 
 ## Five minutes
 
@@ -62,6 +94,5 @@ Steam cannot release a new game this weekend. By freeze we show:
 
 ## Lines still open
 
-- The spoken name: "any-co" vs "an autonomous game studio."
-- Whether the first sentence names the game we shipped, or stays about the studio. The two-minute draft stays on the studio and names the game only at the play beat.
-- Fill the brackets in the two-minute draft at freeze: title, downloads, dollars, intervention count, spend.
+- Fill `[N]`, `[P]`, and `[S]` from the live ledger when you record. `[P]` and `[S]` are named in the header and not yet spoken in a beat.
+- Confirm both itch pages are public before their URLs go on the end card. Soul Shift's page was staged for a 9:00 AM PT launch.
