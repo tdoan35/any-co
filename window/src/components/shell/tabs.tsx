@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import { useLocation, useNavigate } from "react-router";
-import { Briefcase, MessageSquare, Plus, Spool, SquarePen, Users, X } from "lucide-react";
+import { Briefcase, MessageSquare, Plus, Spool, SquarePen, Users, Workflow, X } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { sessions, useRegistry } from "@/lib/registry";
@@ -81,8 +81,12 @@ function describe(path: string): { title: string; icon: ComponentType<{ classNam
     const title = session ? sessions().find((s) => s.id === session)?.title : undefined;
     return title ? { title, icon: MessageSquare } : { title: "New thread", icon: SquarePen };
   }
-  if (pathname.startsWith("/weave")) return { title: "Weave", icon: Spool };
-  if (pathname.startsWith("/agents")) return { title: "Teams", icon: Users };
+  if (pathname.startsWith("/weave")) return { title: "Studio", icon: Spool };
+  if (pathname.startsWith("/agents")) {
+    return new URLSearchParams(search).get("view") === "flow"
+      ? { title: "Flow", icon: Workflow }
+      : { title: "Teams", icon: Users };
+  }
   if (pathname.startsWith("/work") || pathname.startsWith("/runs") || pathname.startsWith("/reports")) return { title: "Work", icon: Briefcase };
   return { title: "any-co", icon: SquarePen };
 }

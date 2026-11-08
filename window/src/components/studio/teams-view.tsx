@@ -446,7 +446,7 @@ function OrgTeamBox({ team, live, sharedIds, onOpen, onOpenAgent }: {
   const last = lastLoopAt(team.id);
   return (
     <div className={cn(panel, "flex h-full w-full min-w-0 flex-col items-stretch px-3 py-3 text-left", !active && "border-dashed")}>
-      <button type="button" onClick={onOpen} className="mb-0.5 flex items-center gap-2 rounded-md text-left text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring">
+      <button type="button" onClick={onOpen} className="mb-0.5 inline-flex w-fit max-w-full items-center gap-2 self-start rounded-md border border-transparent px-1.5 py-0.5 text-left text-sm font-medium outline-none hover:border-foreground/55 hover:bg-foreground/10 focus-visible:border-foreground/55 focus-visible:ring-2 focus-visible:ring-ring">
         {team.name}
         <StatusPill team={{ ...team, status: active ? "active" : "idle" }} />
       </button>
