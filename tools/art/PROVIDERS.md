@@ -170,12 +170,20 @@ called. The `art_generate` capability (runner/tools/impl.ts over tools/art/credi
   refused). One generation + 2 regenerations per asset (counted in the gallery by the normalized out path, slot
   reserved before the paid call and released if it billed nothing, so concurrent calls can't overshoot; T39). A redo past
   the cap needs a human: a NEW out path (`<name>-v2.png`) is the default; keeping the path takes an operator-approved
-  `art_redo` (approval-only capability) or `npm run art -- redo <out> --why …`, which grants one fresh allowance (ledgered).
+  `art_redo` (approval-only capability) or `npm run art -- redo <out> --why …` (operator shell only: refused when
+  `ANYCO_AGENT` is set, as game_exec sets it; so is `providers --clear`), which grants one fresh allowance (ledgered).
   Before any paid call art_generate refuses an `out` with no real file name or outside `game/assets/`, and a postprocess
   whose manifest or manifest entry (size for snap, grid+palette for snap/lock) is missing, with zero requests. comfy is
   never refused by an anchor's bake-off winner (the lock is among paid providers). Animation
   (frames, `rd_animation__*`, `rd_advanced_animation__*`) needs `justify`. `art_quote` returns
   RD's free check_cost quote (PixelLab: price table) × count against the remaining balance.
+- **Default provider (T39b, `ART_DEFAULT_PROVIDER`)**: set per studio, never inferred from a reachable lab.
+  `comfy`: a call with NO provider uses comfy only. It needs a `reference` (refused without one) and never falls back to a
+  paid provider: with the lab down the result is the procedural/stop result saying "comfy default: lab unreachable; pass
+  provider pixellab explicitly if a human approved paid generation". So PixelLab is used only when named, and then the
+  floor applies. `pixellab` / `retrodiffusion`: used when the call names none and no anchor winner is recorded (a winner
+  still wins). Unset: unchanged (the anchor's bake-off winner, else provider is required). An explicit `provider` always
+  wins. Studio 1 leaves it unset (PixelLab-locked style); studio 2 sets `comfy`. A typo is an error on every call.
 - **PixelLab floor (T35, `PIXELLAB_MIN_REMAINING`)**: PixelLab is ONE generations balance shared by every
   studio, so a reserve is enforced in code, not by people watching. With the env set (integer generations),
   art_generate reads the live balance (free `GET /v2/balance`, no cache) before EVERY pixellab call, regens and

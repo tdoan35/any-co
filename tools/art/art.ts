@@ -42,6 +42,12 @@ function num(name: string, value: unknown): number {
 }
 
 /** Parse argv (without the command word) and execute. Pure library calls + file IO; prints nothing. */
+/** Human-only commands refuse a process an agent started (game_exec and the run checkpoint set ANYCO_AGENT). */
+function refuseAgent(command: string): void {
+  const agent = process.env.ANYCO_AGENT?.trim();
+  if (agent) throw new Error(`refused: "${command}" is an operator command and this process was started by agent "${agent}" (ANYCO_AGENT is set); an agent asks for a redo with art_redo, which needs the operator's approval`);
+}
+
 export function runCommand(argv: string[]): CommandResult {
   const [command, ...rest] = argv;
   try {
@@ -120,6 +126,7 @@ export function runCommand(argv: string[]): CommandResult {
         const { values } = parseArgs({ args: rest, options: { clear: { type: "string" } } });
         const paths = statePaths();
         if (values.clear !== undefined) {
+          refuseAgent("providers --clear"); // clearing an exhausted provider is human-only too
           if (!(PROVIDERS as string[]).includes(values.clear)) throw new Error(`--clear takes ${PROVIDERS.join(" or ")}, got "${values.clear}"`);
           clearProvider(paths.providers, values.clear as ProviderName);
         }
@@ -128,7 +135,10 @@ export function runCommand(argv: string[]): CommandResult {
         return { kind: "ok", json: { file: paths.providers, ...(values.clear ? { cleared: values.clear } : {}), providers: readProviders(paths.providers), latest_balance: latest }, exitCode: 0 };
       }
       case "redo": {
-        // Operator-only (agents have no shell to this CLI): a fresh generation allowance for one asset, ledgered as an intervention.
+        // Operator-only: a fresh generation allowance for one asset, ledgered as an operator intervention. An agent CAN
+        // reach this CLI through game_exec (argv such as ["npm", "run", "art", "--", "redo", …]), and game_exec sets
+        // ANYCO_AGENT, so a run with it set is refused: no self-granted redo, no fake operator intervention (R45).
+        refuseAgent("redo");
         const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { why: { type: "string" } } });
         const [out] = positionals;
         if (!out || !values.why || values.why.trim().length < 10) throw new Error('usage: redo <out e.g. game/assets/anchors/x.png> --why "<at least 10 chars: the human decision>"');
