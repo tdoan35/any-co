@@ -1,3 +1,5 @@
+import path from "node:path";
+import { writeFileSync } from "node:fs";
 // Inference providers for the local runner: Naïve proxy (default), any OpenAI-compatible
 // endpoint (fast external inference, local-only), and a scripted fake for tests.
 import { createClient } from "@usenaive-sdk/managed-agents";
@@ -25,6 +27,18 @@ export function isTransient(e: any): boolean {
 /** Rate limits (429) reset per minute on gateways like Neon's (1.2M input tokens/min per account), so they get a
  *  slower, longer schedule than other transient errors: 15 s, 30 s, 45 s, then 60 s, up to RATE_LIMIT_TRIES tries. */
 export const RATE_LIMIT_TRIES = 8;
+/** The text of an OpenAI-style message content: a string, or an array of parts whose text parts are joined. */
+export function textOf(c: unknown): string {
+  if (typeof c === "string") return c;
+  if (Array.isArray(c))
+    return c
+      .map((p) => (typeof p === "string" ? p : p && typeof p === "object" && typeof (p as any).text === "string" ? (p as any).text : ""))
+      .filter(Boolean)
+      .join("\n");
+  if (c && typeof c === "object" && typeof (c as any).text === "string") return (c as any).text;
+  return "";
+}
+
 export function retryWaitMs(e: unknown, attempt: number, baseMs: number): number {
   const status = (e as any)?.status ?? (e as any)?.response?.status;
   if (status === 429) return Math.min(15_000 * attempt, 60_000) + Math.floor(Math.random() * 1000);
@@ -124,18 +138,20 @@ export class OpenAICompatibleProvider implements Provider {
   }
 
   async complete(req: ModelRequest): Promise<ModelReply> {
+    const payload = JSON.stringify({
+      model: this.model,
+      max_tokens: req.max_tokens,
+      messages: toOpenAIMessages(req.system, req.messages),
+      ...(req.tools.length
+        ? { tools: req.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.input_schema } })) }
+        : {}),
+    });
+    if (process.env.ANYCO_PROVIDER_DEBUG_DIR) writeFileSync(path.join(process.env.ANYCO_PROVIDER_DEBUG_DIR, `req-${Date.now()}.json`), payload); // no key in the body
     const res = await withRetry(async () => {
       const r = await fetch(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${this.apiKey}` },
-      body: JSON.stringify({
-        model: this.model,
-        max_tokens: req.max_tokens,
-        messages: toOpenAIMessages(req.system, req.messages),
-        ...(req.tools.length
-          ? { tools: req.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.input_schema } })) }
-          : {}),
-      }),
+      body: payload,
       signal: AbortSignal.timeout(300_000),
       });
       if (!r.ok) throw Object.assign(new Error(`${this.label} HTTP ${r.status}: ${(await r.text()).slice(0, 500)}`), { status: r.status });
@@ -155,7 +171,12 @@ export class OpenAICompatibleProvider implements Provider {
     const body = (await res.json()) as ChatReply;
     const msg = body.choices?.[0]?.message ?? {};
     const content: Block[] = [];
-    if (msg.content) content.push({ type: "text", text: String(msg.content) });
+    // content is a string on most gateways, but may arrive as an array of parts ({type:"text",text} or others);
+    // String() on that wrote "[object Object]" into every Neon/Opus transcript (Nov 7). Keep only the text.
+    const text = textOf(msg.content);
+    if (text) content.push({ type: "text", text });
+    if (process.env.ANYCO_PROVIDER_DEBUG && (typeof msg.content !== "string" || !(body.usage?.completion_tokens ?? 0)))
+      console.error(`[${this.label}] raw reply: ${JSON.stringify(body).slice(0, 4000)}`);
     for (const tc of msg.tool_calls ?? []) {
       let input: Record<string, unknown> = {};
       try {
