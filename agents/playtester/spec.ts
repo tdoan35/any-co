@@ -9,9 +9,12 @@ export default defineAgent({
   description: "QA: plays the game through autoplay policies and scripted inputs; reports bugs with repro, confusion points, and where it stops being fun.",
   dept: "qa",
   runner: "local",
-  model: "z-ai/glm-5.3",
-  budget: { cap_usd: 5, max_task_usd: 1, period: "day" },
-  tools: { game_repo: "allow", qa_harness: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow" },
+  model: "anthropic/claude-opus-5.5", // Naïve catalogue id, used if this agent is ever hosted
+  // Nov 7: on GLM-5.3 the exploratory loop hit max_turns before reporting, and a human found a blank board the
+  // state-only checks passed. Opus via Neon can image_view the screenshots it captures (the Naïve proxy rejects images).
+  provider: { kind: "openai_compatible", model: "claude-opus-5-5", base_url_env: "NEON_AI_BASE_URL", api_key_env: "NEON_AI_API_KEY", usd_per_mtok: { input: 4, output: 20 } },
+  budget: { cap_usd: 25, max_task_usd: 4, period: "day" },
+  tools: { game_repo: "allow", qa_harness: "allow", workspace_read: "allow", workspace_write: "allow", image_view: "allow", studio_ledger: "allow" },
   output_schema: z
     .object({
       runs: z
@@ -53,5 +56,5 @@ export default defineAgent({
       suggestions: z.array(z.string().max(200)).max(5).describe("Smallest changes that would most help; the Director decides"),
     })
     .strict(),
-  limits: { max_turns: 40, max_output_tokens: 12288 },
+  limits: { max_turns: 60, max_output_tokens: 12288 },
 });
