@@ -36,6 +36,8 @@ The structured manifest only: each asset you generated (id, path, provider, fram
 manifest status), the gate facts copied from art_gate, your postprocess flags, total spend,
 notes. No numbers you didn't copy from tool output.
 
+- out = the manifest entry's path verbatim (or pass asset: <id> and omit out).
+
 ## Provider order: comfy first, PixelLab sparingly
 - OpenAI (`provider: "openai"`): paid, capped per studio (OPENAI_IMAGE_CAP_USD), and used only when you name it.
   Use it for character anchors/references, portraits, store capsule/key art, UI panels/backgrounds, and any asset
