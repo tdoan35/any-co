@@ -10,6 +10,7 @@ import type { AgentSpec, Permission } from "./spec.ts";
 import type { CapabilityName } from "./tools/registry.ts";
 import { IMPLS, TOOL_INDEX, clip, type ToolContext } from "./tools/impl.ts";
 import { SpendLedger, killSwitchOn, limitsFor } from "./spend.ts";
+import { checkpointGameClone } from "./checkpoint.ts";
 import { wireMessages } from "./images.ts";
 import type { Block, Message, Provider, ToolDef, ToolResultBlock, ToolUseBlock } from "./types.ts";
 import type { NaiveClient } from "./providers.ts";
@@ -308,6 +309,12 @@ export async function runAgent(spec: AgentSpec, opts: RunOptions): Promise<RunRe
   }
 
   if (state.output !== null) writeFileSync(path.join(dir, "output.json"), JSON.stringify(state.output, null, 2));
+  // Game work left uncommitted (out of turns, budget, error) is committed and pushed to the agent's branch.
+  const cp = await checkpointGameClone(workspace, spec.name, runId, String(state.status));
+  if (cp) {
+    event("checkpoint", { ...cp });
+    if (cp.checkpointed || cp.pushed) log(`checkpoint: ${cp.note} ${cp.branch ?? ""} ${cp.commit ?? ""}`.trim());
+  }
   clearInterval(heartbeat);
   Object.assign(state, { finished_at: new Date().toISOString() });
   saveRun();
