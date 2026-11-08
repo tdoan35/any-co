@@ -1,9 +1,11 @@
-// Studio projects stories (sidebar brief): the Projects section with two studios
-// configured — both games derived from fixture adapter data, one active. The gallery
-// fetcher is injected, so the mock-only story harness never touches the network; the
-// pretend studios come from the storybook seam (lib/studio.ts setStudiosForStory).
-// Repo names here are fixture-only, like packages/fixtures galleryRepos; live names
-// always come from the adapters.
+// Studio projects stories: the sidebar's Projects section against fixture adapter data,
+// with the gallery fetcher injected, so the mock-only story harness never touches the
+// network; the pretend studios come from the storybook seam (lib/studio.ts
+// setStudiosForStory). Repo names here are fixture-only, like packages/fixtures
+// galleryRepos; live names always come from the adapters.
+//  - One studio, two games (goal 4): both folders from one adapter, runs split by
+//    run.game, studio-level runs under the studio's own folder, no studio tags.
+//  - Two studios: one game each, tagged and switchable (the multi-studio path stays).
 
 import { useState, type ReactNode } from "react";
 import { useLocation } from "react-router";
@@ -21,9 +23,13 @@ import type { GalleryFetcher } from "@/lib/studio-projects";
 const S1 = { id: "s1", label: "Studio One", api: "http://127.0.0.1:8787" };
 const S2 = { id: "s2", label: "Studio Two", api: "http://127.0.0.1:8790", readOnly: true };
 
-/** Fixture adapters: each studio reports its own game repo slug. */
-const REPOS: Record<string, string[]> = { [S1.api]: ["demo-repo"], [S2.api]: ["other-demo"] };
+/** Fixture adapters: which game repo slugs each studio reports (goal 4: possibly several). */
+const REPOS: Record<string, string[]> = {
+  [S1.api]: ["demo-repo"],
+  [S2.api]: ["other-demo"],
+};
 const bothFixture: GalleryFetcher = async (api) => ({ repos: REPOS[api] ?? [], entries: [] });
+const twoGamesOneStudio: GalleryFetcher = async () => ({ repos: ["demo-repo", "other-demo"], entries: [] });
 const singleFixture: GalleryFetcher = async () => ({ repos: ["demo-repo"], entries: [] });
 
 /** The active studio and route, as data, so plays can assert the store and the navigation. */
@@ -69,8 +75,36 @@ export default meta;
 
 type Story = StoryObj<typeof meta>;
 
+export const OneStudioTwoGames: Story = {
+  name: "One studio, two games",
+  parameters: { router: { routes: routes(<ProjectsPane config={[]} fetcher={twoGamesOneStudio} withWorkData />) } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const probe = canvas.getByTestId("probe");
+    // No VITE_STUDIOS: one implicit studio, no switcher store underneath.
+    expect(probe).toHaveAttribute("data-active", "none");
+
+    // Both games from the one adapter, both active, each name exactly the title-cased
+    // slug — an exact match proves there is no per-studio badge in the accessible name.
+    expect(canvas.getByRole("button", { name: "Demo Repo" })).toHaveAttribute("data-active", "true");
+    expect(canvas.getByRole("button", { name: "Other Demo" })).toHaveAttribute("data-active", "true");
+
+    // Each game folder lists only its own runs (fixtures: two demo-repo, one other-demo,
+    // one studio-level null). The null-game run goes under the studio's own folder, which
+    // appears after the games — never inside a game folder.
+    const runLinks = canvas.getAllByRole("link").filter((a) => a.getAttribute("href")?.startsWith("/work/"));
+    expect(runLinks).toHaveLength(4);
+    expect(canvas.getAllByText("Is NAND fast enough to serve n-gram table lookups?")).toHaveLength(2);
+    expect(canvas.getByRole("button", { name: "any-co" })).toHaveAttribute("data-active", "true");
+
+    // Clicking a folder opens the Work board — no studio to switch.
+    await userEvent.click(canvas.getByRole("button", { name: "Other Demo" }));
+    await waitFor(() => expect(canvas.getByTestId("work-board")).toBeVisible());
+  },
+};
+
 export const BothGamesOneActive: Story = {
-  name: "Both games, one active",
+  name: "Two studios: each game tagged and switchable",
   parameters: { router: { routes: routes(<ProjectsPane config={[S1, S2]} fetcher={bothFixture} withWorkData />) } },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
@@ -80,11 +114,9 @@ export const BothGamesOneActive: Story = {
     // Both games, derived (slugs title-cased) and tagged with their studio's label.
     expect(canvas.getByRole("button", { name: "Demo Repo Studio One" })).toHaveAttribute("data-active", "true");
     expect(canvas.getByRole("button", { name: "Other Demo Studio Two" })).toHaveAttribute("data-active", "false");
-    expect(canvas.getByText("Studio One")).toBeTruthy();
-    expect(canvas.getByText("Studio Two")).toBeTruthy();
 
-    // The active folder is open: its latest runs are listed, each linking to its task.
-    // The inactive folder is closed — nothing of Studio Two's is loaded.
+    // The active studio's game folder lists only its game's runs; its studio-level runs
+    // (game null) sit under the studio's own folder. Nothing of Studio Two's is loaded.
     const runLinks = canvas.getAllByRole("link").filter((a) => a.getAttribute("href")?.startsWith("/work/"));
     expect(runLinks.length).toBeGreaterThan(0);
     expect(canvas.queryByText("Switch to view")).toBeNull();
@@ -94,12 +126,10 @@ export const BothGamesOneActive: Story = {
     await userEvent.click(canvas.getByRole("button", { name: "Other Demo Studio Two" }));
     await waitFor(() => expect(probe).toHaveAttribute("data-active", "s2"));
 
-    // Studio One is now the inactive one: its still-open folder offers "Switch to view".
-    // The chevron alone owns expand/collapse — the row click stays on open-the-board.
-    await userEvent.click(canvas.getByRole("button", { name: "Collapse Demo Repo" }));
-    await waitFor(() => expect(canvas.queryByText("Switch to view")).toBeNull());
-    await userEvent.click(canvas.getByRole("button", { name: "Expand Demo Repo" }));
-    await userEvent.click(canvas.getByRole("button", { name: "Switch to view" }));
+    // Studio One's folders are the inactive ones now: each open one offers "Switch to view".
+    const switchButtons = canvas.getAllByRole("button", { name: "Switch to view" });
+    expect(switchButtons.length).toBeGreaterThan(0);
+    await userEvent.click(switchButtons[0]);
     await waitFor(() => expect(probe).toHaveAttribute("data-active", "s1"));
 
     // The active row opens the board outright, in-story and live alike.

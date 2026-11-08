@@ -1,7 +1,7 @@
-// Sidebar "Projects", live mode (sidebar brief): every studio's game, derived from the
-// studios' own adapters — GET /api/art-gallery reports each studio's game repo slugs. The
-// window carries no game names: the display name is the slug title-cased, and a studio with
-// no repo yet (or an unreachable adapter) falls back to its configured label.
+// Sidebar "Projects" (goal 4: one studio may run several games): every game repo each
+// configured studio reports — GET /api/art-gallery lists them in `repos`. The window
+// carries no game names: a folder's display name is the repo slug title-cased, and a
+// studio that reports no repo yet (or is unreachable) falls back to its configured label.
 import { useEffect, useMemo, useState } from "react";
 import { singleApiBase, useStudio, type Studio } from "@/lib/studio";
 
@@ -33,18 +33,25 @@ export function gameName(slug: string): string {
 
 export interface StudioGame {
   studio: Studio;
-  /** The studio's first game repo slug; undefined until the adapter reports one. */
+  /** The game repo slug this folder filters runs by; undefined on a studio-level folder. */
   slug?: string;
-  /** Title-cased slug, or the studio label while there is no repo to name. */
+  /** Title-cased slug, or the studio label on a studio-level folder. */
   name: string;
 }
 
+/** One folder per repo a studio reports, in adapter order; a studio with no repos yet
+ *  gets a single label-named folder (the pre-goal-4 shape). */
+function foldersFor(studio: Studio, repos: string[] | undefined): StudioGame[] {
+  if (!repos?.length) return [{ studio, name: studio.label }];
+  return repos.map((slug) => ({ studio, slug, name: gameName(slug) }));
+}
+
 /**
- * One game per configured studio, in config order — the folder list for the sidebar's
- * Projects section. Single-studio mode (no VITE_STUDIOS) derives the one game from the
- * single API base exactly the same way, so every launcher behaves alike. Fetches run once
- * on mount and again on a slow refresh; a failed fetch keeps the last good answer (the
- * studio label to start with) and never blocks the sidebar.
+ * Every configured studio's game folders, flat and in config order — the folder list for
+ * the sidebar's Projects section. Single-studio mode (no VITE_STUDIOS) derives its games
+ * from the single API base exactly the same way, so every launcher behaves alike. Fetches
+ * run once on mount and again on a slow refresh; a failed fetch keeps the last good answer
+ * (the studio label to start with) and never blocks the sidebar.
  */
 export function useStudioProjects(fetchGallery: GalleryFetcher = httpFetcher): StudioGame[] {
   const { studios } = useStudio();
@@ -53,18 +60,18 @@ export function useStudioProjects(fetchGallery: GalleryFetcher = httpFetcher): S
     () => (studios.length ? studios : [{ id: "single", label: "any-co", api: singleApiBase }]),
     [studios],
   );
-  const [slugs, setSlugs] = useState<Record<string, string | undefined>>({});
+  const [repos, setRepos] = useState<Record<string, string[]>>({});
 
   useEffect(() => {
     let stopped = false;
     const load = async () => {
       const results = await Promise.allSettled(list.map((studio) => fetchGallery(studio.api)));
       if (stopped) return;
-      setSlugs((prev) => {
+      setRepos((prev) => {
         const next = { ...prev };
         results.forEach((result, i) => {
           const studio = list[i];
-          if (result.status === "fulfilled") next[studio.id] = result.value.repos[0];
+          if (result.status === "fulfilled") next[studio.id] = result.value.repos;
           else console.warn(`[projects] ${studio.label}: game list unavailable (${result.reason})`);
         });
         return next;
@@ -75,8 +82,5 @@ export function useStudioProjects(fetchGallery: GalleryFetcher = httpFetcher): S
     return () => { stopped = true; clearInterval(timer); };
   }, [list, fetchGallery]);
 
-  return list.map((studio) => {
-    const slug = slugs[studio.id];
-    return { studio, slug, name: slug ? gameName(slug) : studio.label };
-  });
+  return list.flatMap((studio) => foldersFor(studio, repos[studio.id]));
 }
