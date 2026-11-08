@@ -240,7 +240,16 @@ const otherSnapshots: ContextSnapshot[] = [
   }),
 ];
 
-export const runs: Run[] = [run135, run360, nand1, nand2];
+/** Goal 4: each run's game repo (contract `Run.game`). Slugs are fixture-only, matching
+ *  galleryRepos; null marks a studio-level loop. Live values always come from the adapter. */
+const withGame = (run: Run, game: Run["game"]): Run => ({ ...run, game });
+
+export const runs: Run[] = [
+  withGame(run135, "demo-repo"),
+  withGame(run360, "demo-repo"),
+  withGame(nand1, "other-demo"),
+  withGame(nand2, null),
+];
 export const runEventsById: Record<string, RunEvent[]> = {
   [run135.id]: events135,
   [R360]: sortEvents(events360),
