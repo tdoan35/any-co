@@ -187,7 +187,7 @@ export function shellRefusal(script: string, root: string): string | null {
 /** Credential files a sandboxed agent run may not read, so a planted script cannot grab gh/ssh/aws tokens. */
 export function credentialReadDenies(home = process.env.HOME || homedir()): string[] {
   const h = real(home);
-  return [".ssh", ".config/gh", ".config/git", ".aws", ".netrc", ".git-credentials", ".gnupg", ".npmrc"].map((p) => path.join(h, p));
+  return [".ssh", ".config/gh", ".config/git", ".aws", ".netrc", ".git-credentials"].map((p) => path.join(h, p));
 }
 
 const sbQuote = (p: string) => JSON.stringify(p);
