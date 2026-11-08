@@ -130,8 +130,30 @@ the env, before any request). The provider never starts or stops servers; the op
   Without `reference` the graph is text-only (no IP-Adapter). `negative` is the negative prompt (default empty).
 - **Flow:** `GET /system_stats` (5 s health probe) → `POST /upload/image` (the reference, named
   `anyco-ref-<sha256[:16]>.png`, overwrite) → `POST /prompt` → poll `GET /history/<prompt_id>` →
-  `GET /view?filename&subfolder&type` per output of the SaveImage node. `max_candidates` applies; the
-  graph renders one image.
+  `GET /view?filename&subfolder&type` per output of the SaveImage node.
+- **Lanes (T41b):** `COMFY_BASE_URLS` is a comma list of lab lanes, each `url` or `url|maxBatch`, e.g.
+  `http://100.96.19.87:8191|4,http://100.96.19.87:8190|4` (COMFY_BASE_URL stays the single-lane fallback; :8188 is refused in
+  every entry). Each call probes every lane's `GET /queue` at once (running + pending), goes to the shortest queue (ties: the
+  lane listed first), and on a failed probe or a failed call moves to the next lane. Only when every lane is down is it
+  `ProviderUnavailable`, so the caller's rules hold (with `ART_DEFAULT_PROVIDER=comfy`: stop, never PixelLab). The serving lane
+  is in the result (`metadata.lane`, `lane_queue`, `lanes`, `lanes_failed`), so in the transcript's tool event, and in a
+  `unit: "local"` line in `art-credits.jsonl` (lane, images, batch), summed per lane by `art_providers` (`comfy_lanes`).
+- **Batch (T41):** `max_candidates` (art_generate default 4) becomes the latent `batch_size`, capped by the lane's max batch
+  or `COMFY_MAX_BATCH` (default **4** since T41b, max 8). Every image of the batch is written as a candidate (`<out>-0.png`, `<out>-1.png`, …), and postprocess
+  snaps each to the manifest entry of `out`; keep one at the manifest path and move the rest to the gallery. One seed per
+  call: the sampler's noise differs per batch index, so candidates vary while the seed still pins identity (same seed and
+  batch give the same images). Operator benchmark on the lab (RTX 4060 8 GB, frozen recipe 768², 30 steps): 1 image
+  43.4 s (~1.4 img/min); batch 2 53.8 s for 2 (27 s/img, ~2.2 img/min) with ~4 GB VRAM still free; two concurrent prompts
+  serialize in ComfyUI's queue (86 s wall, no speedup). T41b benchmarks (frozen recipe, 768², 30 steps, ComfyUI history):
+
+  | lane | batch 1 | batch 2 | batch 4 |
+  |------|---------|---------|---------|
+  | :8190 RTX 4060 (--lowvram --cpu-vae) | 43.4 s/img (1.4/min) | 27 s/img (2.2/min) | 19.2 s/img (3.1/min), ~4 GB VRAM free |
+  | :8191 RTX 3080 | 5.9 s/img (~10/min) | 5.5 s/img | 5.0 s/img (~12/min), ~5 GB free |
+
+  Both lanes measured OK at batch 4, so the default cap is 4. The 3080 is ~4-8× faster, so least-queue routing sends it
+  most work while the 4060 takes overflow.
+  One call is one generation for the per-asset cap, whatever the batch.
 - **Output:** always 768×768, **opaque** (the recipe has no background removal). Pass
   `postprocess` (snap/lock/outline) to reach the manifest size, grid and palette. Stills only: `frames`
   is refused (animate the still with pixellab).
@@ -167,9 +189,25 @@ called. The `art_generate` capability (runner/tools/impl.ts over tools/art/credi
   `{exhausted: "all", fallback: "procedural"}` at zero cost: the Art Director's ladder floor.
 - **Conserve**: bake-offs are for anchors; `art_anchor_winner` records the winner in
   `runs/art-gallery.json` and calls that reference the anchor default to it (the loser is
-  refused). One generation + 2 regenerations per asset (counted in the gallery). Animation
+  refused). One generation + 2 regenerations per asset (counted in the gallery by the normalized out path, slot
+  reserved before the paid call and released if it billed nothing, so concurrent calls can't overshoot; T39). A redo past
+  the cap needs a human: a NEW out path (`<name>-v2.png`) is the default; keeping the path takes an operator-approved
+  `art_redo` (approval-only capability) or `npm run art -- redo <out> --why …` (operator shell only: refused when
+  `ANYCO_AGENT` is set, as game_exec sets it; so is `providers --clear`), which grants one fresh allowance (ledgered).
+  Before any paid call art_generate refuses an `out` with no real file name or outside `game/assets/`, and a postprocess
+  whose manifest or manifest entry (size for snap, grid+palette for snap/lock) is missing, with zero requests. comfy is
+  never refused by an anchor's bake-off winner (the lock is among paid providers). Animation
   (frames, `rd_animation__*`, `rd_advanced_animation__*`) needs `justify`. `art_quote` returns
   RD's free check_cost quote (PixelLab: price table) × count against the remaining balance.
+- **Default provider (T39b, `ART_DEFAULT_PROVIDER`)**: set per studio, never inferred from a reachable lab.
+  `comfy`: a call with NO provider uses comfy only. It needs a `reference` (refused without one) and never falls back to a
+  paid provider: with the lab down the result is the procedural/stop result saying "comfy default: lab unreachable; pass
+  provider pixellab explicitly if a human approved paid generation". So PixelLab is used only when named, and then the
+  floor applies. With the comfy default set, NO call falls back into a paid provider it did not name (R46): an explicit
+  `provider: "comfy"` with the lab down, or an explicit retrodiffusion that is exhausted, stops with the same result instead
+  of reaching PixelLab (free comfy can still follow a floored pixellab). `pixellab` / `retrodiffusion`: used when the call names none and no anchor winner is recorded (a winner
+  still wins). Unset: unchanged (the anchor's bake-off winner, else provider is required). An explicit `provider` always
+  wins. Studio 1 leaves it unset (PixelLab-locked style); studio 2 sets `comfy`. A typo is an error on every call.
 - **PixelLab floor (T35, `PIXELLAB_MIN_REMAINING`)**: PixelLab is ONE generations balance shared by every
   studio, so a reserve is enforced in code, not by people watching. With the env set (integer generations),
   art_generate reads the live balance (free `GET /v2/balance`, no cache) before EVERY pixellab call, regens and

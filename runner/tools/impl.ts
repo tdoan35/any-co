@@ -18,7 +18,7 @@ import { addOutline, contactSheet, lockPalette, snapToGrid, splitStrip, upscaleN
 import { runGate } from "../../tools/art/gate.ts";
 import { ChargedFailure, DEFAULT_CANDIDATES, MAX_CANDIDATES, ProviderExhausted, ProviderUnavailable, balance as providerBalance, generate, type Balance, isAnimation, quote as providerQuote, type GenerateResult, type ProviderName } from "../../tools/art/generate.ts";
 import {
-  LOW_GENERATIONS, MAX_REGENERATIONS, PROVIDERS, anchorWinner, checkPixellabFloor, pixellabCallEstimate, pixellabFloor, type FloorVerdict, countGeneration, generationCount, isExhausted, markExhausted, other, readCredits, readGallery,
+  LOW_GENERATIONS, MAX_REGENERATIONS, PROVIDERS, anchorWinner, checkPixellabFloor, pixellabCallEstimate, pixellabFloor, type FloorVerdict, generationsUsedSinceRedo, grantRedo, outPathProblem, releaseGeneration, reserveGeneration, isExhausted, markExhausted, other, readCredits, readGallery, recordLocalGeneration, comfyLaneStats,
   readProviders, recordAnchorWinner, recordCredit, statePaths,
 } from "../../tools/art/credits.ts";
 import { capture as mediaCapture, POLICY as MEDIA_POLICY, type CaptureMode } from "../../tools/media/capture.ts";
@@ -952,6 +952,7 @@ async function applyArtPostprocess(
   workspace: string,
   opts: { snap?: boolean; lock?: boolean; outline?: string },
   images: string[],
+  out?: string,
 ): Promise<Record<string, unknown>> {
   const manifestFile = resolveInWorkspace(workspace, path.join("game", "assets", "manifest.json"));
   let manifest: { grid?: { w: number; h: number }; palette?: string[]; assets?: Array<{ path?: string; size?: { w: number; h: number }; frames?: number }> };
@@ -972,7 +973,9 @@ async function applyArtPostprocess(
     if (opts.snap) {
       // Snap to the whole asset (size is ONE frame × frames), never to a single grid cell.
       const repoRel = rel.replace(/^game\//, "");
-      const entry = manifest.assets?.find((a) => a.path === repoRel);
+      // candidates of one call (<out>-<i>.png, e.g. a comfy batch, T41) snap to the entry of the out they were asked for
+      const outRel = out ? path.posix.normalize(out.replace(/\\/g, "/")).replace(/^(\.\/)?game\//, "") : undefined;
+      const entry = manifest.assets?.find((a) => a.path === repoRel) ?? (outRel ? manifest.assets?.find((a) => a.path === outRel) : undefined);
       if (!entry?.size)
         throw new Error(`snap needs the manifest entry for "${repoRel}" with its size (one frame) declared first`);
       if (entry.size.w % manifest.grid.w !== 0 || entry.size.h % manifest.grid.h !== 0)
@@ -1058,11 +1061,52 @@ async function collectJob(i: any, ctx: ToolContext): Promise<ToolOutput> {
   try {
     let postprocess: Record<string, unknown> | null = null;
     if (i.postprocess && (i.postprocess.snap || i.postprocess.lock || i.postprocess.outline))
-      postprocess = await applyArtPostprocess(ctx.workspace, i.postprocess, result.images);
+      postprocess = await applyArtPostprocess(ctx.workspace, i.postprocess, result.images, i.out);
     return { content: JSON.stringify({ ...result, postprocess, collected: resume_job_id, generation: "not counted (collected an earlier job)" }), cost_micro_usd: 0 };
   } catch (e) {
     return { content: `collected ${result.images.join(", ")} but postprocess failed: ${errText(e)}`, is_error: true, cost_micro_usd: 0 };
   }
+}
+
+export const ART_DEFAULTS = ["comfy", "pixellab", "retrodiffusion"] as const;
+/** ART_DEFAULT_PROVIDER (per studio): the provider for a call that names none; null when unset/empty; a typo is an error. */
+export function artDefaultProvider(env: Record<string, string | undefined> = process.env): ProviderName | null {
+  const raw = env.ART_DEFAULT_PROVIDER?.trim();
+  if (!raw) return null;
+  if (!(ART_DEFAULTS as readonly string[]).includes(raw)) throw new Error(`ART_DEFAULT_PROVIDER must be one of ${ART_DEFAULTS.join(", ")} (or unset), got "${raw}"`);
+  return raw as ProviderName;
+}
+
+/** The cap refusal names the two ways forward that a human decided, never a way for the model to reset it. */
+function capRefusal(out: string, used: number): string {
+  return `refused: ${out} has had ${used} paid generations (1 + ${MAX_REGENERATIONS} regenerations is the cap). Fix the prompt/reference or cut to the ` +
+    `fallback ladder. A redo needs a human decision: generate to a NEW out path (e.g. ${out.replace(/\.png$/i, "-v2.png")}) when the design calls for a new ` +
+    `asset, or ask for art_redo (operator approval; grants a fresh allowance for this path).`;
+}
+
+/**
+ * Pre-call check for postprocess (T39): the snap/lock/outline steps need the manifest and the asset's entry, and a
+ * generation without them is paid for and then unusable ("snap needs the manifest entry", Nov 7). Null = fine.
+ */
+async function postprocessProblem(workspace: string, out: string, pp: { snap?: boolean; lock?: boolean; outline?: string } | undefined): Promise<string | null> {
+  if (!pp || !(pp.snap || pp.lock || pp.outline)) return null;
+  let manifest: { grid?: { w: number; h: number }; palette?: string[]; assets?: Array<{ path?: string; size?: { w: number; h: number }; frames?: number }> };
+  try {
+    manifest = JSON.parse(await readFile(resolveInWorkspace(workspace, path.join("game", "assets", "manifest.json")), "utf8"));
+  } catch {
+    return "postprocess needs the game manifest at game/assets/manifest.json (game_clone, and the Art Director locks it) before generating";
+  }
+  if ((pp.snap || pp.lock) && (!manifest.grid || !Array.isArray(manifest.palette) || manifest.palette.length === 0))
+    return "postprocess snap/lock needs grid and palette locked in game/assets/manifest.json before generating";
+  const repoRel = path.posix.normalize(out.replace(/\\/g, "/")).replace(/^game\//, "");
+  const entry = manifest.assets?.find((a) => a.path === repoRel);
+  if (!entry) return `no manifest entry for ${repoRel}: add its entry (id, type, path, size, frames, palette, anchor) to game/assets/manifest.json FIRST, then generate`;
+  if (pp.snap) {
+    if (!entry.size) return `the manifest entry for ${repoRel} has no size (one frame): snap needs it; add it first`;
+    if (manifest.grid && (entry.size.w % manifest.grid.w !== 0 || entry.size.h % manifest.grid.h !== 0))
+      return `manifest size ${entry.size.w}x${entry.size.h} for ${repoRel} is not a multiple of grid ${manifest.grid.w}x${manifest.grid.h}; fix the entry first`;
+  }
+  return null;
 }
 
 const artGenerate: ToolImpl = {
@@ -1080,6 +1124,7 @@ const artGenerate: ToolImpl = {
     "PixelLab results report generations_used (subscription balance before vs after). " +
     "With PIXELLAB_MIN_REMAINING set, pixellab is refused (no request) at or below that floor, or when this call's estimate would cross it; the call moves to comfy " +
     "or the procedural floor and the result's pixellab_floor says so: then use provider comfy with your reference image, or stop and report. " +
+    "If this studio sets ART_DEFAULT_PROVIDER=comfy, a call with no provider uses comfy only (reference required) and never falls back to a paid provider: name pixellab explicitly only when a human approved paid generation. " +
     "provider comfy = the local lab ComfyUI (frozen IP-Adapter recipe on `reference`, seed = identity, default 42): free (cost 0, cost_source local), stills only, " +
     "always 768x768 with an opaque background, so pass postprocess (snap/lock/outline) to reach the manifest size and palette. Use it when the task or the anchor " +
     "winner names comfy; when the lab is down the call falls back to pixellab once and comfy is tried again next call. " +
@@ -1113,20 +1158,43 @@ const artGenerate: ToolImpl = {
   async run(i, ctx) {
     if (i.resume_job_id) return collectJob(i, ctx);
     const paths = statePaths(ctx.runsDir);
-    const done = generationCount(paths.gallery, i.out);
-    if (done >= 1 + MAX_REGENERATIONS)
-      return { content: `refused: ${i.out} has had ${done} paid generations (1 + ${MAX_REGENERATIONS} regenerations is the cap). Fix the prompt/reference or cut to the fallback ladder.`, is_error: true };
+    // T39: refuse, with zero requests, a call that could not produce a usable asset
+    const outIssue = outPathProblem(i.out);
+    if (outIssue) return { content: `refused before any request: ${outIssue}`, is_error: true };
+    const ppIssue = await postprocessProblem(ctx.workspace, i.out, i.postprocess);
+    if (ppIssue) return { content: `refused before any request: ${ppIssue}`, is_error: true };
+    const done = generationsUsedSinceRedo(paths.gallery, i.out);
+    if (done >= 1 + MAX_REGENERATIONS) return { content: capRefusal(i.out, done), is_error: true };
     if (isAnimation(i) && !i.justify)
       return { content: "refused: animation endpoints (frames, rd_animation__*, rd_advanced_animation__*) are the expensive ones; pass justify with why cutout parts or in-engine motion won't do", is_error: true };
     const winner = i.reference ? anchorWinner(paths.gallery, i.reference) : undefined;
     let requested: ProviderName | undefined = i.provider;
+    // T39b: the studio's default for an omitted provider, set explicitly per studio (never inferred from a reachable lab)
+    let defaultProvider: ProviderName | null;
+    try {
+      defaultProvider = artDefaultProvider();
+    } catch (e) {
+      return { content: errText(e), is_error: true };
+    }
+    if (!requested && defaultProvider === "comfy") {
+      if (!i.reference)
+        return { content: "refused: ART_DEFAULT_PROVIDER=comfy generates from a reference image (IP-Adapter): pass reference (the anchor PNG), or name a provider explicitly", is_error: true };
+      requested = "comfy";
+    }
     if (!requested) {
-      if (!winner) return { content: `provider is required: no anchor winner is recorded${i.reference ? ` for ${i.reference}` : " (no reference given)"}. Bake-offs are for anchors; record the winner with art_anchor_winner.`, is_error: true };
-      requested = winner;
-    } else if (winner && requested !== winner && !isExhausted(paths.providers, winner)) {
+      const fallback = winner ?? defaultProvider ?? undefined; // a paid default never overrides an anchor's bake-off winner
+      if (!fallback) return { content: `provider is required: no anchor winner is recorded${i.reference ? ` for ${i.reference}` : " (no reference given)"}. Bake-offs are for anchors; record the winner with art_anchor_winner.`, is_error: true };
+      requested = fallback;
+    } else if (winner && requested !== winner && PROVIDERS.includes(requested) && PROVIDERS.includes(winner) && !isExhausted(paths.providers, winner)) {
+      // the bake-off lock is among PAID providers only: comfy (local, free) is always allowed (T39)
       return { content: `refused: ${i.reference}'s anchor bake-off was won by ${winner}; batch generation uses it (omit provider). Only anchors are generated on both.`, is_error: true };
     }
 
+    // the slot is taken before any request and given back unless the call billed (no race past the cap)
+    const slot = reserveGeneration(paths.gallery, i.out);
+    if (!slot) return { content: capRefusal(i.out, generationsUsedSinceRedo(paths.gallery, i.out)), is_error: true };
+    let billed = false;
+    try {
     const exhausted: ProviderName[] = [];
     const unavailable: ProviderName[] = []; // transient (comfy down): skipped this call only, never persisted
     const notes: string[] = [];
@@ -1140,7 +1208,11 @@ const artGenerate: ToolImpl = {
     } catch (e) {
       return { content: errText(e), is_error: true };
     }
-    const chain: ProviderName[] = [requested, other(requested)];
+    // With the studio default comfy, the chain never falls INTO a paid provider the call did not name (R46): explicit comfy
+    // with the lab down, or explicit RD exhausted, stops instead of spending shared PixelLab generations. Free comfy may still
+    // be spliced in after a floored pixellab (T35). Unset default: unchanged.
+    const comfyStudio = defaultProvider === "comfy";
+    const chain: ProviderName[] = comfyStudio ? [requested] : [requested, other(requested)];
     for (let k = 0; k < chain.length; k++) {
       const p = chain[k];
       if (isExhausted(paths.providers, p)) {
@@ -1189,25 +1261,30 @@ const artGenerate: ToolImpl = {
           continue;
         }
         if (e instanceof ChargedFailure) {
-          countGeneration(paths.gallery, i.out); // it billed
+          billed = true; // it billed: the slot stays taken
           return { content: errText(e), is_error: true, cost_micro_usd: e.cost_micro_usd };
         }
         return { content: errText(e), is_error: true };
       }
     }
     if (!result) {
+      if (comfyStudio) notes.push(`ART_DEFAULT_PROVIDER=comfy: no fallback into a paid provider this call did not name (asked for ${requested})`);
       const all = PROVIDERS.every((p) => exhausted.includes(p) || (p === "pixellab" && floored !== null));
       return {
         content: JSON.stringify({
           exhausted: all ? "all" : exhausted, ...(unavailable.length ? { unavailable } : {}), ...(floored ? { pixellab_floor: floored } : {}), fallback: "procedural", cost_micro_usd: 0, notes,
-          next: floored
+          ...(comfyStudio ? { default_provider: "comfy" } : {}),
+          next: comfyStudio && unavailable.includes("comfy")
+            ? "comfy default: lab unreachable; pass provider pixellab explicitly if a human approved paid generation. Otherwise stop and report, or take the fallback ladder's floor (simple shapes animated in engine) and log it with log_decision (topic art.provider_fallback)."
+            : floored
             ? `${floored.message}. Otherwise take the fallback ladder's floor: simple shapes animated in engine (bob, flash, squash-and-stretch, particles); log it with log_decision (topic art.provider_fallback).`
             : "Take the fallback ladder's floor: simple shapes animated in engine (bob, flash, squash-and-stretch, particles). Log it with log_decision (topic art.provider_fallback). This is a guaranteed outcome, not a failure.",
         }),
         cost_micro_usd: 0,
       };
     }
-    const generation = countGeneration(paths.gallery, i.out);
+    billed = true;
+    const generation = slot.slot;
     // comfy is local: no balance read and no credits line
     const after: Balance | null = result.provider === "comfy"
       ? null
@@ -1220,15 +1297,23 @@ const artGenerate: ToolImpl = {
       ? Math.round((before.remaining - after.remaining) * 1000) / 1000
       : usage?.type === "generations" && typeof usage.generations === "number" ? usage.generations : null;
     credits = noteCredits(ctx, result.provider, after, "generation", used);
+    if (result.provider === "comfy" && typeof result.metadata.lane === "string")
+      recordLocalGeneration(paths.credits, {
+        ts: new Date().toISOString(), provider: "comfy", unit: "local", lane: result.metadata.lane, images: result.images.length,
+        batch: typeof result.metadata.batch === "number" ? result.metadata.batch : null, run_id: ctx.run_id ?? "unknown", source: "generation",
+      });
     const extra = { generation: `${generation} of ${1 + MAX_REGENERATIONS}`, credits, ...(used !== null ? { generations_used: used } : {}), ...(result.provider !== requested ? { fallback_from: requested } : {}), ...(floored ? { pixellab_floor: floored } : {}), ...(notes.length ? { notes } : {}) };
     try {
       let postprocess: Record<string, unknown> | null = null;
       if (i.postprocess && (i.postprocess.snap || i.postprocess.lock || i.postprocess.outline))
-        postprocess = await applyArtPostprocess(ctx.workspace, i.postprocess, result.images);
+        postprocess = await applyArtPostprocess(ctx.workspace, i.postprocess, result.images, i.out);
       return { content: JSON.stringify({ ...result, postprocess, ...extra }), cost_micro_usd: result.cost_micro_usd };
     } catch (e) {
       // generation succeeded and was paid; postprocess failing must not erase the charge
       return { content: `generated ${result.images.join(", ")} but postprocess failed: ${errText(e)} ${JSON.stringify(extra)}`, is_error: true, cost_micro_usd: result.cost_micro_usd };
+    }
+    } finally {
+      if (!billed) releaseGeneration(paths.gallery, i.out);
     }
   },
 };
@@ -1284,7 +1369,7 @@ const artProviders: ToolImpl = {
     const credits = readCredits(paths.credits);
     const latest = Object.fromEntries(PROVIDERS.map((p) => [p, credits.filter((c) => c.provider === p).at(-1) ?? null]));
     const g = readGallery(paths.gallery);
-    return { content: clip(JSON.stringify({ providers: readProviders(paths.providers), latest_balance: latest, anchors: g.anchors, generations: g.generations, max_regenerations: MAX_REGENERATIONS })) };
+    return { content: clip(JSON.stringify({ providers: readProviders(paths.providers), latest_balance: latest, comfy_lanes: comfyLaneStats(paths.credits), anchors: g.anchors, generations: g.generations, max_regenerations: MAX_REGENERATIONS })) };
   },
 };
 
@@ -1349,6 +1434,36 @@ const artSignoff: ToolImpl = {
         next: "Continue the batch: generate non-anchor assets against the anchors.",
       }),
     };
+  },
+};
+
+/**
+ * art_redo (T39): an operator-approved redo of one asset past its generation cap. It lives under the art_signoff
+ * capability, which is approval_only (a spec can't grant it "allow"), so this body runs only after a human
+ * approved this exact request in the approvals queue; the approval is ledgered by the gate.
+ */
+const artRedo: ToolImpl = {
+  description:
+    "Ask the human operator to approve a redo of ONE asset that hit its generation cap (1 + 2 regenerations). Use it only when the " +
+    "asset must keep its path (e.g. an anchor others reference); otherwise generate to a new out path. Blocks until the operator decides; " +
+    "approved = a fresh allowance for that out path.",
+  input: z
+    .object({
+      out: z.string().min(1).max(200).describe("the asset's out path, exactly as you pass it to art_generate (game/assets/...png)"),
+      why: z.string().min(10).max(300).describe("why a redo instead of a new asset: what was wrong and what will change"),
+    })
+    .strict(),
+  async run(i, ctx) {
+    const issue = outPathProblem(i.out);
+    if (issue) return { content: `art_redo refused: ${issue}`, is_error: true };
+    const paths = statePaths(ctx.runsDir);
+    const grant = grantRedo(paths.gallery, i.out, { by: "operator (approved art_redo)", why: i.why, approval: `${ctx.run_id ?? "unknown"}` });
+    ledgerAppend({
+      kind: "decision", ts: grant.ts, agent: ctx.agent ?? "art_redo", run_id: ctx.run_id ?? "unknown", topic: "art.redo",
+      decision: `operator approved a redo of ${i.out}: a fresh allowance of ${1 + MAX_REGENERATIONS} generations (after ${grant.at_count} so far)`,
+      rationale: i.why, refs: [i.out],
+    }, ctx.ledgerFile ?? LEDGER_FILE);
+    return { content: JSON.stringify({ redo: "granted", out: i.out, allowance: 1 + MAX_REGENERATIONS, generations_before: grant.at_count }) };
   },
 };
 
@@ -1939,7 +2054,7 @@ const CORE_IMPLS: Record<keyof typeof CORE_CAPABILITIES, Record<string, ToolImpl
   email_send: { email_send: emailSend },
   site_deploy: { site_deploy: siteDeploy },
   site_status: { site_status: siteStatus },
-  art_signoff: { art_signoff: artSignoff },
+  art_signoff: { art_signoff: artSignoff, art_redo: artRedo },
   board: boardTools,
   media_capture: mediaTools,
 };

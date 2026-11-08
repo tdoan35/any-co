@@ -86,11 +86,38 @@ export interface CreditLine {
   source: string;
 }
 
+/** A comfy generation (T41b): no balance, the lane that served it, so the lanes can be compared. Never feeds the low notes. */
+export interface LocalLine { ts: string; provider: "comfy"; unit: "local"; lane: string; images: number; batch: number | null; run_id: string; source: "generation" }
+
+export function recordLocalGeneration(file: string, line: LocalLine): void {
+  mkdirSync(path.dirname(file), { recursive: true });
+  appendFileSync(file, JSON.stringify(line) + "\n");
+}
+
+/** Per-lane comfy totals from the credits log (calls, images), for comparing lanes. */
+export function comfyLaneStats(file: string): Record<string, { calls: number; images: number }> {
+  const out: Record<string, { calls: number; images: number }> = {};
+  if (!existsSync(file)) return out;
+  for (const l of readFileSync(file, "utf8").split("\n")) {
+    try {
+      const line = JSON.parse(l) as Partial<LocalLine>;
+      if (line.unit !== "local" || typeof line.lane !== "string") continue;
+      const s = (out[line.lane] ??= { calls: 0, images: 0 });
+      s.calls++;
+      s.images += line.images ?? 0;
+    } catch {
+      /* torn line */
+    }
+  }
+  return out;
+}
+
 export function readCredits(file: string): CreditLine[] {
   if (!existsSync(file)) return [];
   return readFileSync(file, "utf8").split("\n").filter(Boolean).flatMap((l) => {
     try {
-      return [JSON.parse(l) as CreditLine];
+      const line = JSON.parse(l) as CreditLine | LocalLine;
+      return line.unit === "local" ? [] : [line as CreditLine]; // balance readers never see comfy lines
     } catch {
       return [];
     }
@@ -124,16 +151,20 @@ export function recordCredit(file: string, line: CreditLine, alreadyNoted: (ref:
 
 // ---------- gallery index: anchor winners, regeneration counts ----------
 
+/** A human-approved redo (T39): the asset's allowance restarts at the count it had when granted. */
+export interface RedoGrant { ts: string; by: string; why: string; at_count: number; approval?: string }
+
 export interface Gallery {
   anchors: Record<string, { provider: ProviderName; ts: string; run_id: string; why?: string }>;
   generations: Record<string, number>;
+  redos?: Record<string, RedoGrant[]>;
 }
 /** Asset/anchor key: the game-repo path ("game/assets/x.png" and "assets/x.png" are one asset). */
 export const assetKey = (rel: string) => path.posix.normalize(rel.replace(/\\/g, "/")).replace(/^(\.\/)?game\//, "");
 
 export const readGallery = (file: string): Gallery => {
   const g = readJson<Partial<Gallery>>(file, {});
-  return { anchors: g.anchors ?? {}, generations: g.generations ?? {} };
+  return { anchors: g.anchors ?? {}, generations: g.generations ?? {}, redos: g.redos ?? {} };
 };
 
 export function recordAnchorWinner(file: string, anchor: string, provider: ProviderName, run_id: string, why?: string, now = new Date()) {
@@ -154,6 +185,63 @@ export function countGeneration(file: string, out: string): number {
   writeAtomic(file, g);
   return g.generations[k];
 }
+
+/** Paid generations this asset may still use: 1 + MAX_REGENERATIONS since its last human redo grant (or ever). */
+export function generationsUsedSinceRedo(file: string, out: string): number {
+  const g = readGallery(file);
+  const k = assetKey(out);
+  const last = g.redos?.[k]?.at(-1);
+  return (g.generations[k] ?? 0) - (last?.at_count ?? 0);
+}
+
+/**
+ * Take one generation slot BEFORE the paid call (T39). Check and count happen in one synchronous step, so two
+ * in-flight calls in this process cannot both pass a cap they jointly exceed (the "4 of 3" seen on Nov 7).
+ * Returns the slot (1-based within the current allowance) or null when the cap is reached.
+ */
+export function reserveGeneration(file: string, out: string): { slot: number; total: number } | null {
+  const g = readGallery(file);
+  const k = assetKey(out);
+  const used = (g.generations[k] ?? 0) - (g.redos?.[k]?.at(-1)?.at_count ?? 0);
+  if (used >= 1 + MAX_REGENERATIONS) return null;
+  g.generations[k] = (g.generations[k] ?? 0) + 1;
+  writeAtomic(file, g);
+  return { slot: used + 1, total: g.generations[k] };
+}
+
+/** Give a reserved slot back: the call billed nothing (refused, exhausted, unavailable, floored, procedural). */
+export function releaseGeneration(file: string, out: string): void {
+  const g = readGallery(file);
+  const k = assetKey(out);
+  if ((g.generations[k] ?? 0) > 0) g.generations[k] -= 1;
+  if (g.generations[k] === 0) delete g.generations[k];
+  writeAtomic(file, g);
+}
+
+/** Record a human-approved redo: the asset gets a fresh 1 + MAX_REGENERATIONS allowance. Only an operator path calls this. */
+export function grantRedo(file: string, out: string, info: { by: string; why: string; approval?: string }, now = new Date()): RedoGrant {
+  const g = readGallery(file);
+  const k = assetKey(out);
+  const grant: RedoGrant = { ts: now.toISOString(), by: info.by, why: info.why, at_count: g.generations[k] ?? 0, ...(info.approval ? { approval: info.approval } : {}) };
+  g.redos = g.redos ?? {};
+  g.redos[k] = [...(g.redos[k] ?? []), grant];
+  writeAtomic(file, g);
+  return grant;
+}
+
+// ---------- pre-call validation (T39): refuse a paid call that cannot produce a usable asset ----------
+
+/** The out path's problem, or null: a real `<name>.png` basename (no ".png", no hidden file) under the clone's assets/. */
+export function outPathProblem(out: string): string | null {
+  const norm = path.posix.normalize(out.replace(/\\/g, "/")).replace(/^\.\//, "");
+  const base = path.posix.basename(norm);
+  if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]*\.png$/i.test(base) || base.toLowerCase() === ".png")
+    return `out "${out}" has no real file name (want e.g. game/assets/sprites/hero.png): every asset needs its own name, or its generations are counted together`;
+  if (!norm.startsWith("game/assets/"))
+    return `out "${out}" is not under the game clone's assets/ (want game/assets/<path>.png): only manifest-listed assets are generated`;
+  return null;
+}
+
 
 // ---------- PixelLab floor (T35): one shared generations balance across studios, enforced in code ----------
 

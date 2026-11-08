@@ -416,22 +416,23 @@ test("art_generate capability: errors are tool errors, not throws (missing manif
     },
     async ({ baseUrl }) => {
       process.env.RETRO_DIFFUSION_BASE_URL = baseUrl;
+      // T39: a postprocess that has no manifest to work with is refused BEFORE the paid call
       const noManifest = await IMPLS.art_generate.art_generate.run(
-        { provider: "retrodiffusion", prompt: "x", width: 16, height: 16, out: "gen.png", postprocess: { lock: true } },
+        { provider: "retrodiffusion", prompt: "x", width: 16, height: 16, out: "game/assets/gen.png", postprocess: { lock: true } },
         capabilityCtx(ws),
       );
       assert.equal(noManifest.is_error, true);
-      assert.match(noManifest.content, /manifest/i);
+      assert.match(noManifest.content, /refused before any request: .*manifest/i);
     },
   );
   delete process.env.RETRO_DIFFUSION_API_KEY; // now the key is the missing thing
-  const noKey = await IMPLS.art_generate.art_generate.run({ provider: "retrodiffusion", prompt: "x", width: 16, height: 16, out: "gen.png" }, capabilityCtx(ws));
+  const noKey = await IMPLS.art_generate.art_generate.run({ provider: "retrodiffusion", prompt: "x", width: 16, height: 16, out: "game/assets/gen.png" }, capabilityCtx(ws));
   assert.equal(noKey.is_error, true);
   assert.match(noKey.content, /RETRO_DIFFUSION_API_KEY/);
 
   const escape = await IMPLS.art_generate.art_generate.run({ provider: "retrodiffusion", prompt: "x", width: 16, height: 16, out: "../evil.png" }, capabilityCtx(ws));
   assert.equal(escape.is_error, true);
-  assert.match(escape.content, /escape/i);
+  assert.match(escape.content, /not under the game clone's assets\//i); // T39: refused before the workspace check
 
   } finally {
     if (prevKey === undefined) delete process.env.RETRO_DIFFUSION_API_KEY;
@@ -489,7 +490,11 @@ test("T3-fix 1: failures after a paid submit carry the cost (timeout, failed job
 });
 
 test("T3-fix 1b: capability returns cost_micro_usd when postprocess fails after a successful generation", async () => {
-  const ws = tempWorkspace(); // no game/manifest → postprocess must fail
+  // The manifest and entry exist (T39 checks them before the call), but the generated image is smaller than the
+  // asset, which only shows after the paid call: snap fails and the charge must still be reported.
+  const ws = tempWorkspace();
+  mkdirSync(path.join(ws, "game", "assets"), { recursive: true });
+  writeFileSync(path.join(ws, "game", "assets", "manifest.json"), JSON.stringify({ grid: { w: 16, h: 16 }, palette: ["#000000", "#ffffff"], assets: [{ path: "assets/gen.png", size: { w: 32, h: 32 } }] }));
   const prevKey = process.env.RETRO_DIFFUSION_API_KEY;
   const prevBase = process.env.RETRO_DIFFUSION_BASE_URL;
   process.env.RETRO_DIFFUSION_API_KEY = "rdpk-fix";
@@ -503,12 +508,12 @@ test("T3-fix 1b: capability returns cost_micro_usd when postprocess fails after 
       async ({ baseUrl }) => {
         process.env.RETRO_DIFFUSION_BASE_URL = baseUrl;
         const out = await IMPLS.art_generate.art_generate.run(
-          { provider: "retrodiffusion", prompt: "x", width: 16, height: 16, out: "gen.png", postprocess: { lock: true } },
+          { provider: "retrodiffusion", prompt: "x", width: 16, height: 16, out: "game/assets/gen.png", postprocess: { snap: true, lock: true } },
           capabilityCtx(ws),
         );
         assert.equal(out.is_error, true);
         assert.equal(out.cost_micro_usd, 180_000);
-        assert.match(out.content, /manifest/i);
+        assert.match(out.content, /postprocess failed: generated 2x2 is smaller than the asset 32x32/);
       },
     );
   } finally {
