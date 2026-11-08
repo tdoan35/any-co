@@ -9,7 +9,7 @@ export default defineAgent({
   dept: "design",
   runner: "local",
   model: "z-ai/glm-5.3",
-  budget: { cap_usd: 4, max_task_usd: 0.75, period: "day" },
+  budget: { cap_usd: 10, max_task_usd: 2.5, period: "day" }, // Nov 7: $0.75 hit wrap-up (70%) before the content write landed, three rounds running
   tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow" },
   output_schema: z
     .object({
@@ -38,5 +38,5 @@ export default defineAgent({
         .describe("Schema gaps or design-doc contradictions blocking better content; empty if none"),
     })
     .strict(),
-  limits: { max_turns: 40, max_output_tokens: 8192 },
+  limits: { max_turns: 60, max_output_tokens: 8192 },
 });
