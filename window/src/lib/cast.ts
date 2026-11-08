@@ -1,8 +1,7 @@
 // The studio's cast: which of Fabric's portraits each studio agent wears in the window.
 // Applied when the registry arrives (lib/registry.ts) and only to agents the API sent without an
 // `avatar`, so once the adapter returns avatars itself this table is ignored.
-// Faces mean "named lead or checkpoint actor"; hands-on staff keep the initial circle in their
-// department colour. Studio UI art only: never part of the game.
+// Faces are studio UI art only: never part of the game. Agents not listed keep the initial circle.
 import type { Registry, SpriteAvatar, StudioProfile } from "@fabric/contracts";
 
 const still = (persona: string): SpriteAvatar => ({ still: `/agents/${persona}-happy.webp` });
@@ -32,6 +31,13 @@ export const CAST: Readonly<Record<string, SpriteAvatar>> = {
   "tech-lead": still("jonah"),
   "build-release": still("bea"),
   "qa-lead": still("sana"),
+  "playtester": still("playtester"),
+  // art / eng hands-on
+  "env-ui-artist": still("env-ui-artist"),
+  "sprite-artist": still("sprite-artist"),
+  "gameplay-engineer": still("gameplay-engineer"),
+  "level-content-designer": still("level-content-designer"),
+  "audio": still("audio"),
   // marketing / ops
   "marketing-lead": still("nikhil"),
   "community-outreach": still("nadine"),
