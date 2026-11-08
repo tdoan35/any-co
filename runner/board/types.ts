@@ -58,6 +58,8 @@ export interface BoardUpdate {
   body?: string;
   title?: string;
   claim?: { pid: number; host: string; run_id?: string };
+  /** Replace one dependency edge (T38 supersede): `from` → `to` in blocked_by (and, locally, upstream). */
+  repoint?: { from: string; to: string };
 }
 
 export interface Board {

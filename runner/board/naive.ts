@@ -133,11 +133,19 @@ export class NaiveBoard implements Board {
   async update(cardId: string, patch: BoardUpdate): Promise<BoardCard> {
     try {
       // No assignee ever: writing it resets the card's wake (docs/team/board.md, PATCH row).
+      // A repoint PATCHes the whole blocked_by list (the SDK's CardPatch carries blocked_by), read from the card now.
+      let blocked_by: string[] | undefined;
+      if (patch.repoint) {
+        const { from, to } = patch.repoint;
+        const current = decode(await this.client.board.cards.get(this.ref, cardId)).blocked_by;
+        blocked_by = [...new Set(current.map((id) => (id === from ? to : id)))];
+      }
       const raw = await this.client.board.cards.update(this.ref, cardId, {
         status: patch.status,
         note: patch.note,
         body: patch.body,
         title: patch.title,
+        ...(blocked_by ? { blocked_by } : {}),
       });
       return decode(raw);
     } catch (e) {

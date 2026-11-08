@@ -16,7 +16,7 @@ export const DEFAULT_BOARD_FILE = process.env.STUDIO_BOARD_FILE ?? path.join(ROO
 type Claim = NonNullable<BoardCard["claim"]>;
 type Event =
   | { t: "created"; at: string; card: BoardCard; key?: string }
-  | { t: "updated"; at: string; id: string; status?: BoardStatus; note?: string; body?: string; title?: string; blocked_by?: string[]; claim?: Claim }
+  | { t: "updated"; at: string; id: string; status?: BoardStatus; note?: string; body?: string; title?: string; blocked_by?: string[]; upstream?: string[]; claim?: Claim }
   | { t: "commented"; at: string; comment: BoardComment };
 
 interface State {
@@ -72,6 +72,7 @@ export class LocalBoard implements Board {
         if (e.body !== undefined) c.body = e.body;
         if (e.title !== undefined) c.title = e.title;
         if (e.blocked_by !== undefined) c.blocked_by = e.blocked_by;
+        if (e.upstream !== undefined) c.upstream = e.upstream;
         // claims are first-wins in file order (the re-fold/nonce pattern from tools/approvals):
         // two writers may both append; only the one whose nonce stuck holds the card.
         if (e.claim) c.claim = e.claim;
@@ -160,6 +161,14 @@ export class LocalBoard implements Board {
     if (patch.body !== undefined) raw.body = patch.body;
     if (patch.title !== undefined) raw.title = patch.title;
     if (patch.note !== undefined) raw.note = patch.note;
+    if (patch.repoint) {
+      const { from, to } = patch.repoint;
+      if (!s.cards.has(to)) throw new BoardError("unknown_blocker", `repoint target ${to} is not a card on this board`);
+      if (to === cardId) throw new BoardError("unknown_blocker", `card ${cardId} cannot wait on itself`);
+      const swap = (ids: string[]) => [...new Set(ids.map((id) => (id === from ? to : id)))];
+      raw.blocked_by = swap(raw.blocked_by);
+      raw.upstream = swap(raw.upstream ?? []); // the rerun gets the replacement's done note, not "superseded by"
+    }
     if (patch.status !== undefined && patch.status !== view.status) {
       raw.status = patch.status;
       raw.claim = null;
@@ -171,7 +180,7 @@ export class LocalBoard implements Board {
     }
     const now = new Date().toISOString();
     raw.updated_at = now;
-    this.append({ t: "updated", at: now, id: cardId, status: raw.status, note: raw.note ?? undefined, body: raw.body, title: raw.title, blocked_by: raw.blocked_by });
+    this.append({ t: "updated", at: now, id: cardId, status: raw.status, note: raw.note ?? undefined, body: raw.body, title: raw.title, blocked_by: raw.blocked_by, ...(patch.repoint ? { upstream: raw.upstream } : {}) });
     return { ...raw };
   }
 

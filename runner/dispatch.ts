@@ -10,7 +10,7 @@ import { killSwitchOn } from "./spend.ts";
 import type { AgentSpec } from "./spec.ts";
 import type { Provider } from "./types.ts";
 import type { NaiveClient } from "./providers.ts";
-import { BoardError, type Board, type BoardCard, type BoardComment } from "./board/index.ts";
+import { BoardError, completeSupersedes, type Board, type BoardCard, type BoardComment } from "./board/index.ts";
 
 export interface DispatchOptions {
   board: Board;
@@ -311,6 +311,8 @@ export class Dispatcher {
     const runsDir = this.opts.runsDir ?? RUNS_DIR;
     if (killSwitchOn(runsDir)) return { started: 0, skipped: [], killed: true };
     const board = this.opts.board;
+    // T38 safety net: finish any supersede left half-done (dependents still on a replaced card) before starting work
+    await completeSupersedes(board, this.opts.log).catch((e: unknown) => this.opts.log?.(`supersede check failed: ${errText(e)}`));
     const cards = await board.list();
     const byId = new Map(cards.map((c) => [c.id, c]));
     const holders = new Set(cards.filter((c) => c.status === "doing").map((c) => c.assignee));
