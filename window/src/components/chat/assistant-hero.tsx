@@ -170,10 +170,12 @@ export type SideTab = "agent" | "session";
  * main column makes room while the card itself slides in from the edge. Tabs above the card switch
  * between the agent's profile and (once a chat has started) the session info passed as `session`.
  */
-export function AgentProfilePanel({ agent, open, tab, onTabChange, session, agentTab, agentTabLabel = "Agent", onClose }: {
+export function AgentProfilePanel({ agent, open, tab, onTabChange, session, agentTab, agentTabLabel = "Agent", onClose, inline = false }: {
   agent: ChatAgent; open: boolean; tab: SideTab; onTabChange: (t: SideTab) => void; session?: ReactNode;
   /** Replaces the agent profile (e.g. a team profile in Teams mode). */
   agentTab?: ReactNode; agentTabLabel?: string; onClose: () => void;
+  /** Docked inside a container (e.g. InsetPanel's `aside`): always reflows its neighbour, full container height. */
+  inline?: boolean;
 }) {
   useEffect(() => {
     if (!open) return;
@@ -199,7 +201,9 @@ export function AgentProfilePanel({ agent, open, tab, onTabChange, session, agen
           exit={{ width: 0 }}
           transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
           // Below @4xl there's no room to reflow, so it floats over the page instead. Top clears the pinned page actions.
-          className="absolute inset-y-0 right-0 z-10 flex shrink-0 justify-end overflow-hidden pb-4 pt-[3.75rem] @4xl/thread:relative"
+          className={inline
+            ? "relative flex h-full shrink-0 justify-end overflow-hidden py-4"
+            : "absolute inset-y-0 right-0 z-10 flex shrink-0 justify-end overflow-hidden pb-4 pt-[3.75rem] @4xl/thread:relative"}
         >
           <motion.div
             initial={{ x: SLOT }} animate={{ x: 0 }} exit={{ x: SLOT }}

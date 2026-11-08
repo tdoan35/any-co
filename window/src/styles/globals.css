@@ -173,6 +173,12 @@
 }
 .avatar-working { animation: avatar-working 2s ease-out infinite; }
 .avatar-breathe { animation: avatar-breathe 3.2s ease-in-out infinite; transform-origin: 50% 70%; }
+
+/* Flow tab connectors: dashes drift along each arrow so hand-offs read as moving work.
+   Reduced motion: still dashes. */
+@keyframes flow-dash { to { stroke-dashoffset: -14; } }
+.flow-dash, .flow-dash-down { animation: flow-dash 1.4s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .flow-dash, .flow-dash-down { animation: none; } }
 @media (prefers-reduced-motion: reduce) {
   .avatar-working { animation: none; box-shadow: 0 0 0 2px var(--run); }
   .avatar-breathe { animation: none; }

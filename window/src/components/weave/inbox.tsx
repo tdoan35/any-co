@@ -15,6 +15,7 @@ import { age, fmtTime, waited } from "./format";
 import { ColumnHeader, ColumnLabel, Face, NameRole, agentOf } from "./parts";
 import { PaneToggle } from "./pane-resize";
 import { quietScroll, useEdgeFade } from "./use-edge-fade";
+import { PresenceStrip } from "./presence-strip";
 
 const TIME_SNOOZE = [
   { label: "Later today", hint: "3:00 PM", until: "Until 3:00 PM today" },
@@ -215,6 +216,9 @@ export function Inbox({ state, showDone, onToggleDone, onCollapse, ...ctx }: Row
         </button>
       </ColumnHeader>
       <div ref={listRef} style={listFade} className={cn("min-h-0 flex-1 space-y-5 overflow-y-auto px-2 pb-16 pt-3", quietScroll)}>
+        <section>
+          <PresenceStrip presence={state.presence} onSelectItem={ctx.onOpen} />
+        </section>
         <section>
           <ColumnLabel count={g.needs.length}>Needs you</ColumnLabel>
           <div className="mt-1.5">

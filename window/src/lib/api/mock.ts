@@ -23,7 +23,20 @@ import { resetSessionStreams } from "@/lib/chat/session-stream";
 import { mockAssistant } from "../mock/chat";
 import type { ContextSnapshot, Report, Run, RunEvent, Task } from "../types";
 import type { ArtGallery } from "./http";
-import type { Interventions } from "./http";
+import type { BoardSummary, Interventions } from "./http";
+
+/** Mock board: early stages finished, Engineering mid-build, QA queued, Ship not started. */
+const done = (n: number) => ({ todo: 0, doing: 0, blocked: 0, done: n });
+const mockBoardSummary: BoardSummary = {
+  byAssignee: {
+    "market-analyst": done(1), "player-voice-analyst": done(1), "pitch-writer": done(1), "feasibility-critic": done(1), "greenlight-chair": done(1),
+    "game-design-director": done(2), "ui-ux-designer": done(1), "level-content-designer": done(1),
+    "art-director": done(3), "sprite-artist": { todo: 1, doing: 1, blocked: 0, done: 4 }, "env-ui-artist": done(3),
+    "tech-lead": { todo: 1, doing: 1, blocked: 0, done: 5 }, "gameplay-engineer-a": { todo: 2, doing: 0, blocked: 1, done: 3 },
+    "qa-lead": { todo: 1, doing: 0, blocked: 0, done: 0 },
+  },
+  runsByAgent: {},
+};
 
 const delay = <T,>(v: T, ms = 120) => new Promise<T>((r) => setTimeout(() => r(v), ms));
 const bundle = recordings["ngram-135m"];
@@ -85,6 +98,7 @@ export const mockApi = {
   getGallery: (): Promise<ArtGallery> => delay(galleryFixture),
   getInterventions: (): Promise<Interventions> => delay(interventionsFixture),
   getWeave: (): Promise<WeaveSnapshot> => delay(weaveSnapshot),
+  getBoardSummary: (): Promise<BoardSummary> => delay(mockBoardSummary),
   listProjects: (): Promise<Project[]> => delay(projects),
   createProject: ({ name, goal }: { name: string; goal: string }): Promise<Project> => {
     const base = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "project";

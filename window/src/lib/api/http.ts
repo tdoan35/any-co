@@ -57,6 +57,9 @@ const galleryEntrySchema = z.object({
 export type GalleryEntry = z.infer<typeof galleryEntrySchema>;
 export interface ArtGallery { repos: string[]; entries: GalleryEntry[] }
 const gallerySchema = z.object({ repos: z.array(z.string()), entries: z.array(galleryEntrySchema) });
+const statusCountsSchema = z.object({ todo: z.number(), doing: z.number(), blocked: z.number(), done: z.number() });
+const boardSummarySchema = z.object({ byAssignee: z.record(z.string(), statusCountsSchema), runsByAgent: z.record(z.string(), z.number()).default({}) });
+export type BoardSummary = z.infer<typeof boardSummarySchema>;
 const decisionSchema = z.object({ ok: z.boolean(), id: z.string(), decision: z.enum(["kept", "forgotten"]) });
 
 export const httpApi = {
@@ -66,6 +69,8 @@ export const httpApi = {
   getGallery: () => request<ArtGallery>("/art-gallery", gallerySchema),
   getRegistry: () => request<Registry>("/registry", RegistrySchema),
   getWeave: () => request<WeaveSnapshot>("/weave", WeaveSnapshotSchema),
+  /** Board card counts per assignee and status (Flow tab: where the game sits in the pipeline). */
+  getBoardSummary: () => request<BoardSummary>("/board-summary", boardSummarySchema),
   listProjects: () => request<Project[]>("/projects", z.array(ProjectSchema)),
   createProject: (input: { name: string; goal: string }) => request<Project>("/projects", ProjectSchema, json(input)),
   listTasks: () => request<Task[]>("/tasks", z.array(TaskSchema)),

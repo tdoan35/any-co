@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { WeaveSnapshotSchema } from "@fabric/contracts";
@@ -50,4 +50,23 @@ test("weave shows board cards read-only: doing → presence, blocked → pulse +
   assert.match((snap.pulse[0] as { text: string }).text, /Blocked: Card c2 — error: run r-1/);
   assert.deepEqual(snap.items, []); // board cards are not inbox items: no write path
   WeaveSnapshotSchema.parse(snap);
+});
+
+test("weave calendar: events from runs/calendar.json, filtered to the contract shape; absent or malformed file is empty", () => {
+  const d = mkdtempSync(path.join(tmpdir(), "weave-cal-"));
+  const f = path.join(d, "approvals.jsonl");
+  // Absent file: no calendar, no throw.
+  assert.deepEqual(buildWeave([], [], f, d).calendar, []);
+  // Valid entries pass through; junk entries and unknown kinds are dropped.
+  writeFileSync(path.join(d, "calendar.json"), JSON.stringify({ events: [
+    { id: "breakfast", title: "Breakfast served", start: "2026-11-08T09:00:00-08:00", end: "2026-11-08T09:45:00-08:00", kind: "personal" },
+    { id: "junk" },
+    { id: "odd-kind", title: "x", start: "2026-11-08T10:00:00-08:00", end: "2026-11-08T10:30:00-08:00", kind: "party" },
+  ] }));
+  const snap = buildWeave([], [], f, d);
+  assert.deepEqual(snap.calendar.map((e) => e.id), ["breakfast"]);
+  WeaveSnapshotSchema.parse(snap);
+  // Malformed JSON: still no throw, no calendar.
+  writeFileSync(path.join(d, "calendar.json"), "{not json");
+  assert.deepEqual(buildWeave([], [], f, d).calendar, []);
 });

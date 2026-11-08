@@ -5,11 +5,33 @@
 // `approvals list`/`approve`/`deny` and resume do, ledgered as who "run ended").
 // Board cards are read-only here too: a doing card shows its assignee at work (presence), a blocked
 // card is studio news (pulse) and marks its holder blocked when no run already shows them busy.
-import type { EventEntry, Presence, WeaveSnapshot } from "@fabric/contracts";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import type { CalendarEvent, EventEntry, Presence, WeaveSnapshot } from "@fabric/contracts";
 import type { MappedRun } from "./runs.ts";
 import { PROJECT } from "./registry.ts";
 import { APPROVALS_FILE, pendingLive } from "../../tools/approvals/approvals.ts";
 import type { BoardCard } from "../../runner/board/types.ts";
+
+/** The viewer's own calendar (the day rail's "Your day"): runs/calendar.json, written by the
+ *  humans — the window has no calendar write path, and the agents never touch it. The runs-dir
+ *  watcher already emits weave.changed on file changes, so edits live-update the rail. Absent
+ *  or malformed file: no calendar (never a 500). */
+export function readUserCalendar(runsDir?: string): CalendarEvent[] {
+  if (!runsDir) return [];
+  try {
+    const raw: unknown = JSON.parse(readFileSync(path.join(runsDir, "calendar.json"), "utf8"));
+    const events = (raw as { events?: unknown[] } | null)?.events;
+    if (!Array.isArray(events)) return [];
+    return events.filter((e): e is CalendarEvent => {
+      const c = e as Partial<CalendarEvent>;
+      return typeof c?.id === "string" && typeof c.title === "string" && typeof c.start === "string"
+        && typeof c.end === "string" && (c.kind === "meeting" || c.kind === "focus" || c.kind === "personal");
+    });
+  } catch {
+    return [];
+  }
+}
 
 const PULSE_LIMIT = 60;
 
@@ -74,5 +96,5 @@ export function buildWeave(runs: MappedRun[], agentIds: string[], approvalsFile 
     ],
     actions: [], // read-only: the window has no approval endpoint
   }));
-  return { items, pulse: pulse.slice(-PULSE_LIMIT).reverse(), presence: [...presence.values()], calendar: [] };
+  return { items, pulse: pulse.slice(-PULSE_LIMIT).reverse(), presence: [...presence.values()], calendar: readUserCalendar(runsDir) };
 }

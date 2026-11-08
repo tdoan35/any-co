@@ -16,6 +16,7 @@
 // first render; weave-store mutation semantics are untouched.
 
 import { useState } from "react";
+import { MemoryRouter } from "react-router";
 import type { Decorator, Meta, StoryObj } from "@storybook/react-vite";
 import { expect, userEvent, waitFor, within } from "storybook/test";
 import { WithHarness, storyRouter } from "../../../.storybook/harness";
@@ -63,18 +64,20 @@ function InboxPane({ prepare, showDone = false }: { prepare?: () => void; showDo
   const [snoozeFor, setSnoozeFor] = useState<string | null>(null);
   const [doneShown, setDoneShown] = useState(showDone);
   return (
-    <div className="h-[560px] w-[340px] border-r border-foreground/10 bg-background/40">
-      <Inbox
-        state={state}
-        selectedId={selectedId}
-        focusId={focusId}
-        onOpen={(id) => { setSelectedId(id); setFocusId(id); }}
-        snoozeFor={snoozeFor}
-        setSnoozeFor={setSnoozeFor}
-        showDone={doneShown}
-        onToggleDone={() => setDoneShown((v) => !v)}
-      />
-    </div>
+    <MemoryRouter>
+      <div className="h-[560px] w-[340px] border-r border-foreground/10 bg-background/40">
+        <Inbox
+          state={state}
+          selectedId={selectedId}
+          focusId={focusId}
+          onOpen={(id) => { setSelectedId(id); setFocusId(id); }}
+          snoozeFor={snoozeFor}
+          setSnoozeFor={setSnoozeFor}
+          showDone={doneShown}
+          onToggleDone={() => setDoneShown((v) => !v)}
+        />
+      </div>
+    </MemoryRouter>
   );
 }
 
@@ -92,7 +95,7 @@ export const PopulatedInbox: Story = {
 
     // 7 open (4 asks + 3 for-you); pristine seed — a leak from another story would fail here.
     expect(canvas.getByText("7 open")).toBeInTheDocument();
-    expect(canvas.getByText("Needs you")).toBeInTheDocument();
+    expect(canvas.getAllByText("Needs you")).toHaveLength(3); // the section label + the strip's two waiting faces
     expect(canvas.getByText("For you")).toBeInTheDocument();
 
     // Needs you first, longest-waiting ask on top; the snoozed finding is not listed.
@@ -112,11 +115,20 @@ export const PopulatedInbox: Story = {
     expect(canvas.getByText("Snoozed")).toBeInTheDocument();
     expect(canvas.getByText("· 1")).toBeInTheDocument();
 
-    // Rows are keyboard-reachable: two tabs land on the first row's button (the first
-    // tab is the header's Done toggle), which reveals its quick actions to the keyboard.
+    // Rows are keyboard-reachable: tabs walk the header's Done toggle, the presence
+    // strip's faces and its idle toggle, then land on the first row's button, which
+    // reveals its quick actions to the keyboard.
     const user = userEvent.setup();
     await user.tab();
     expect(document.activeElement).toBe(canvas.getByRole("button", { name: "Done · 0" }));
+    await user.tab();
+    // A row button can also lead with the same agent name (its actor face), so identify
+    // the strip's face by its wrapper, not by accessible name.
+    expect(document.activeElement!.closest("[data-agent]")?.getAttribute("data-agent")).toBe("elliot");
+    await user.tab();
+    await user.tab();
+    await user.tab();
+    expect(document.activeElement).toBe(canvas.getByRole("button", { name: "5 idle" }));
     await user.tab();
     expect(document.activeElement).toBe(rowButton(canvasElement, "nand-budget"));
     expect(canvasElement.querySelector<HTMLElement>('[data-item="nand-budget"] button[aria-label="Snooze"]')).not.toBeNull();

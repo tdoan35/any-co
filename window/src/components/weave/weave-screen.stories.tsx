@@ -89,9 +89,13 @@ export const WideThreeColumn: Story = {
     expect(canvas.queryByRole("button", { name: "Your day" })).toBeNull();
     expect(canvas.getByText("Good morning, Ty")).toBeInTheDocument();
 
-    // Pristine world on all three columns at once.
+    // Pristine world on all three columns at once. The presence strip now heads the
+    // inbox; the day rail keeps only the calendar and the timebox.
     expect(canvas.getByText("7 open")).toBeInTheDocument();
-    expect(canvas.getByText("2 waiting on you · 1 blocked")).toBeInTheDocument();
+    expect(canvas.getByText(/2 waiting on you · 1 blocked/)).toBeInTheDocument();
+    expect(canvas.getByRole("button", { name: "5 idle" })).toBeInTheDocument();
+    expect(canvasElement.querySelector('section[aria-label="Inbox"] [data-agent="elliot"]')).not.toBeNull();
+    expect(canvasElement.querySelector('aside[aria-label="Today"] [data-agent]')).toBeNull();
     expect(canvas.getByText(/4 things need you:/)).toBeInTheDocument();
 
     // The segmented control drives the real filter state: everything reveals the
@@ -258,19 +262,9 @@ export const NarrowRailSheet: Story = {
     await waitFor(() => expect(within(document.body).queryByRole("dialog")).toBeNull());
     await user.click(canvas.getByRole("button", { name: "Your day" }));
     await waitFor(() => expect(within(document.body).getByRole("dialog")).toBeInTheDocument());
-    // Radix closes on Escape from inside the sheet. On open it lands focus on the first
-    // focusable — a presence face — whose tooltip owns the dismissable-layer stack and
-    // swallows the first Escape (a real-user quirk of the strip, not the sheet). The
-    // tooltip's open state lands a tick after the sheet's auto-focus, so wait for it to
-    // mount before pressing Escape: pressing earlier races the mount and the tooltip can
-    // open after the keypress. Press Escape twice: the first closes the tooltip, the
-    // second the sheet — both orders converge on a closed sheet and no tooltip.
-    await waitFor(
-      () => expect(document.body.querySelectorAll("[role=tooltip]")).not.toHaveLength(0),
-      { timeout: 3000 },
-    );
-    await user.keyboard("{Escape}");
-    await waitFor(() => expect(document.body.querySelectorAll("[role=tooltip]")).toHaveLength(0));
+    // Radix closes on Escape from inside the sheet. The rail no longer opens with the
+    // presence strip (it lives in the inbox now), so no tooltip-bearing face takes the
+    // auto-focus: one Escape closes the sheet.
     await user.keyboard("{Escape}");
     await waitFor(() => expect(within(document.body).queryByRole("dialog")).toBeNull(), { timeout: 3000 });
 

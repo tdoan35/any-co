@@ -149,11 +149,18 @@ function CollapsibleSection({ title, children, scroll }: { title: string; childr
   useEffect(() => {
     const el = scrollRef.current;
     if (!el || !scroll) return;
-    const update = () => setEdges({ top: el.scrollTop > 4, bottom: el.scrollTop + el.clientHeight < el.scrollHeight - 4 });
+    // Bottom fades only for a hidden chunk (≥24px ≈ half a row): a few px of rounding never fades text.
+    const update = () => setEdges({ top: el.scrollTop > 4, bottom: el.scrollHeight - el.clientHeight - el.scrollTop > 24 });
     el.addEventListener("scroll", update, { passive: true });
     const ro = new ResizeObserver(update);
     ro.observe(el);
-    return () => { el.removeEventListener("scroll", update); ro.disconnect(); };
+    // A collapsible row settling inside can leave this container's box unchanged (its exiting
+    // copy unmounts out of flow), so the observer alone misses the final state: watch the
+    // content box and the DOM churn too, or the fade sticks after everything fits.
+    if (el.firstElementChild) ro.observe(el.firstElementChild);
+    const mo = new MutationObserver(update);
+    mo.observe(el, { childList: true, subtree: true, attributeFilter: ["data-state", "hidden"] });
+    return () => { el.removeEventListener("scroll", update); ro.disconnect(); mo.disconnect(); };
   }, [scroll, open]);
   const fade = 36;
   const mask = scroll

@@ -118,9 +118,9 @@ export const TeamsViewDeepLink: Story = {
   },
 };
 
-/** Flow shows the work order. A portrait opens that person and stays on the Flow tab. */
+/** Flow is the studio as it works: six stages under the Studio Head. A person opens in the side panel; the chart stays. */
 export const FlowTab: Story = {
-  name: "Flow tab shows the work order",
+  name: "Flow tab shows the studio stages",
   parameters: { router: { routes, initialEntries: ["/agents"] } },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
@@ -130,15 +130,20 @@ export const FlowTab: Story = {
 
     await user.click(canvas.getByRole("tab", { name: "Flow" }));
     await waitFor(() => expect(router.state.location.search).toBe("?view=flow"));
-    expect(canvas.getByRole("heading", { name: "Who picks the game" })).toBeInTheDocument();
-    expect(canvas.getByRole("heading", { name: "Who builds" })).toBeInTheDocument();
-    expect(canvas.getByRole("heading", { name: "Who ships" })).toBeInTheDocument();
-    expect(canvas.getByRole("button", { name: "Market Analyst" })).toBeInTheDocument();
-    expect(canvas.getByText("Approve the itch upload")).toBeInTheDocument();
-    expect(canvas.getByText("Sign off the art")).toBeInTheDocument();
+    for (const stage of ["Greenlight", "Design", "Art and Audio", "Engineering", "QA", "Ship"]) {
+      expect(canvas.getByRole("region", { name: new RegExp(`: ${stage}$`) })).toBeInTheDocument();
+    }
+    expect(canvas.getByText("You, at the approval gate")).toBeInTheDocument();
 
-    await user.click(canvas.getByRole("button", { name: "Market Analyst" }));
+    await user.click(canvas.getByRole("button", { name: /Market Analyst/ }));
     await waitFor(() => expect(router.state.location.search).toBe("?view=flow&agent=market-analyst"));
+    // The profile opens beside the chart, which stays on screen.
+    expect(await canvas.findByRole("complementary")).toBeInTheDocument();
+    expect(canvas.getByRole("region", { name: /: Greenlight$/ })).toBeInTheDocument();
+    expect(canvas.getByRole("button", { name: /Market Analyst/ })).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(canvas.getByRole("button", { name: "Close panel" }));
+    await waitFor(() => expect(router.state.location.search).toBe("?view=flow"));
   },
 };
 

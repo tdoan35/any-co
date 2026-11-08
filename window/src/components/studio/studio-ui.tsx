@@ -36,13 +36,23 @@ export const PANEL_PATTERN = {
   grid: "bg-[linear-gradient(color-mix(in_oklab,var(--foreground)_8%,transparent)_1px,transparent_1px),linear-gradient(90deg,color-mix(in_oklab,var(--foreground)_8%,transparent)_1px,transparent_1px)] bg-[size:24px_24px]",
 };
 
-/** Inset panel under a page header: a gap around the content and a rounded, translucent border. */
-export function InsetPanel({ children, pattern = "dots", wide }: { children: ReactNode; pattern?: "dots" | "grid"; wide?: boolean }) {
+/**
+ * Inset panel under a page header: a gap around the content and a rounded, translucent border.
+ * `aside` docks on the container's right edge, full height; the scrolling content narrows beside it.
+ */
+export function InsetPanel({ children, pattern = "dots", wide, aside }: { children: ReactNode; pattern?: "dots" | "grid"; wide?: boolean; aside?: ReactNode }) {
+  const content = <div className={`mx-auto ${wide ? "" : "max-w-[880px]"} animate-in fade-in slide-in-from-bottom-2 delay-150 duration-500 ease-out fill-mode-backwards`}>{children}</div>;
+  const frame = `rounded-2xl border border-foreground/10 bg-background/20 ${PANEL_PATTERN[pattern]} shadow-sm backdrop-blur-xl`;
   return (
     <div className="min-h-0 flex-1 animate-in fade-in slide-in-from-bottom-3 p-4 pt-3 duration-500 ease-out fill-mode-backwards">
-      <div className={`h-full overflow-y-auto rounded-2xl border border-foreground/10 bg-background/20 ${PANEL_PATTERN[pattern]} px-8 py-8 shadow-sm backdrop-blur-xl`}>
-        <div className={`mx-auto ${wide ? "" : "max-w-[880px]"} animate-in fade-in slide-in-from-bottom-2 delay-150 duration-500 ease-out fill-mode-backwards`}>{children}</div>
-      </div>
+      {aside === undefined
+        ? <div className={`h-full overflow-y-auto px-8 py-8 ${frame}`}>{content}</div>
+        : (
+          <div className={`flex h-full overflow-hidden ${frame}`}>
+            <div className="min-w-0 flex-1 overflow-y-auto px-8 py-8">{content}</div>
+            {aside}
+          </div>
+        )}
     </div>
   );
 }

@@ -17,6 +17,7 @@ import { ItemDetail } from "./item-detail";
 import { ColumnHeader } from "./parts";
 import { COLLAPSED_PX, CollapsedStrip, PANE_LIMITS, PaneHandle, PaneToggle, usePaneWidths } from "./pane-resize";
 import { Pulse, type PulseFilter } from "./pulse";
+import { ProjectFocus } from "@/components/weave/project-focus";
 import { quietScroll, useEdgeFade } from "./use-edge-fade";
 
 /** Panel widths (px) where the layout gains a column. Measured on the panel, not the viewport, so the
@@ -66,7 +67,7 @@ const FILTERS = [{ value: "highlights", label: "Highlights" }, { value: "everyth
 
 /**
  * Weave: where your organization reports to you.
- * Inbox (what needs me?) · Pulse or the open item (what changed?) · presence and your day (who's working, what's my day?).
+ * Inbox (what needs me? who's working right now?) · Pulse or the open item (what changed?) · your day (what's my day?).
  * Calm by default (PRODUCT §8.1): no live logs, no red badges, and quiet events stay under Everything.
  */
 export function WeaveScreen() {
@@ -162,7 +163,7 @@ export function WeaveScreen() {
   }, [state, showDone, selectedId, focusId, open, close, navigate]);
 
   const selected = itemById(selectedId);
-  const rail = <DayRail state={state} day={day} onPickDay={pickDay} onSelectItem={open} />;
+  const rail = <DayRail day={day} onPickDay={pickDay} />;
   const todayTitle = <><h2 className="text-sm font-semibold">Today</h2><span className="text-xs text-muted-foreground">{shortDayLabel(TODAY)}</span></>;
   const inboxCollapsed = cols > 1 && panes.collapsed.inbox;
   const railCollapsed = cols === 3 && panes.collapsed.rail;
@@ -191,6 +192,7 @@ export function WeaveScreen() {
         </>}
       >
         <span className={headerTitle}>Studio</span>
+        <ProjectFocus />
       </PageHeader>
       <div className="min-h-0 flex-1 animate-in fade-in slide-in-from-bottom-3 p-4 pt-3 duration-500 ease-out fill-mode-backwards">
         <div ref={panelRef} style={{ gridTemplateColumns: template }} className={cn(
