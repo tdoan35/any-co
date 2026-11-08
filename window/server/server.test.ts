@@ -153,3 +153,31 @@ test("registry: no invented lead or head; a head spec tops the org and is not dr
   assert.equal(withHead.teams.find((t) => t.id === "team-design")!.status, "active");
   assert.deepEqual(buildRegistry([], new Set()).organizations, []);
 });
+
+test("server: /api/art-gallery lists repos and serves a gallery png (the route strips both api/ and art-gallery/)", async () => {
+  const runsDir = mkdtempSync(path.join(os.tmpdir(), "window-runs-"));
+  const gamesRoot = mkdtempSync(path.join(os.tmpdir(), "window-games-"));
+  try {
+    const repo = path.join(gamesRoot, "g1");
+    mkdirSync(path.join(repo, ".git"), { recursive: true });
+    mkdirSync(path.join(repo, "art", "gallery", "hero"), { recursive: true });
+    writeFileSync(path.join(repo, "art", "gallery", "hero", "1-pixellab-accepted.png"), "PNGDATA");
+    writeFileSync(path.join(repo, "art", "gallery", "gallery.json"), JSON.stringify({ entries: [] }));
+    const srv = await startServer({ runsDir, gamesRoot, port: 0 });
+    const base = `http://127.0.0.1:${srv.port}/api`;
+    try {
+      const idx = await fetch(`${base}/art-gallery`);
+      assert.equal(idx.status, 200);
+      assert.deepEqual(((await idx.json()) as { repos: string[] }).repos, ["g1"]);
+      const png = await fetch(`${base}/art-gallery/g1/png/gallery/hero/1-pixellab-accepted.png`);
+      assert.equal(png.status, 200);
+      assert.equal(await png.text(), "PNGDATA");
+      assert.equal((await fetch(`${base}/art-gallery/nope`)).status, 404);
+    } finally {
+      await srv.close();
+    }
+  } finally {
+    rmSync(runsDir, { recursive: true, force: true });
+    rmSync(gamesRoot, { recursive: true, force: true });
+  }
+});
