@@ -234,8 +234,13 @@ export async function runAgent(spec: AgentSpec, opts: RunOptions): Promise<RunRe
 
       const uses = reply.content.filter((b): b is ToolUseBlock => b.type === "tool_use");
       if (!uses.length) {
-        if (!schema) {
-          state.output = reply.content.filter((b) => b.type === "text").map((b: any) => b.text).join("\n");
+        const text = reply.content.filter((b) => b.type === "text").map((b: any) => b.text).join("\n");
+        if (!schema && reply.stop_reason === "max_tokens" && !text.trim() && nudges++ < MAX_NUDGES) {
+          // An empty reply cut off by max_tokens is not an answer (a reasoning model can spend the whole limit
+          // thinking: studio-head 20261107-164658 ended "done" with nothing). Tell it and go on.
+          pushMsg("user", `Your last reply hit the ${spec.limits.max_output_tokens}-token output limit before any visible output; nothing in it ran. Think less, act in small steps: one or two tool calls per turn, then a short final answer.`);
+        } else if (!schema) {
+          state.output = text;
           stop("done");
         } else if (nudges++ < MAX_NUDGES) {
           // A reply truncated by max_tokens arrives empty and the model tends to re-emit the

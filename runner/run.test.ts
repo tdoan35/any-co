@@ -147,6 +147,18 @@ test("a max_tokens-truncated reply gets a specific recovery nudge, then can fini
   assert.match(JSON.stringify(nudge), /one tool call at a time/);
 });
 
+test("no-schema agent: an empty max_tokens reply is nudged, not taken as the final answer", async () => {
+  const spec = { ...(await loadAgent("good-agent", FIX)), output_schema: undefined };
+  const fake = new FakeProvider([
+    { content: [], stop_reason: "max_tokens" }, // a reasoning model spent the whole limit thinking
+    { content: [{ type: "text" as const, text: "cycle report" }] },
+  ]);
+  const r = await runAgent(spec as any, { task: "t", provider: fake, naive: null, runsDir: tmp() });
+  assert.equal(r.status, "done");
+  assert.equal(r.output, "cycle report");
+  assert.match(JSON.stringify(fake.requests[1].messages.at(-1)), /output limit/);
+});
+
 test("provider errors end the run as error with the transcript saved", async () => {
   const spec = await loadAgent("good-agent", FIX);
   const r = await runAgent(spec, { task: "t", provider: new FakeProvider([]), naive: null, runsDir: tmp() });
