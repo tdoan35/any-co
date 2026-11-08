@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Group, panel } from "@/components/studio/studio-ui";
 import { forgetMemory, myProfiles } from "@/lib/registry";
+import { useWorking } from "@/lib/presence";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import type { ChatAgent } from "@/lib/mock/assistant";
 import { cn } from "@/lib/utils";
@@ -18,11 +19,17 @@ export const policyStyle = {
   blocked: "bg-destructive/10 text-destructive",
 } as const;
 
-/** Portrait for any chat agent: animated sprite when it has art, initial circle otherwise. */
-export function Portrait({ agent, working, className }: { agent: ChatAgent; working?: boolean; className?: string }) {
+/**
+ * Portrait for any agent: sprite when it has art, initial circle otherwise.
+ * `live` follows Weave presence (working while the agent has a run in flight); `working` forces it on.
+ * Opt-in, so lists that repeat a face (Pulse rows, run timelines) stay still.
+ */
+export function Portrait({ agent, working, live, className }: { agent: ChatAgent; working?: boolean; live?: boolean; className?: string }) {
+  const present = useWorking(agent.id);
+  const busy = !!working || (!!live && present);
   return agent.avatar
-    ? <AgentAvatar avatar={agent.avatar} name={agent.name} working={working} className={className} />
-    : <InitialAvatar initial={agent.name[0]} name={agent.name} tone={agent.tone} className={cn("text-4xl", className)} />;
+    ? <AgentAvatar avatar={agent.avatar} name={agent.name} working={busy} className={className} />
+    : <InitialAvatar initial={agent.name[0]} name={agent.name} tone={agent.tone} working={busy} className={cn("text-4xl", className)} />;
 }
 
 export const ring = "border-[3px] border-foreground/30";
@@ -98,6 +105,7 @@ export function AgentHero({ agents, index, onIndexChange, onProfileToggle, switc
           <motion.div layoutId={portraitLayoutId(agent.id)} transition={FLY} className="rounded-full">
             <Portrait
               agent={agent}
+              live
               className={cn("relative size-28 cursor-pointer transition-[transform,filter] duration-300 group-hover:scale-105 group-hover:animate-[avatar-glow_1.8s_ease-in-out_infinite] group-focus-visible:animate-[avatar-glow_1.8s_ease-in-out_infinite] group-focus-visible:border-foreground/60", ring, incognito && veil)}
             />
           </motion.div>
@@ -253,7 +261,7 @@ function ProfileTabs({ agent }: { agent: ChatAgent }) {
   return (
     <Tabs key={agent.id} defaultValue="profile" className="min-h-0 flex-1 gap-0">
       <header className="flex shrink-0 flex-col items-center gap-3 p-6 pb-4 pt-4 text-center">
-        <Portrait agent={agent} className={cn("size-24", ring)} />
+        <Portrait agent={agent} live className={cn("size-24", ring)} />
         <div>
           <h2 className="text-lg font-semibold leading-none">{agent.name}</h2>
           <p className="mt-1.5 text-sm text-muted-foreground">{agent.role}</p>

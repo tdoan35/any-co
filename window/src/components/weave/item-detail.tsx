@@ -1,46 +1,19 @@
 import { Link } from "react-router";
 import { useEffect, useState } from "react";
-import { AlarmClock, ArrowRight, Check, Hourglass, Info, Lock, Quote, Undo2 } from "lucide-react";
+import { AlarmClock, ArrowRight, Check, Hourglass, Info, Quote, Undo2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { policyStyle } from "@/components/chat/assistant-hero";
-import { api } from "@/lib/api";
-import type { ApprovalItem, EscalationItem, FindingItem, InboxItem, ItemAction, ProposalItem, QuestionItem, ResultItem } from "@/lib/mock/weave";
+import { api, httpMode } from "@/lib/api";
+import { approvalTitle } from "@/lib/approval-gate";
+import type { EscalationItem, FindingItem, InboxItem, ItemAction, ProposalItem, QuestionItem, ResultItem } from "@/lib/mock/weave";
 import type { Report } from "@fabric/contracts";
 import { weave, type ItemState, type WeaveState } from "@/lib/weave-store";
 import { cn } from "@/lib/utils";
 import { ago, fmtTime, waited } from "./format";
 import { Face, KIND, NameRole, ProjectChip, RunChip, agentOf } from "./parts";
 import { SnoozeMenu } from "./inbox";
+import { ApprovalBody } from "./approval-body";
 
 const box = "rounded-xl border border-foreground/10 bg-background/60";
-
-function ApprovalBody({ item }: { item: ApprovalItem }) {
-  return (
-    <>
-      <div className={box}>
-        <div className="flex items-center gap-2 border-b border-foreground/10 px-3 py-2">
-          <code className="font-mono text-xs font-medium">{item.tool}</code>
-          <span className={cn("rounded-full px-1.5 py-px text-[10px] font-medium", policyStyle[item.policy])}>{item.policy}</span>
-          <span className="min-w-0 truncate text-[11px] text-muted-foreground">{item.policyNote}</span>
-        </div>
-        <dl className="grid grid-cols-[64px_minmax(0,1fr)] gap-x-3 gap-y-1.5 px-3 py-2.5 text-xs">
-          {item.preview.map((r) => (
-            <div key={r.label} className="contents">
-              <dt className="text-muted-foreground">{r.label}</dt>
-              <dd className="break-words">{r.value}</dd>
-            </div>
-          ))}
-        </dl>
-        {item.excerpt && <p className="border-t border-foreground/10 px-3 py-2.5 text-xs leading-relaxed text-muted-foreground">{item.excerpt}</p>}
-      </div>
-      {item.gated && (
-        <p className="flex gap-2 rounded-lg bg-foreground/5 px-3 py-2 text-xs text-muted-foreground">
-          <Lock className="mt-0.5 size-3.5 shrink-0" />{item.gated}
-        </p>
-      )}
-    </>
-  );
-}
 
 function QuestionBody({ item }: { item: QuestionItem }) {
   return (
@@ -141,9 +114,9 @@ function ResultBody({ item }: { item: ResultItem }) {
   );
 }
 
-function Body({ item }: { item: InboxItem }) {
+function Body({ item, open }: { item: InboxItem; open: boolean }) {
   switch (item.kind) {
-    case "approval": return <ApprovalBody item={item} />;
+    case "approval": return <ApprovalBody item={item} open={open} live={httpMode} />;
     case "question": return <QuestionBody item={item} />;
     case "escalation": return <EscalationBody item={item} />;
     case "proposal": return <ProposalBody item={item} />;
@@ -182,9 +155,12 @@ function Actions({ item }: { item: InboxItem }) {
       )}
       <div className="flex flex-wrap items-center gap-2">
         {buttons.map((a) => <ActionButton key={a.id} item={item} action={a} />)}
-        <SnoozeMenu item={item}>
-          <Button size="sm" variant="ghost" className="ml-auto text-muted-foreground"><AlarmClock />Snooze</Button>
-        </SnoozeMenu>
+        {/* Snooze is browser-local state; live, it would hide a real request without telling the studio. */}
+        {!httpMode && (
+          <SnoozeMenu item={item}>
+            <Button size="sm" variant="ghost" className="ml-auto text-muted-foreground"><AlarmClock />Snooze</Button>
+          </SnoozeMenu>
+        )}
       </div>
     </div>
   );
@@ -223,23 +199,24 @@ export function ItemDetail({ item, st, last }: { item: InboxItem; st: ItemState;
           <ProjectChip name={item.project} />
           {item.run && <RunChip run={item.run} />}
         </div>
-        <h2 className="text-lg font-semibold leading-snug tracking-tight">{item.title}</h2>
+        <h2 className="text-lg font-semibold leading-snug tracking-tight">{item.kind === "approval" ? approvalTitle(item) : item.title}</h2>
         {st.status === "open" && item.blocking && (
           <p className="flex items-center gap-2 rounded-lg bg-warn-soft px-3 py-2 text-xs text-warn">
             <Hourglass className="size-3.5 shrink-0" />
             Blocks {item.blocking.step}. {agentOf(item.blocking.agentId).name} has been waiting {waited(item.blocking.since)}.
           </p>
         )}
-        <Body item={item} />
+        <Body item={item} open={st.status === "open"} />
         <p className="flex gap-2 text-xs text-muted-foreground">
           <Info className="mt-0.5 size-3.5 shrink-0" />
           <span><span className="font-medium text-foreground/80">Why you're seeing this.</span> {item.why}</span>
         </p>
-        <div className="border-t border-foreground/10 pt-4">
+        {/* Live approvals have no window actions (decided in the terminal), so the empty action bar goes. */}
+        {(st.status !== "open" || item.actions.length > 0 || !httpMode) && <div className="border-t border-foreground/10 pt-4">
           {st.status === "open"
             ? <Actions item={item} />
             : <Resolved item={item} st={st} canUndo={last?.itemId === item.id} />}
-        </div>
+        </div>}
       </article>
     </div>
   );

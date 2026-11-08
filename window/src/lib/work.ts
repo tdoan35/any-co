@@ -74,6 +74,9 @@ export const addSeconds = (iso: string, s: number) => new Date(new Date(iso).get
 export const teamById = (id: string) => id === "dana" ? danaErrandOwner : studioTeams().find((t) => t.id === id)!;
 /** The explicit lead, else the first member (teams from the studio's agent specs have no lead). */
 export const leadOf = (team: StudioTeam) => (team.members.find((m) => m.lead) ?? team.members[0]).agentId;
+/** The face for a loop. Live, a run is one agent's, so show that agent (the studio's teams have no real
+ *  lead and the first member would be wrong); mock, a loop is a team's, so show its lead. */
+export const runnerOf = (team: StudioTeam, run?: Run) => (httpMode && run?.segments[0]?.agentId) || leadOf(team);
 export const reworkOf = (run: Run) => run.segments.filter((s) => s.kind === "bounce").length;
 
 export function summarize(task: Task, runs: Run[], weave: WeaveState): TaskSummary {

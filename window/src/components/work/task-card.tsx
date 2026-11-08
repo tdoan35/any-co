@@ -3,7 +3,7 @@ import { motion } from "motion/react";
 import { FileText, Folder, Repeat2 } from "lucide-react";
 import { Face, agentOf } from "@/components/weave/parts";
 import type { Project } from "@/lib/mock/sessions";
-import { leadOf, loopState, when, type TaskSummary } from "@/lib/work";
+import { loopState, runnerOf, when, type TaskSummary } from "@/lib/work";
 import { cn } from "@/lib/utils";
 import { AskFlag, FaceStack, StatePill, StepDots, card } from "./parts";
 
@@ -13,7 +13,7 @@ import { AskFlag, FaceStack, StatePill, StepDots, card } from "./parts";
  * `lens` decides what the corner names: the team (on a project board) or the project (on a team board).
  */
 export function TaskCard({ s, lens, project }: { s: TaskSummary; lens: "project" | "team"; project?: Project }) {
-  const lead = leadOf(s.team);
+  const lead = runnerOf(s.team, s.loops.at(-1));
   const state = loopState(s);
   const loopCount = s.loops.length;
   const meta: string[] = [];

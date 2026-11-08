@@ -10,6 +10,9 @@
 //                         re-open; identical heading both times)
 //   direct navigation   → DirectLoadDetail (play: ?item= lands on the same detail,
 //                         same rail date, as repeated navigation)
+//   resize columns      → ResizePanes (separators: keys move, Enter resets)
+//   collapse columns    → CollapsePanes (strip keeps a count; expand restores)
+//   mid (900px)         → MidThreeColumn (rail stays a column)
 //   narrow + sheet      → NarrowRailSheet (play: sheet open/close, pick inside the
 //                         sheet, stacked detail open)
 //   keyboard flow       → covered in Inbox · "Composed screen · keyboard flow" (ANY-15)
@@ -37,7 +40,9 @@ const tooltipDecorator: Decorator = (Story) => (
 
 const VIEWPORTS = {
   wide: { name: "Wide · three column", styles: { width: "1600px", height: "1000px" } },
-  narrow: { name: "Narrow · stacked", styles: { width: "900px", height: "1200px" } },
+  // Columns follow the panel's width, not the viewport: 900px still fits three, 640px stacks.
+  mid: { name: "Mid · three column, compact inbox", styles: { width: "900px", height: "900px" } },
+  narrow: { name: "Narrow · stacked", styles: { width: "640px", height: "1200px" } },
 } as const;
 
 const meta = {
@@ -157,6 +162,70 @@ export const DirectLoadDetail: Story = {
 };
 
 // ---- narrow: stacked layout and the rail sheet ----
+
+/** Column borders are separators: arrow keys move them 16px, Enter resets to the default width. */
+export const ResizePanes: Story = {
+  name: "Wide · resize columns",
+  parameters: wide,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const user = userEvent.setup();
+    const inbox = await canvas.findByRole("separator", { name: "Resize inbox" });
+    const rail = canvas.getByRole("separator", { name: "Resize day rail" });
+    const section = canvasElement.querySelector<HTMLElement>('section[aria-label="Inbox"]')!;
+    inbox.focus();
+    await user.keyboard("{Enter}"); // start from the default whatever an earlier run stored
+    await waitFor(() => expect(inbox).toHaveAttribute("aria-valuenow", "300"));
+    await user.keyboard("{ArrowRight}");
+    await waitFor(() => expect(inbox).toHaveAttribute("aria-valuenow", "316"));
+    expect(Math.round(section.getBoundingClientRect().width)).toBe(316);
+    // The rail grows leftward: ArrowLeft widens it.
+    rail.focus();
+    await user.keyboard("{Enter}{ArrowLeft}");
+    await waitFor(() => expect(rail).toHaveAttribute("aria-valuenow", "304"));
+    await user.keyboard("{Enter}");
+    inbox.focus();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(inbox).toHaveAttribute("aria-valuenow", "300"));
+  },
+};
+
+/** Collapse buttons fold a side column to a strip that keeps its count; expanding restores it. */
+export const CollapsePanes: Story = {
+  name: "Wide · collapse columns",
+  parameters: wide,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const user = userEvent.setup();
+    const section = canvasElement.querySelector<HTMLElement>('section[aria-label="Inbox"]')!;
+    await user.click(await canvas.findByRole("button", { name: "Collapse inbox" }));
+    await waitFor(() => expect(Math.round(section.getBoundingClientRect().width)).toBe(44));
+    expect(canvas.queryByRole("heading", { name: "Inbox" })).toBeNull();
+    expect(canvas.queryByRole("separator", { name: "Resize inbox" })).toBeNull();
+    await user.click(canvas.getByRole("button", { name: "Collapse day rail" }));
+    await waitFor(() => expect(canvas.getByRole("button", { name: "Expand day rail" })).toHaveAttribute("aria-expanded", "false"));
+    // Expand both so later stories start from the default layout (state is remembered per viewer).
+    await user.click(canvas.getByRole("button", { name: "Expand inbox" }));
+    await user.click(canvas.getByRole("button", { name: "Expand day rail" }));
+    await waitFor(() => expect(canvas.getByRole("heading", { name: "Inbox" })).toBeInTheDocument());
+    expect(canvas.getByRole("separator", { name: "Resize day rail" })).toBeInTheDocument();
+  },
+};
+
+/** 900px (a small display or a narrow Electron window): the day rail stays a third column, no sheet. */
+export const MidThreeColumn: Story = {
+  name: "Mid · rail stays a column",
+  parameters: {
+    ...wide,
+    viewport: { defaultViewport: "mid", viewports: VIEWPORTS },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const aside = canvasElement.querySelector('aside[aria-label="Today"]')!;
+    await waitFor(() => expect(getComputedStyle(aside).display).not.toBe("none"));
+    expect(canvas.queryByRole("button", { name: "Your day" })).toBeNull();
+  },
+};
 
 /** Below the three-column breakpoints: the rail lives in a sheet, the detail stacks. */
 export const NarrowRailSheet: Story = {

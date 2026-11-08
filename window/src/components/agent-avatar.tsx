@@ -16,18 +16,21 @@ const loopStyle = ({ frames, fps }: Loop) => ({
  * - Plays forward then backward (alternate) so the loop has no visible seam.
  * - Both strips stay mounted (the inactive one display:none) so switching never waits on a download.
  * - Reduced motion: the strips are hidden and only the still shows.
+ * - Working: a pulsing ring in the run colour (globals.css `.avatar-working`); a still with no working
+ *   loop also breathes. Reduced motion keeps a steady ring.
  */
 export function AgentAvatar({ avatar, name, working = false, className }: { avatar: SpriteAvatar; name: string; working?: boolean; className?: string }) {
   const { strip, frames, fps } = avatar;
   const idle: Loop | undefined = strip && frames && fps ? { strip, frames, fps } : undefined;
   const busy = working && !!avatar.working;
+  const breathe = working && !avatar.working;
   const loops = [
     idle && { key: "idle", loop: idle, active: !busy },
     avatar.working && { key: "working", loop: avatar.working, active: busy },
   ].filter((l) => !!l);
   return (
-    <div className={cn("relative size-28 shrink-0 overflow-hidden rounded-full bg-ok-soft shadow-sm", className)} role="img" aria-label={working ? `${name}, working` : name}>
-      <img src={avatar.still} alt="" className="absolute inset-0 size-full object-cover" draggable={false} />
+    <div className={cn("relative size-28 shrink-0 overflow-hidden rounded-full bg-ok-soft shadow-sm", className, working && "avatar-working")} role="img" aria-label={working ? `${name}, working` : name}>
+      <img src={avatar.still} alt="" className={cn("absolute inset-0 size-full object-cover", breathe && "avatar-breathe")} draggable={false} />
       {loops.map(({ key, loop, active }) => (
         <img
           key={key} src={loop.strip} alt="" decoding="async" draggable={false} style={loopStyle(loop)}
@@ -39,12 +42,12 @@ export function AgentAvatar({ avatar, name, working = false, className }: { avat
 }
 
 /** Fallback when an agent has no art yet: a round initial that matches the portrait container. */
-export function InitialAvatar({ initial, name, tone, className }: { initial: string; name: string; tone: string; className?: string }) {
+export function InitialAvatar({ initial, name, tone, working = false, className }: { initial: string; name: string; tone: string; working?: boolean; className?: string }) {
   return (
     <div
-      className={cn("relative flex size-28 shrink-0 items-center justify-center overflow-hidden rounded-full font-semibold shadow-sm", tone, className)}
+      className={cn("relative flex size-28 shrink-0 items-center justify-center overflow-hidden rounded-full font-semibold shadow-sm", tone, className, working && "avatar-working")}
       role="img"
-      aria-label={name}
+      aria-label={working ? `${name}, working` : name}
     >
       <span className="text-[2.6em] leading-none">{initial}</span>
     </div>

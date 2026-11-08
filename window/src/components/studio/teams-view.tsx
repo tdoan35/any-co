@@ -440,7 +440,7 @@ function OrgNode({ agent, size, subtitle, emphasis, lead, compact, shared, state
   return (
     <div className={cn("flex flex-col items-center text-center", compact ? "w-[88px]" : "w-36")} title={state && s !== "idle" ? `${agent.name}: ${state.activity}` : agent.name}>
       <div className="relative">
-        <Portrait agent={agent} className={cn(size, emphasis || lead ? ring : "border-2 border-foreground/25", s === "working" && "ring-2 ring-ok/60")} />
+        <Portrait agent={agent} working={s === "working"} className={cn(size, emphasis || lead ? ring : "border-2 border-foreground/25")} />
         {lead && <Crown className="absolute -left-1 -top-1 size-4 rounded-full bg-background p-0.5 text-warn shadow-sm ring-1 ring-foreground/10" />}
         <span className={cn("absolute bottom-0 right-0 size-3 rounded-full ring-2 ring-background", DOT[s], s === "working" && "animate-pulse")} aria-label={s} />
       </div>

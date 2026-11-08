@@ -24,7 +24,7 @@ function PresenceFace({ p, onClick }: { p: Presence; onClick: () => void }) {
       <TooltipTrigger asChild>
         <button type="button" onClick={onClick} className="group flex w-14 flex-col items-center rounded-lg py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring">
           <span className={cn("relative flex shrink-0 rounded-full ring-2 ring-offset-2 ring-offset-transparent transition-transform group-hover:scale-105", s.ring)}>
-            <Face id={p.agentId} size="size-10" />
+            <Face id={p.agentId} size="size-10" live />
             <span className="absolute -bottom-0.5 -right-0.5 flex size-3 items-center justify-center rounded-full bg-background">
               <span className={cn("relative size-2 rounded-full", s.dot)}>
                 {p.state === "waiting" && <span aria-hidden className={cn("absolute inset-0 rounded-full animate-[dot-pulse_2.2s_ease-out_infinite] motion-reduce:hidden", s.dot)} />}

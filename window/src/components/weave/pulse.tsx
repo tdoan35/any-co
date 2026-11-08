@@ -68,7 +68,7 @@ function DanaBrief({ state, onSelectItem }: { state: WeaveState; onSelectItem: (
     <section className={cn(card, "p-4")}>
       <div className="flex items-center gap-3">
         {head
-          ? <Face id={head.id} size="size-10" />
+          ? <Face id={head.id} size="size-10" live />
           : <span className="flex size-10 shrink-0 items-center justify-center rounded-full border border-dashed border-foreground/25 text-muted-foreground"><Crown className="size-4" /></span>}
         <div className="min-w-0 flex-1 text-xs">
           {head ? <NameRole id={head.id} className="block text-sm" /> : <span className="block text-sm font-medium">Studio Head</span>}
@@ -253,10 +253,12 @@ function Divider({ children }: { children: React.ReactNode }) {
   );
 }
 
-export function Pulse({ state, filter, onFilter, onSelectItem, scrollTo }: {
+export function Pulse({ state, filter, onFilter, onSelectItem, scrollTo, animateLayout = true }: {
   state: WeaveState; filter: PulseFilter; onFilter: (f: PulseFilter) => void; onSelectItem: (id: string) => void;
   /** Set by the calendar; `n` changes on every pick so picking the same day scrolls again. */
   scrollTo: { day: string; n: number } | null;
+  /** Rows slide when new entries arrive; off while a column border is dragged, or they chase every pixel. */
+  animateLayout?: boolean;
 }) {
   useEffect(() => {
     if (scrollTo) document.getElementById(`pulse-day-${scrollTo.day}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -280,7 +282,7 @@ export function Pulse({ state, filter, onFilter, onSelectItem, scrollTo }: {
             <div className="space-y-3">
               <AnimatePresence initial={false}>
                 {shown.map((e) => (
-                  <motion.div key={e.id} layout="position" initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.25 }}>
+                  <motion.div key={e.id} layout={animateLayout ? "position" : false} initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.25 }}>
                     <Entry entry={e} onSelectItem={onSelectItem} />
                   </motion.div>
                 ))}
