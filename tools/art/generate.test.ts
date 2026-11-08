@@ -823,3 +823,11 @@ test("T19-4: every reported balance lands in art-credits.jsonl; the low-20% note
     assert.match((low[0] as { decision: string }).decision, /under 20% of today's first reading 10/);
   });
 });
+
+test("pixellab balance: an active generations subscription is the balance, not credits.usd (live shape, Nov 7)", async () => {
+  const { balance } = await import("./generate.ts");
+  const fetchImpl = (async () => new Response(JSON.stringify({ credits: { type: "usd", usd: 0.0 }, subscription: { type: "generations", status: "active", plan: "Tier 1", generations: 1934.0, total: 2000.0 } }), { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch;
+  assert.equal(await balance("pixellab", { env: { PIXELLAB_API_KEY: "k" }, fetchImpl }), 1934);
+  const noSub = (async () => new Response(JSON.stringify({ credits: { type: "usd", usd: 3.5 } }), { status: 200 })) as typeof fetch;
+  assert.equal(await balance("pixellab", { env: { PIXELLAB_API_KEY: "k" }, fetchImpl: noSub }), 3.5);
+});

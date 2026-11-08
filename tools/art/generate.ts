@@ -497,6 +497,11 @@ export async function balance(provider: ProviderName, opts: Omit<GenerateOptions
   const r = await httpJson(fetchImpl, `${base}/v2/balance`, { headers: { authorization: `Bearer ${key}` } }, deadline);
   if (r.status >= 400) return null;
   const b = r.body ?? {};
+  // A paid subscription is counted in generations (verified live Nov 7: {credits:{type:"usd",usd:0},
+  // subscription:{type:"generations",status:"active",generations:2000,total:2000}}): credits.usd stays 0 and must not
+  // read as "exhausted". Remaining generations are the balance then (T21 adds units + per-call usage).
+  const sub = b.subscription;
+  if (sub && sub.status === "active" && typeof sub.generations === "number") return sub.generations;
   for (const v of [b.credits?.usd, b.credits?.amount, b.credits, b.usd, b.balance]) if (typeof v === "number") return v;
   return null;
 }
