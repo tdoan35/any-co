@@ -28,6 +28,7 @@ export const Provider = z.discriminatedUnion("kind", [
       kind: z.literal("openai_compatible"),
       model: z.string().min(1), // provider's own model id
       base_url_env: z.string().regex(/^[A-Z][A-Z0-9_]*$/),
+      base_url_default: z.string().url().optional(), // used when base_url_env is unset or empty (e.g. https://api.openai.com/v1)
       api_key_env: z.string().regex(/^[A-Z][A-Z0-9_]*$/),
       usd_per_mtok: z.object({ input: z.number().nonnegative(), output: z.number().nonnegative() }).strict(),
     })

@@ -10,7 +10,7 @@ implements the contracts; knows nothing about the game itself.
              [--ack-timeout-ms N] [--ready-timeout-ms N] [--end-wait-ms N]
     qa check --dir <qa dir> [--max-entities N] [--identical-dumps N] [--tick-rate N]
     qa determinism --cmd '<json argv>' --dir <game dir> --seed N --ticks N [as smoke]
-    qa export-check --dir <game dir> [--dist <dir>/dist] [--frames 90] [--timeout-ms N] [--run true|false]
+    qa export-check --dir <game dir> [--dist <dir>/dist] [--frames 90] [--timeout-ms N] [--run true|false] [--save-frames N --save-dir <dir>]
 
 - `smoke` — clears stale `qa/` outputs, launches `--cmd` (argv array, never a shell string) in
   `--dir` with the contract flags (`--qa --seed --autoplay --policy? --exit-after-ticks`), waits
@@ -37,7 +37,9 @@ implements the contracts; knows nothing about the game itself.
   central half, and ≥ 8 colours. Why movie mode, not the screenshot command: the qa/ capture
   scenes are excluded from exports, so the shipped pack can't answer `screenshot`. The movie
   writer is the engine's own capture of the frame a player sees. Every project-dir layer can
-  pass on a pack that ships without its scripts; this one can't.
+  pass on a pack that ships without its scripts; this one can't. `--save-frames N --save-dir D`
+  (capability: `save_frames`, into `media/export-frames/<pack>/` in the workspace) copies N evenly
+  spaced frames, always including the last, for UI review with image_view (T33).
 
 Exit codes: `0` pass, `1` invariant failure — including an unclean process end, which is its
 own `process_exit_clean` check —, `2` harness/usage error (ready/ack timeout on a live

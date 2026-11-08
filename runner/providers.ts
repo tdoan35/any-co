@@ -203,25 +203,38 @@ export class OpenAICompatibleProvider implements Provider {
     this.label = `openai:${model}`;
   }
 
+  /** OpenAI's current models refuse `max_tokens` on Chat Completions and want `max_completion_tokens`; most other
+   *  gateways take `max_tokens`. Start with max_tokens and switch for good on that exact 400 (a refused request is free). */
+  private completionTokens = false;
+
   async complete(req: ModelRequest): Promise<ModelReply> {
-    const payload = JSON.stringify({
+    const payloadFor = () => JSON.stringify({
       model: this.model,
-      max_tokens: req.max_tokens,
+      ...(this.completionTokens ? { max_completion_tokens: req.max_tokens } : { max_tokens: req.max_tokens }),
       messages: toOpenAIMessages(req.system, req.messages),
       ...(req.tools.length
         ? { tools: req.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.input_schema } })) }
         : {}),
     });
-    if (process.env.ANYCO_PROVIDER_DEBUG_DIR) writeFileSync(path.join(process.env.ANYCO_PROVIDER_DEBUG_DIR, `req-${Date.now()}.json`), payload); // no key in the body
     const res = await withRetry(async () => {
-      const r = await fetch(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${this.apiKey}` },
-      body: payload,
-      signal: AbortSignal.timeout(300_000),
-      });
-      if (!r.ok) throw Object.assign(new Error(`${this.label} HTTP ${r.status}: ${(await r.text()).slice(0, 500)}`), { status: r.status });
-      return r;
+      for (;;) {
+        const payload = payloadFor();
+        if (process.env.ANYCO_PROVIDER_DEBUG_DIR) writeFileSync(path.join(process.env.ANYCO_PROVIDER_DEBUG_DIR, `req-${Date.now()}.json`), payload); // no key in the body
+        const r = await fetch(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${this.apiKey}` },
+          body: payload,
+          signal: AbortSignal.timeout(300_000),
+        });
+        if (r.ok) return r;
+        const text = await r.text();
+        if (r.status === 400 && !this.completionTokens && /max_completion_tokens/.test(text) && /max_tokens/.test(text)) {
+          this.completionTokens = true;
+          console.warn(`  ${this.label}: the endpoint wants max_completion_tokens; resending with it`);
+          continue;
+        }
+        throw Object.assign(new Error(`${this.label} HTTP ${r.status}: ${text.slice(0, 500)}`), { status: r.status });
+      }
     }, this.label);
     // OpenAI chat-completions reply; parsed once, fields read from the typed shape.
     interface ChatChoiceMessage {
@@ -343,8 +356,8 @@ export function providerFor(spec: AgentSpec, client: NaiveClient | null, modelOv
     if (!client) throw new Error("naive provider needs a Naïve client");
     return new NaiveProvider(client, modelOverride ?? spec.model, spec.window);
   }
-  const baseUrl = process.env[p.base_url_env];
+  const baseUrl = process.env[p.base_url_env]?.trim() || p.base_url_default;
   const apiKey = process.env[p.api_key_env];
-  if (!baseUrl || !apiKey) throw new Error(`${spec.name}: set ${p.base_url_env} and ${p.api_key_env} in .env`);
+  if (!baseUrl || !apiKey) throw new Error(`${spec.name}: set ${baseUrl ? "" : `${p.base_url_env} and `}${p.api_key_env} in .env`);
   return new OpenAICompatibleProvider(baseUrl, apiKey, modelOverride ?? p.model, p.usd_per_mtok);
 }
