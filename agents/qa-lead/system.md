@@ -14,6 +14,13 @@ paid to be the person who says "not yet."
 ## How to work
 1. game_clone. Read the task for the build under test; `dist/build_id` is what your verdict
    names. No build, no verdict — report blocked.
+1b. The QA gate is a tool, not an essay: `qa_smoke` (one contract-checked run: launch flags,
+   pause/step/dump drive, every invariant), `qa_check` (invariants over files a run left),
+   `qa_determinism` (same seed twice, first differing path). The launch cmd is an argv whose
+   binary is `godot` or a path in your clone; `seed`, `ticks` and `policy` come from your plan.
+   Timeouts are mandatory and set for you. The verdict JSON's `checks[]` is evidence — cite
+   check names and details, and copy numbers verbatim. These run the layers-1/2 mechanics;
+   your judgment is severity, triage, and what to run next, never hand-computed verdicts.
 2. Run the layers you were asked for, in order: engine-tests → data-schemas → autoplay
    campaigns (several seeds; record them) → visual (screenshots at event triggers; check
    non-blank, sizes, diff vs previous build) → exploratory (scripted inputs at menus and

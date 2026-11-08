@@ -60,6 +60,12 @@ export const CAPABILITIES = {
     local: true,
     note: "Local: per-run clone at runs/<id>/workspace/game, branch agent/<name>; only the Tech Lead merges. Hosted: the harness clones the repo into the agent's computer.",
   },
+  qa_harness: {
+    summary: "Run the QA contract driver on your game clone: qa_smoke / qa_check / qa_determinism (contract flags, invariants, verdict JSON)",
+    naive: ["bash"],
+    local: true,
+    note: "Local: wraps tools/qa against <workspace>/game; argv-only launch command (godot or a path in the clone); timeouts mandatory. Read-only for the clone except its own qa/ outputs.",
+  },
   // ----- gated sends (T7): every send is ask-gated by the spec and ledgered via the approval gate -----
   itch_push: {
     summary: "Push a built dist/ channel to itch.io with butler (dry-run by default; a real push needs the operator's approval)",

@@ -937,6 +937,126 @@ const siteStatus: ToolImpl = {
   },
 };
 
+// ---------- qa_harness: the QA contract driver (tools/qa) against this run's game clone ----------
+// The launch command comes from the agent, validated to an argv of `godot` or a path inside the
+// clone (never a shell string); timeouts are mandatory and come from the tool inputs.
+
+/** Validate a game launch argv: strings only, first element `godot` (PATH) or inside the clone. */
+export function validateLaunchArgv(argv: unknown, clone: string): string[] {
+  if (!Array.isArray(argv) || argv.length === 0 || !argv.every((a) => typeof a === "string" && a.length > 0)) {
+    throw new Error("cmd must be a non-empty string[] argv (no shell strings)");
+  }
+  const bin = argv[0]!;
+  if (bin === "godot") return argv;
+  const resolved = path.resolve(clone, bin);
+    const inside = resolved === clone || resolved.startsWith(clone + path.sep);
+  if (!inside) throw new Error(`launch binary must be "godot" or a path inside the clone, got ${bin}`);
+  if (!existsSync(resolved)) throw new Error(`launch binary not found: ${bin}`);
+  return argv;
+}
+
+type QaMode = "smoke" | "check" | "determinism";
+
+async function runQa(mode: QaMode, input: Record<string, unknown>, ctx: ToolContext): Promise<{ content: string; is_error?: boolean }> {
+  try {
+    const clone = path.join(ctx.workspace, "game");
+    if (!existsSync(path.join(clone, "project.godot")) && mode !== "check") {
+      throw new Error(`no game clone at ${path.relative(ctx.workspace, clone)}; call game_clone first`);
+    }
+    const cli: Record<string, unknown> = {};
+    const numArg = (k: string, v: unknown): number => {
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < 0) throw new Error(`${k} must be a non-negative number`);
+      return n;
+    };
+    if (mode !== "check") {
+      const cmd = validateLaunchArgv(input["cmd"], clone);
+      cli["cmd"] = JSON.stringify(cmd);
+      cli["dir"] = clone;
+      cli["seed"] = numArg("seed", input["seed"] ?? 0);
+      cli["ticks"] = numArg("ticks", input["ticks"] ?? 0);
+      if (input["policy"] !== undefined) cli["policy"] = String(input["policy"]);
+    } else {
+      const dir = input["qa_dir"];
+      cli["dir"] = typeof dir === "string" ? resolveInWorkspace(ctx.workspace, path.join("game", dir, "qa")) : path.join(clone, "qa");
+    }
+    // Mandatory caps (ms): a QA run can't hang the agent loop.
+    cli["ack-timeout-ms"] = numArg("ack_timeout_ms", input["ack_timeout_ms"] ?? 30_000);
+    if (input["ready_timeout_ms"] !== undefined) cli["ready-timeout-ms"] = numArg("ready_timeout_ms", input["ready_timeout_ms"]);
+    cli["end-wait-ms"] = numArg("end_wait_ms", input["end_wait_ms"] ?? 120_000);
+    if (input["step_frames"] !== undefined) cli["step-frames"] = numArg("step_frames", input["step_frames"]);
+    if (input["max_entities"] !== undefined) cli["max-entities"] = numArg("max_entities", input["max_entities"]);
+    if (input["identical_dumps"] !== undefined) cli["identical-dumps"] = numArg("identical_dumps", input["identical_dumps"]);
+    if (input["tick_rate"] !== undefined) cli["tick-rate"] = numArg("tick_rate", input["tick_rate"]);
+
+    const args = Object.entries(cli).flatMap(([k, v]) => [`--${k}`, String(v)]);
+    // tsx resolves from the cwd; the child runs in the clone, so import the loader by path.
+    const tsxLoader = fileURLToPath(import.meta.resolve("tsx"));
+    const proc = await execText(process.execPath, ["--import", `file://${tsxLoader}`, path.join(ROOT, "tools", "qa", "qa.ts"), mode, ...args], 10 * 60_000);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(proc.out);
+    } catch {
+      throw new Error(`qa ${mode} produced no JSON (exit ${proc.code}): ${proc.err.slice(-400)}`);
+    }
+    return { content: clip(JSON.stringify(parsed), MAX_RESULT_CHARS) };
+  } catch (e) {
+    return { content: clip(`qa_${mode} failed: ${errText(e)}`, 2000), is_error: true };
+  }
+}
+
+const commonFields = {
+  ack_timeout_ms: z.number().int().positive().max(10 * 60_000).optional(),
+  ready_timeout_ms: z.number().int().positive().max(10 * 60_000).optional(),
+  end_wait_ms: z.number().int().positive().max(30 * 60_000).optional(),
+  max_entities: z.number().int().positive().optional(),
+  identical_dumps: z.number().int().positive().max(100).optional(),
+  tick_rate: z.number().positive().optional(),
+};
+
+const qaSmoke: ToolImpl = {
+  description:
+    "Run one QA smoke on your game clone (game_clone first): launch + contract flags, pause/step/dump drive, every invariant. Returns the verdict JSON {ok, exitCode, checks[], error?, end?}; exitCode 0 pass, 1 invariant failure, 2 harness error.",
+  input: z
+    .object({
+      cmd: z.array(z.string()).min(1).describe("Game launch argv, e.g. [\"godot\",\"--headless\",\"res://qa/driver.tscn\",\"--\"]"),
+      seed: z.number().int().optional(),
+      ticks: z.number().int().nonnegative().optional(),
+      policy: z.string().optional(),
+      step_frames: z.number().int().positive().optional(),
+      ...commonFields,
+    })
+    .strict(),
+  async run(input, ctx) {
+    return runQa("smoke", input, ctx);
+  },
+};
+
+const qaCheck: ToolImpl = {
+  description:
+    "Offline QA: run the invariants over the qa/ files a finished run left in your clone (qa/state.json, events.jsonl, run_summary.json). No game launch.",
+  input: z
+    .object({
+      qa_dir: z.string().optional().describe("qa dir inside the clone; default the clone's qa/"),
+      ...((({ ack_timeout_ms, ready_timeout_ms, end_wait_ms, ...rest }) => rest)(commonFields) as object),
+    })
+    .strict(),
+  async run(input, ctx) {
+    return runQa("check", input, ctx);
+  },
+};
+
+const qaDeterminism: ToolImpl = {
+  description:
+    "Run the QA smoke twice with the same seed/policy and diff the final state dumps (first differing path). Same inputs as qa_smoke.",
+  input: qaSmoke.input,
+  async run(input, ctx) {
+    return runQa("determinism", input, ctx);
+  },
+};
+
+const qaHarnessTools = { qa_smoke: qaSmoke, qa_check: qaCheck, qa_determinism: qaDeterminism };
+
 /** Each capability provides one or more model-facing tools. */
 export const IMPLS: Record<CapabilityName, Record<string, ToolImpl>> = {
   catalog_query: catalogTools,
@@ -949,6 +1069,7 @@ export const IMPLS: Record<CapabilityName, Record<string, ToolImpl>> = {
   workspace_read: { workspace_read: workspaceRead },
   workspace_write: { workspace_write: workspaceWrite },
   game_repo: gameRepoTools,
+  qa_harness: qaHarnessTools,
   art_tools: artTools,
   itch_push: { itch_push: itchPush },
   itch_status: { itch_status: itchStatus },
