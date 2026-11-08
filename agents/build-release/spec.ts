@@ -47,5 +47,5 @@ export default defineAgent({
       notes: z.string().max(500).describe("Build quirks, size worries, export warnings worth knowing"),
     })
     .strict(),
-  limits: { max_turns: 30, max_output_tokens: 8192 },
+  limits: { max_turns: 60, max_output_tokens: 8192 }, // Nov 8: site assembly + link check + deploy ran out of 30 turns
 });
