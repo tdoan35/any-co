@@ -39,8 +39,8 @@ const entry = (
 const passGate = { uniqueColors: 24, paletteOk: true, outlinePixels: 3, snapOk: true, alphaRatio: 0.18, duplicates: 0 };
 const failGate = { uniqueColors: 260, paletteOk: false, outlinePixels: 91, snapOk: false, alphaRatio: 0.02, duplicates: 4 };
 
-/** Demo repos: names here are fixture-only; live repo names always come from the API. */
-export const galleryRepos = ["demo-repo"];
+/** Demo repos (goal 4: one studio, two games): names are fixture-only; live repo names always come from the API. */
+export const galleryRepos = ["demo-repo", "other-demo"];
 
 export const galleryEntries: ArtGalleryEntry[] = [
   entry("sprite-hero", "pixellab-c1.png", "pixellab", "accepted", "On-palette, clean outline, snaps to the grid.", passGate, "run-a1", 12),

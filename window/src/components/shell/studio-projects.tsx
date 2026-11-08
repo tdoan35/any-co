@@ -1,13 +1,18 @@
-// Sidebar Projects section, live mode (sidebar brief): one folder per studio's game.
-// - Folder names come from the studios' adapters (repo slug, title-cased — see
-//   lib/studio-projects.ts); the window itself carries no game names. A studio with no
-//   repo yet shows its configured label instead.
-// - The active studio's folder is open, marked active, and lists its latest runs from the
-//   registry store (fetched at startup). The other studios' data is not loaded, so their
+// Sidebar Projects section, live mode (goal 4: one studio, two projects).
+// - One folder per repo the studio's adapter reports in GET /api/art-gallery `repos`
+//   (see lib/studio-projects.ts); the window itself carries no game names — folder names
+//   are the slug title-cased. A studio with no repo yet shows its configured label.
+// - Each game folder lists that game's recent runs (`run.game === slug`). Runs without a
+//   game (the Studio Head, Greenlight — or an older adapter that predates Run.game) go
+//   under the studio's own folder, after the games, and only when there are any.
+// - The active studio's folders are open and marked active, listing runs from the
+//   registry store (fetched at startup). Other studios' data is not loaded, so their
 //   folders only offer "Switch to view".
 // - A click switches studio through the same switchStudio() the wordmark menu uses, then
 //   opens the Work board: switching remounts the app (main.tsx keys the router on the
 //   studio), and the fresh router boots from the URL, so the board's path is staged first.
+// - The per-studio tag only appears when more than one studio is configured: a
+//   single-studio window reads as one company (goal 4), no switcher, no tags.
 import { useState } from "react";
 import { Link, useNavigate } from "react-router";
 import { ChevronRight, Folder, FolderOpen, SquareKanban } from "lucide-react";
@@ -27,9 +32,10 @@ function GameFolder({ game, active, tagged, onOpen }: {
 }) {
   const [open, setOpen] = useState(active);
   useRegistry(); // the active folder's runs come from the store; re-render when it changes
-  // The studio's latest loops, newest first — the few items the open folder lists.
+  // This folder's latest loops, newest first — a game folder keeps only its own runs
+  // (run.game === slug); the studio folder keeps the studio-level ones (game null).
   const runs: Run[] = active
-    ? [...workRuns()].sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, 4)
+    ? [...workRuns()].filter((r) => (r.game ?? null) === (game.slug ?? null)).sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, 4)
     : [];
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
@@ -77,13 +83,26 @@ function GameFolder({ game, active, tagged, onOpen }: {
   );
 }
 
-/** The Projects section in live mode: one folder per studio's game, in config order. */
+/** The Projects section in live mode: one folder per game repo, per configured studio. */
 export function StudioProjects({ fetchGallery }: { fetchGallery?: GalleryFetcher }) {
   const games = useStudioProjects(fetchGallery);
-  const { studio } = useStudio();
+  const { studios, studio } = useStudio();
+  useRegistry(); // the studio folder appears only once studio-level runs arrive
   const navigate = useNavigate();
   // Single-studio mode has no selected studio; its one implicit entry is the active one.
   const activeId = studio?.id ?? games[0]?.studio.id;
+  // Studio-level runs need a folder of their own — unless the studio's fallback label
+  // folder already plays that role (no repos reported).
+  const active = games.find((g) => g.studio.id === activeId);
+  const studioFolder = active?.slug && workRuns().some((r) => !r.game)
+    ? { studio: active.studio, name: active.studio.label }
+    : undefined;
+  const folders = [...games];
+  if (studioFolder) {
+    let last = -1;
+    folders.forEach((g, i) => { if (g.studio.id === activeId) last = i; });
+    folders.splice(last + 1, 0, studioFolder);
+  }
   const openBoard = (target: Studio) => {
     if (activeId !== undefined && target.id !== activeId) {
       // Stage the board's URL first: the router remounts on the switch and boots from it.
@@ -95,8 +114,8 @@ export function StudioProjects({ fetchGallery }: { fetchGallery?: GalleryFetcher
   };
   return (
     <SidebarMenu>
-      {games.map((game) => (
-        <GameFolder key={game.studio.id} game={game} tagged={games.length > 1} active={game.studio.id === activeId} onOpen={openBoard} />
+      {folders.map((game) => (
+        <GameFolder key={`${game.studio.id}:${game.slug ?? ""}`} game={game} tagged={studios.length > 1} active={game.studio.id === activeId} onOpen={openBoard} />
       ))}
     </SidebarMenu>
   );
