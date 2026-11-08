@@ -152,19 +152,21 @@ export function recordCredit(file: string, line: CreditLine, alreadyNoted: (ref:
 // ---------- gallery index: anchor winners, regeneration counts ----------
 
 /** A human-approved redo (T39): the asset's allowance restarts at the count it had when granted. */
-export interface RedoGrant { ts: string; by: string; why: string; at_count: number; approval?: string }
+export interface RedoGrant { ts: string; by: string; why: string; at_count: number; at_comfy_count?: number; approval?: string }
 
 export interface Gallery {
   anchors: Record<string, { provider: ProviderName; ts: string; run_id: string; why?: string }>;
   generations: Record<string, number>;
   redos?: Record<string, RedoGrant[]>;
+  /** Free/local comfy generations per asset (T39c): their own counter, so free churn never eats the paid allowance. */
+  comfy_generations?: Record<string, number>;
 }
 /** Asset/anchor key: the game-repo path ("game/assets/x.png" and "assets/x.png" are one asset). */
 export const assetKey = (rel: string) => path.posix.normalize(rel.replace(/\\/g, "/")).replace(/^(\.\/)?game\//, "");
 
 export const readGallery = (file: string): Gallery => {
   const g = readJson<Partial<Gallery>>(file, {});
-  return { anchors: g.anchors ?? {}, generations: g.generations ?? {}, redos: g.redos ?? {} };
+  return { anchors: g.anchors ?? {}, generations: g.generations ?? {}, redos: g.redos ?? {}, comfy_generations: g.comfy_generations ?? {} };
 };
 
 export function recordAnchorWinner(file: string, anchor: string, provider: ProviderName, run_id: string, why?: string, now = new Date()) {
@@ -186,35 +188,61 @@ export function countGeneration(file: string, out: string): number {
   return g.generations[k];
 }
 
-/** Paid generations this asset may still use: 1 + MAX_REGENERATIONS since its last human redo grant (or ever). */
-export function generationsUsedSinceRedo(file: string, out: string): number {
+/** Which per-asset counter a call uses (T39c): paid providers (pixellab, retrodiffusion) or the free local comfy lab. */
+export type GenCounter = "paid" | "comfy";
+
+/** Default comfy allowance per out path: 1 + 6. Free, but still capped so one asset can't churn forever. */
+export const COMFY_REGEN_CAP_DEFAULT = 7;
+
+/** COMFY_REGEN_CAP (total comfy generations per out path, ≥ 1), default 7; a malformed value is an error. */
+export function comfyRegenCap(env: Record<string, string | undefined> = process.env): number {
+  const raw = env.COMFY_REGEN_CAP?.trim();
+  if (!raw) return COMFY_REGEN_CAP_DEFAULT;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > 100) throw new Error(`COMFY_REGEN_CAP must be an integer from 1 to 100 (total comfy generations per out path), got "${raw}"`);
+  return n;
+}
+
+/** The cap for a counter: paid 1 + MAX_REGENERATIONS; comfy COMFY_REGEN_CAP. */
+export const capFor = (kind: GenCounter, env: Record<string, string | undefined> = process.env) => (kind === "paid" ? 1 + MAX_REGENERATIONS : comfyRegenCap(env));
+export const counterFor = (provider: ProviderName): GenCounter => (provider === "comfy" ? "comfy" : "paid");
+
+const countsOf = (g: Gallery, kind: GenCounter): Record<string, number> => (kind === "paid" ? g.generations : (g.comfy_generations ??= {}));
+const baseOf = (g: Gallery, k: string, kind: GenCounter) => {
+  const last = g.redos?.[k]?.at(-1);
+  return (kind === "paid" ? last?.at_count : last?.at_comfy_count) ?? 0;
+};
+
+/** Generations this asset has used on a counter since its last human redo grant (or ever). */
+export function generationsUsedSinceRedo(file: string, out: string, kind: GenCounter = "paid"): number {
   const g = readGallery(file);
   const k = assetKey(out);
-  const last = g.redos?.[k]?.at(-1);
-  return (g.generations[k] ?? 0) - (last?.at_count ?? 0);
+  return (countsOf(g, kind)[k] ?? 0) - baseOf(g, k, kind);
 }
 
 /**
- * Take one generation slot BEFORE the paid call (T39). Check and count happen in one synchronous step, so two
- * in-flight calls in this process cannot both pass a cap they jointly exceed (the "4 of 3" seen on Nov 7).
- * Returns the slot (1-based within the current allowance) or null when the cap is reached.
+ * Take one generation slot BEFORE the call (T39). Check and count happen in one synchronous step, so two in-flight
+ * calls in this process cannot both pass a cap they jointly exceed (the "4 of 3" seen on Nov 7). `kind` picks the
+ * counter (T39c). Returns the slot (1-based within the current allowance) or null when that cap is reached.
  */
-export function reserveGeneration(file: string, out: string): { slot: number; total: number } | null {
+export function reserveGeneration(file: string, out: string, kind: GenCounter = "paid", cap = capFor(kind)): { slot: number; total: number; kind: GenCounter; cap: number } | null {
   const g = readGallery(file);
   const k = assetKey(out);
-  const used = (g.generations[k] ?? 0) - (g.redos?.[k]?.at(-1)?.at_count ?? 0);
-  if (used >= 1 + MAX_REGENERATIONS) return null;
-  g.generations[k] = (g.generations[k] ?? 0) + 1;
+  const counts = countsOf(g, kind);
+  const used = (counts[k] ?? 0) - baseOf(g, k, kind);
+  if (used >= cap) return null;
+  counts[k] = (counts[k] ?? 0) + 1;
   writeAtomic(file, g);
-  return { slot: used + 1, total: g.generations[k] };
+  return { slot: used + 1, total: counts[k], kind, cap };
 }
 
 /** Give a reserved slot back: the call billed nothing (refused, exhausted, unavailable, floored, procedural). */
-export function releaseGeneration(file: string, out: string): void {
+export function releaseGeneration(file: string, out: string, kind: GenCounter = "paid"): void {
   const g = readGallery(file);
   const k = assetKey(out);
-  if ((g.generations[k] ?? 0) > 0) g.generations[k] -= 1;
-  if (g.generations[k] === 0) delete g.generations[k];
+  const counts = countsOf(g, kind);
+  if ((counts[k] ?? 0) > 0) counts[k] -= 1;
+  if (counts[k] === 0) delete counts[k];
   writeAtomic(file, g);
 }
 
@@ -222,7 +250,7 @@ export function releaseGeneration(file: string, out: string): void {
 export function grantRedo(file: string, out: string, info: { by: string; why: string; approval?: string }, now = new Date()): RedoGrant {
   const g = readGallery(file);
   const k = assetKey(out);
-  const grant: RedoGrant = { ts: now.toISOString(), by: info.by, why: info.why, at_count: g.generations[k] ?? 0, ...(info.approval ? { approval: info.approval } : {}) };
+  const grant: RedoGrant = { ts: now.toISOString(), by: info.by, why: info.why, at_count: g.generations[k] ?? 0, at_comfy_count: g.comfy_generations?.[k] ?? 0, ...(info.approval ? { approval: info.approval } : {}) };
   g.redos = g.redos ?? {};
   g.redos[k] = [...(g.redos[k] ?? []), grant];
   writeAtomic(file, g);
@@ -236,7 +264,7 @@ export function outPathProblem(out: string): string | null {
   const norm = path.posix.normalize(out.replace(/\\/g, "/")).replace(/^\.\//, "");
   const base = path.posix.basename(norm);
   if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]*\.png$/i.test(base) || base.toLowerCase() === ".png")
-    return `out "${out}" has no real file name (want e.g. game/assets/sprites/hero.png): every asset needs its own name, or its generations are counted together`;
+    return `out "${out}" has no file name. Fix: out must end in <name>.png, e.g. game/assets/sprites/hero.png (letters, digits, _ . -; no spaces). Retrying the same out is refused the same way`;
   if (!norm.startsWith("game/assets/"))
     return `out "${out}" is not under the game clone's assets/ (want game/assets/<path>.png): only manifest-listed assets are generated`;
   return null;

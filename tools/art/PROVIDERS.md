@@ -189,7 +189,8 @@ called. The `art_generate` capability (runner/tools/impl.ts over tools/art/credi
   `{exhausted: "all", fallback: "procedural"}` at zero cost: the Art Director's ladder floor.
 - **Conserve**: bake-offs are for anchors; `art_anchor_winner` records the winner in
   `runs/art-gallery.json` and calls that reference the anchor default to it (the loser is
-  refused). One generation + 2 regenerations per asset (counted in the gallery by the normalized out path, slot
+  refused). Paid providers: one generation + 2 regenerations per asset; free comfy has its OWN counter, `COMFY_REGEN_CAP` (default 7
+  = 1 + 6), so free churn never eats the paid allowance and the refusal says "paid generations" or "comfy generations" (T39c). Both are counted in the gallery by the normalized out path, slot
   reserved before the paid call and released if it billed nothing, so concurrent calls can't overshoot; T39). A redo past
   the cap needs a human: a NEW out path (`<name>-v2.png`) is the default; keeping the path takes an operator-approved
   `art_redo` (approval-only capability) or `npm run art -- redo <out> --why …` (operator shell only: refused when
