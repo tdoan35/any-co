@@ -37,14 +37,27 @@ const okSchema = z.object({ ok: z.boolean() });
 const interventionsSchema = z.object({
   eventStart: z.string(),
   count: z.number(),
-  entries: z.array(z.object({ ts: z.string(), who: z.string(), action: z.string(), reason: z.string() })),
+  /** Category tallies the ledger assigns (steering, harness, account, approval, ...). */
+  by_category: z.record(z.string(), z.number()).optional(),
+  entries: z.array(z.object({ ts: z.string(), who: z.string(), action: z.string(), reason: z.string(), category: z.string().optional() })),
 });
 export type Interventions = z.infer<typeof interventionsSchema>;
+const galleryEntrySchema = z.object({
+  asset: z.string(), file: z.string(), url: z.string(), provider: z.string(),
+  verdict: z.enum(["accepted", "rejected"]), reason: z.string(),
+  gate: z.record(z.string(), z.union([z.number(), z.boolean(), z.null()])).nullable(),
+  runId: z.string(), ts: z.string(),
+});
+export type GalleryEntry = z.infer<typeof galleryEntrySchema>;
+export interface ArtGallery { repos: string[]; entries: GalleryEntry[] }
+const gallerySchema = z.object({ repos: z.array(z.string()), entries: z.array(galleryEntrySchema) });
 const decisionSchema = z.object({ ok: z.boolean(), id: z.string(), decision: z.enum(["kept", "forgotten"]) });
 
 export const httpApi = {
   /** Human interventions in the studio ledger since the event started (chat messages, logged by the adapter). */
   getInterventions: () => request<Interventions>("/interventions", interventionsSchema),
+  /** Kept art candidates and contact sheets from the studio game repo(s) (T18). */
+  getGallery: () => request<ArtGallery>("/art-gallery", gallerySchema),
   getRegistry: () => request<Registry>("/registry", RegistrySchema),
   getWeave: () => request<WeaveSnapshot>("/weave", WeaveSnapshotSchema),
   listProjects: () => request<Project[]>("/projects", z.array(ProjectSchema)),

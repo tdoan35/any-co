@@ -1,6 +1,8 @@
 // Offline seam. The 135M log, snapshots and report use the same current bundle as the server.
 import { recordings } from "@fabric/fixtures/recordings";
 import { myProfiles, communityProfiles } from "@fabric/fixtures/studio";
+import { galleryFixture } from "@fabric/fixtures/gallery";
+import { interventionsFixture } from "@fabric/fixtures/interventions";
 import { studioTeams, communityTeams, organizations } from "@fabric/fixtures/teams";
 import { sessions } from "@fabric/fixtures/sessions";
 import { inboxSeed, pulseSeed, presenceSeed, calendarEvents } from "@fabric/fixtures/weave";
@@ -20,6 +22,8 @@ import { projectThread } from "@fabric/contracts";
 import { resetSessionStreams } from "@/lib/chat/session-stream";
 import { mockAssistant } from "../mock/chat";
 import type { ContextSnapshot, Report, Run, RunEvent, Task } from "../types";
+import type { ArtGallery } from "./http";
+import type { Interventions } from "./http";
 
 const delay = <T,>(v: T, ms = 120) => new Promise<T>((r) => setTimeout(() => r(v), ms));
 const bundle = recordings["ngram-135m"];
@@ -78,6 +82,8 @@ function mockAppend(session: MockSession, type: string, payload: unknown): Sessi
 }
 export const mockApi = {
   getRegistry: (): Promise<Registry> => delay(registry),
+  getGallery: (): Promise<ArtGallery> => delay(galleryFixture),
+  getInterventions: (): Promise<Interventions> => delay(interventionsFixture),
   getWeave: (): Promise<WeaveSnapshot> => delay(weaveSnapshot),
   listProjects: (): Promise<Project[]> => delay(projects),
   createProject: ({ name, goal }: { name: string; goal: string }): Promise<Project> => {
