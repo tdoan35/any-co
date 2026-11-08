@@ -47,7 +47,9 @@ function emit(event, data) {
 function snapshot() {
   const live = {
     scene: "run",
-    player: { x: mode === "nondeterministic" ? tick + Math.floor(Math.random() * 1000) : tick, y: 0, hp: 3 },
+    // nondeterministic: the system RNG leaks into state. 1e9 values, so two runs collide ~1e-9 of the
+    // time (1000 values collided 1 run in 1000 and made the determinism tests flaky, T25)
+    player: { x: mode === "nondeterministic" ? tick + Math.floor(Math.random() * 1e9) : tick, y: 0, hp: 3 },
     resources: { ...resources, ...(mode === "float-resource" ? { gold: resources.gold + 0.5 } : {}) },
     entities: Array.from({ length: entities }, (_, i) => ({ id: `e${i}`, type: "slime", x: i, y: 0, w: 8, h: 8 })),
   };

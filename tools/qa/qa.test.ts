@@ -37,9 +37,10 @@ function cli(dir: string, over: Partial<Cli> = {}): Cli {
     dir,
     seed: 7,
     ticks: 40,
-    ackTimeoutMs: 2_000,
-    readyTimeoutMs: 5_000,
-    endWaitMs: 3_000,
+    // caps, not waits: generous so full-suite load can't trip them; timeout tests pass their own (T25)
+    ackTimeoutMs: 10_000,
+    readyTimeoutMs: 20_000,
+    endWaitMs: 15_000,
     ...over,
   };
 }
