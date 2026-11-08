@@ -39,5 +39,5 @@ export default defineAgent({
       questions: z.array(z.object({ for: z.string().max(40), question: z.string().min(10).max(300) }).strict()).max(5),
     })
     .strict(),
-  limits: { max_turns: 50, max_output_tokens: 12288 },
+  limits: { max_turns: 90, max_output_tokens: 12288 }, // Nov 8: the UI layout run used all 50 turns before committing
 });
