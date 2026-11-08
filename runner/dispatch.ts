@@ -10,6 +10,7 @@ import { killSwitchOn } from "./spend.ts";
 import type { AgentSpec } from "./spec.ts";
 import type { Provider } from "./types.ts";
 import type { NaiveClient } from "./providers.ts";
+import { artMerge, gameRepoOfClone, type ArtMergeOptions, type ArtMergeResult } from "../tools/art/merge.ts";
 import { BoardError, completeSupersedes, type Board, type BoardCard, type BoardComment } from "./board/index.ts";
 
 export interface DispatchOptions {
@@ -30,7 +31,14 @@ export interface DispatchOptions {
    *  live run. Return true if the resume path owns the card (it stays doing); return false and
    *  the card is requeued to todo with a comment saying why. */
   onResumeOrphan?: (card: BoardCard) => Promise<boolean>;
+  /** T46: the mechanical art-only merge run when an artist's card closes done with complete:true (default: tools/art/merge.ts). */
+  artMerge?: (gameDir: string, branch: string, opts: ArtMergeOptions) => Promise<ArtMergeResult>;
+  /** Where art.merge ledger decisions go (default: the studio ledger). */
+  ledgerFile?: string;
 }
+
+/** Agents whose finished branches are art-only by role: their done cards trigger the mechanical merge (T46). */
+export const ART_AGENTS = new Set(["art-director", "sprite-artist", "sprite-artist-b", "env-ui-artist", "env-ui-artist-b"]);
 
 export interface PassResult {
   started: number;
@@ -372,6 +380,32 @@ export class Dispatcher {
     done.finally(() => this.inflight.delete(spec.name)).catch(() => {});
   }
 
+  /**
+   * T46: merge the artist's agent/<name> branch into the game repo's main with no LLM (tools/art/merge.ts). The game repo is
+   * the run clone's origin. The outcome goes on the card as a comment; a refusal is left for the head (it cards a tech-lead
+   * merge). Never throws: a merge problem must not take the dispatcher down.
+   */
+  private async autoArtMerge(spec: AgentSpec, card: BoardCard, runId: string, runsDir: string): Promise<void> {
+    const board = this.opts.board;
+    const branch = `agent/${spec.name}`;
+    try {
+      const gameDir = gameRepoOfClone(path.join(runsDir, runId, "workspace", "game"));
+      if (!gameDir) {
+        await board.comment(card.id, `art-merge: skipped — run ${runId} has no game clone with a local origin; card a tech-lead merge if ${branch} needs landing`, "dispatcher");
+        return;
+      }
+      const r = await (this.opts.artMerge ?? artMerge)(gameDir, branch, { runsDir, ledgerFile: this.opts.ledgerFile, agent: "dispatcher", run_id: runId });
+      const text = r.ok
+        ? `art-merge: merged ${branch} into main mechanically (${r.mode}, ${r.assets ?? 0} asset file(s), gate ok) @ ${(r.merged ?? "").slice(0, 10)}`
+        : `art-merge: refused — ${r.reason}. Card a tech-lead merge for ${branch}.`;
+      await board.comment(card.id, text, "dispatcher");
+      this.opts.log?.(`${r.ok ? "⇢" : "⇢✗"} card ${card.id} ${text}`);
+    } catch (e) {
+      this.opts.log?.(`✗ card ${card.id}: art-merge error (${errText(e)}); left for the head`);
+      await board.comment(card.id, `art-merge: error — ${errText(e)}. Card a tech-lead merge for ${branch}.`, "dispatcher").catch(() => {});
+    }
+  }
+
   private async run(spec: AgentSpec, card: BoardCard, task: string, runId: string): Promise<void> {
     const board = this.opts.board;
     const runsDir = this.opts.runsDir ?? RUNS_DIR;
@@ -423,6 +457,8 @@ export class Dispatcher {
     } else if (r.status === "done") {
       await close("done", `done: run ${r.run_id}, ${money} — ${summary(r)}`);
       this.opts.log?.(`✓ card ${card.id} done: run ${r.run_id}, ${money}`);
+      if (ART_AGENTS.has(spec.name) && isObject(r.output) && r.output.complete === true && process.env.STUDIO_AUTO_ART_MERGE !== "off")
+        await this.autoArtMerge(spec, card, r.run_id, runsDir);
     } else if (r.status === "killed") {
       // The kill switch stops spend, not the work: requeue so the loop picks the card up
       // again once runs/KILL is gone. (Any other failure blocks the card with the error.)
