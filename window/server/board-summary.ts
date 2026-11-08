@@ -65,11 +65,11 @@ export function gameOfCard(card: Pick<BoardCard, "id" | "title" | "body">, games
   return imported.get(card.id) ?? null;
 }
 
-export interface BoardCardView { id: string; title: string; status: BoardStatus; assignee: string | null; game: string | null; created_at: string; updated_at?: string }
+export interface BoardCardView { id: string; title: string; status: BoardStatus; assignee: string | null; game: string | null; created_at: string; updated_at?: string; upstream: string[] }
 
 /** Cards for the window (no bodies: titles, status, assignee, game). */
 export function boardCards(cards: BoardCard[], games: string[], imported: Map<string, string>): BoardCardView[] {
-  return cards.map((c) => ({ id: c.id, title: c.title, status: c.status, assignee: c.assignee, game: gameOfCard(c, games, imported), created_at: c.created_at, updated_at: (c as { updated_at?: string }).updated_at }));
+  return cards.map((c) => ({ id: c.id, title: c.title, status: c.status, assignee: c.assignee, game: gameOfCard(c, games, imported), created_at: c.created_at, updated_at: (c as { updated_at?: string }).updated_at, upstream: [...(c.upstream ?? c.blocked_by ?? [])] }));
 }
 
 /** Card counts by status per game ("" = studio-level / no game). */

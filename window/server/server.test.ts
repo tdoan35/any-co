@@ -209,4 +209,6 @@ test("board cards carry their game: games/<slug>, else one whole-word slug, else
   assert.equal(gameOfCard(card("d", "Plan the next cycle"), games, imported), null);
   const views = boardCards([{ id: "x", title: "games/soul-shift art", body: "", status: "done", assignee: "sprite-artist", blocked_by: [], note: null, created_at: "2026-11-08T00:00:00Z" } as any], games, imported);
   assert.deepEqual(countsByGame(views), { "soul-shift": { todo: 0, doing: 0, blocked: 0, done: 1 } });
+  assert.deepEqual(views[0].upstream, []);
+  assert.deepEqual(boardCards([{ id: "y", title: "t", body: "", status: "blocked", assignee: "qa-lead", blocked_by: ["b"], upstream: ["a", "b"], note: null, created_at: "2026-11-08T00:00:00Z" } as any], games, imported)[0].upstream, ["a", "b"]);
 });
