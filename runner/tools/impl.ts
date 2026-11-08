@@ -16,9 +16,9 @@ import { studioStatusTools } from "./studio-status.ts";
 import { decodePng, encodePng, type RgbaImage } from "../../tools/art/png.ts";
 import { addOutline, contactSheet, lockPalette, snapToGrid, splitStrip, upscaleNearest } from "../../tools/art/ops.ts";
 import { runGate } from "../../tools/art/gate.ts";
-import { ChargedFailure, DEFAULT_CANDIDATES, MAX_CANDIDATES, ProviderExhausted, ProviderUnavailable, balance as providerBalance, generate, type Balance, isAnimation, quote as providerQuote, type GenerateResult, type ProviderName } from "../../tools/art/generate.ts";
+import { ChargedFailure, DEFAULT_CANDIDATES, MAX_CANDIDATES, OPENAI_IMAGE_MODELS, ProviderExhausted, ProviderUnavailable, balance as providerBalance, generate, type Balance, isAnimation, quote as providerQuote, type GenerateResult, type ProviderName } from "../../tools/art/generate.ts";
 import {
-  LOW_GENERATIONS, MAX_REGENERATIONS, PROVIDERS, anchorWinner, checkPixellabFloor, pixellabCallEstimate, pixellabFloor, type FloorVerdict, generationsUsedSinceRedo, grantRedo, outPathProblem, releaseGeneration, reserveGeneration, comfyRegenCap, counterFor, type GenCounter, isExhausted, markExhausted, other, readCredits, readGallery, recordLocalGeneration, comfyLaneStats,
+  LOW_GENERATIONS, MAX_REGENERATIONS, PROVIDERS, anchorWinner, checkPixellabFloor, pixellabCallEstimate, pixellabFloor, type FloorVerdict, generationsUsedSinceRedo, grantRedo, outPathProblem, releaseGeneration, reserveGeneration, comfyRegenCap, counterFor, type GenCounter, isExhausted, markExhausted, other, readCredits, readGallery, recordLocalGeneration, comfyLaneStats, openaiImageCap, openaiPerImageEstimate, openaiSpend, recordSpend,
   readProviders, recordAnchorWinner, recordCredit, statePaths,
 } from "../../tools/art/credits.ts";
 import { GAMES_DIR, execEnv, execRefusal, sandboxPrefix, scopedArgv } from "./exec-scope.ts";
@@ -1008,7 +1008,7 @@ async function applyArtPostprocess(
   return steps;
 }
 
-const providerEnum = z.enum(["pixellab", "retrodiffusion", "comfy"]);
+const providerEnum = z.enum(["pixellab", "retrodiffusion", "comfy", "openai"]);
 
 /** Log a reported balance; write ONE ledger note per low threshold per provider per day. */
 function noteCredits(
@@ -1035,6 +1035,21 @@ function noteCredits(
   return { provider, remaining: bal.remaining, unit: bal.unit, total: bal.total, generations_used: generationsUsed, low_notes: notes.map((n) => n.threshold) };
 }
 const LOW_PCT = 20;
+
+/** ONE ledger decision per studio when OpenAI image spend reaches 80% of OPENAI_IMAGE_CAP_USD, and one at the cap (T44). */
+function noteOpenaiSpend(ctx: ToolContext, spent: number, capUsd: number, threshold: "80" | "cap"): void {
+  const ledgerFile = ctx.ledgerFile ?? LEDGER_FILE;
+  const ref = `openai-image-spend:${threshold}`;
+  if (ledgerRead(ledgerFile).some((e) => e.kind === "decision" && e.topic === "spend.openai_images" && (e.refs ?? []).includes(ref))) return;
+  ledgerAppend({
+    kind: "decision", ts: new Date().toISOString(), agent: ctx.agent ?? "art_generate", run_id: ctx.run_id ?? "unknown", topic: "spend.openai_images",
+    decision: threshold === "cap"
+      ? `OpenAI image spend is at its cap: $${spent.toFixed(2)} of $${capUsd.toFixed(2)} (OPENAI_IMAGE_CAP_USD); further openai calls are refused`
+      : `OpenAI image spend passed 80% of its cap: $${spent.toFixed(2)} of $${capUsd.toFixed(2)} (OPENAI_IMAGE_CAP_USD)`,
+    rationale: "Paid images are capped per studio in code; comfy (free) and pixellab carry the bulk work.",
+    refs: [ref],
+  }, ledgerFile);
+}
 
 /** ONE ledger decision per day when the PixelLab floor stops a call (deduplicated by its refs key, like the low notes). */
 function noteFloor(ctx: ToolContext, v: FloorVerdict): void {
@@ -1137,7 +1152,10 @@ const artGenerate: ToolImpl = {
     "provider comfy = the local lab ComfyUI (frozen IP-Adapter recipe on `reference`, seed = identity, default 42): free (cost 0, cost_source local), stills only, " +
     "always 768x768 with an opaque background, so pass postprocess (snap/lock/outline) to reach the manifest size and palette. Use it when the task or the anchor " +
     "winner names comfy; when the lab is down the call falls back to pixellab once and comfy is tried again next call. " +
-    "Cost rule: comfy is free/local and needs a reference; pixellab costs 10-30 generations per call — default to comfy, spend pixellab only where it earns it, and pass max_candidates 1 with a justification when you do.",
+    "Cost rule: comfy is free/local and needs a reference; pixellab costs 10-30 generations per call — default to comfy, spend pixellab only where it earns it, and pass max_candidates 1 with a justification when you do. " +
+    "provider openai = OpenAI images (gpt-image-2.6-flare default, or model sunburst): PAID, runs only when named explicitly (never a default " +
+    "or fallback), counts against the paid regen cap, refused past the studio's OPENAI_IMAGE_CAP_USD; reference → images/edits, else " +
+    "images/generations; 1024-class transparent PNG, so pass postprocess to reach the manifest grid and palette.",
   input: z
     .object({
       provider: providerEnum.optional().describe("omit to use the anchor-winning provider of `reference` (art_anchor_winner); comfy = the local lab (free, stills, 768x768)"),
@@ -1151,6 +1169,7 @@ const artGenerate: ToolImpl = {
       transparent: z.boolean().optional().describe("transparent background (default true)"),
       style: z.string().max(120).optional().describe("Retro Diffusion prompt_style id"),
       negative: z.string().max(2000).optional().describe("comfy only: negative prompt (default empty)"),
+      model: z.enum(OPENAI_IMAGE_MODELS).optional().describe("openai only: the image model (default OPENAI_IMAGE_MODEL, else gpt-image-2.6-flare)"),
       max_candidates: z.number().int().min(1).max(MAX_CANDIDATES).default(DEFAULT_CANDIDATES).describe(`keep at most this many returned images (default ${DEFAULT_CANDIDATES}); extras are discarded unwritten. Keeps the gallery reviewable; it does NOT save generations (the provider bills what it made)`),
       justify: z.string().min(10).max(300).optional().describe("required for animation: why the cheaper ladder steps (cutout parts, in-engine motion) won't do"),
       resume_job_id: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/).optional().describe("PixelLab only: after a timeout or poll failure, the error names a job_id. Call again with the SAME inputs plus resume_job_id to collect that job: no new generation, no charge, no regeneration count"),
@@ -1203,6 +1222,9 @@ const artGenerate: ToolImpl = {
       // the bake-off lock is among PAID providers only: comfy (local, free) is always allowed (T39)
       return { content: `refused: ${i.reference}'s anchor bake-off was won by ${winner}; batch generation uses it (omit provider). Only anchors are generated on both.`, is_error: true };
     }
+    // T44: OpenAI images are paid and run ONLY when the call names provider "openai" (never a default, winner or fallback)
+    if (requested === "openai" && i.provider !== "openai")
+      return { content: `refused: OpenAI images run only when the call names provider "openai" explicitly (it was reached as a default or an anchor winner). Name it, or use comfy or pixellab instead.`, is_error: true };
 
     // T39c: paid and free comfy generations have separate counters. The requested provider's counter is checked and its slot
     // taken before any request (no race past the cap); the slot moves if the chain falls to the other kind, and is given back
@@ -1229,12 +1251,32 @@ const artGenerate: ToolImpl = {
     // with the lab down, or explicit RD exhausted, stops instead of spending shared PixelLab generations. Free comfy may still
     // be spliced in after a floored pixellab (T35). Unset default: unchanged.
     const comfyStudio = defaultProvider === "comfy";
-    const chain: ProviderName[] = comfyStudio ? [requested] : [requested, other(requested)];
+    // openai (paid, explicit-only) never falls back and is never a fallback (T44)
+    const chain: ProviderName[] = comfyStudio || requested === "openai" ? [requested] : [requested, other(requested)];
     for (let k = 0; k < chain.length; k++) {
       const p = chain[k];
       if (isExhausted(paths.providers, p)) {
         exhausted.push(p);
         continue;
+      }
+      if (p === "openai") {
+        // T44: a mechanical spend cap per studio (OPENAI_IMAGE_CAP_USD): refuse a call that could cross it, before any request
+        let capUsd: number;
+        try {
+          capUsd = openaiImageCap();
+        } catch (e) {
+          return { content: errText(e), is_error: true };
+        }
+        const spent = openaiSpend(paths.credits);
+        const images = Math.max(1, Math.min(10, Math.floor(i.max_candidates ?? DEFAULT_CANDIDATES)));
+        const estimate = images * openaiPerImageEstimate(paths.credits);
+        if (spent + estimate > capUsd) {
+          noteOpenaiSpend(ctx, spent, capUsd, "cap");
+          return {
+            content: `refused: OpenAI image spend cap: $${spent.toFixed(2)} of $${capUsd.toFixed(2)} spent (OPENAI_IMAGE_CAP_USD); this call (${images} image(s)) could cost up to $${estimate.toFixed(2)}. Use comfy or pixellab, ask for fewer candidates, or stop and report.`,
+            is_error: true,
+          };
+        }
       }
       if (p === "pixellab" && floor !== null) {
         // the live balance before EVERY pixellab call (free GET /v2/balance), never a cached one
@@ -1312,7 +1354,7 @@ const artGenerate: ToolImpl = {
     billed = true;
     const generation = `${slot!.slot} of ${slot!.cap}`;
     // comfy is local: no balance read and no credits line
-    const after: Balance | null = result.provider === "comfy"
+    const after: Balance | null = result.provider === "comfy" || result.provider === "openai"
       ? null
       : typeof result.metadata.remaining_balance === "number"
         ? { remaining: result.metadata.remaining_balance as number, unit: "usd", total: null }
@@ -1323,6 +1365,16 @@ const artGenerate: ToolImpl = {
       ? Math.round((before.remaining - after.remaining) * 1000) / 1000
       : usage?.type === "generations" && typeof usage.generations === "number" ? usage.generations : null;
     credits = noteCredits(ctx, result.provider, after, "generation", used);
+    if (result.provider === "openai") {
+      const capUsd = openaiImageCap();
+      recordSpend(paths.credits, {
+        ts: new Date().toISOString(), provider: "openai", unit: "usd", kind: "spend", cost_usd: result.cost_micro_usd / 1e6, images: result.images.length,
+        model: String(result.metadata.model ?? ""), run_id: ctx.run_id ?? "unknown", source: "generation",
+      });
+      const spent = openaiSpend(paths.credits);
+      if (spent >= capUsd) noteOpenaiSpend(ctx, spent, capUsd, "cap");
+      else if (spent >= 0.8 * capUsd) noteOpenaiSpend(ctx, spent, capUsd, "80");
+    }
     if (result.provider === "comfy" && typeof result.metadata.lane === "string")
       recordLocalGeneration(paths.credits, {
         ts: new Date().toISOString(), provider: "comfy", unit: "local", lane: result.metadata.lane, images: result.images.length,
