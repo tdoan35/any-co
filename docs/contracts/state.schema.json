@@ -61,6 +61,35 @@
         },
         "additionalProperties": false
       }
+    },
+    "ui": {
+      "type": "array",
+      "description": "Every visible UI element of the CURRENT phase's screen. Optional: games without it still validate, but ui-lint is a release-gate layer only when present.",
+      "items": {
+        "type": "object",
+        "required": ["id", "rect", "z", "visible"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "rect": {
+            "type": "array",
+            "minItems": 4,
+            "maxItems": 4,
+            "description": "[x, y, w, h] in viewport pixels, origin top-left of the window (the --resolution backbuffer), not the play-field.",
+            "items": { "type": "number", "minimum": 0 }
+          },
+          "z": { "type": "number", "description": "draw order; higher renders on top" },
+          "visible": { "type": "boolean" },
+          "overlay": { "type": "boolean", "description": "tooltips/modals: exempt from the overlap check" },
+          "text_px": { "type": "number", "minimum": 0, "description": "font size in px when the element renders text" },
+          "parent": { "type": "string", "description": "id of the container this element is inside; parent/child overlaps are allowed" },
+          "contains": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "ids of children nested in this element; overlaps with them are allowed"
+          }
+        },
+        "additionalProperties": false
+      }
     }
   }
 }

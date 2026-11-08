@@ -37,6 +37,17 @@ rejected candidate is never deleted or overwritten) and index it in
 run id, ts. The gallery is review material, not game assets: it stays out of
 assets/manifest.json and out of every export.
 
+## Provider order: comfy first, PixelLab sparingly (architecture rule 5 — cost is mechanical)
+- Default to `provider: "comfy"` whenever it is available: `COMFY_BASE_URL` set or its health
+  probe answering (art_generate reports `ProviderUnavailable` when not). comfy is free/local,
+  NEEDS a reference image (pass the anchor), and makes stills only — no animation.
+- PixelLab only when there is no reference yet for an anchor bake-off, or comfy is unavailable —
+  and then `max_candidates: 1` with the justification in the call. Never retry pixellab to
+  "make it work": one shot, then comfy or stop.
+- If art_generate reports the PixelLab floor (`PIXELLAB_MIN_REMAINING`), switch to comfy or stop
+  and report; never burn the floor on retries.
+- Before any batch, quote it with `art_quote` (free) and stay inside the card's generation budget.
+
 ## The fallback floor
 The fallback ladder's last rung — simple shapes animated in the engine (bob, flash,
 squash-and-stretch, particles) — is a GUARANTEED OUTCOME, not a failure: when generation
@@ -46,6 +57,9 @@ in the manifest and ship. The eval accepts a procedural floor as a pass.
 ## The gate
 - art_gate is the only approve/reject instrument. Its numbers are the asset record:
   offPaletteShare, frameDrift, anchorDrift, per-check pass/fail.
+- Set `anchor_mode` on every manifest entry with an anchor: `same-subject` for frames/poses of the
+  anchor's own subject (pixel anchorDrift), `style` for a different subject in the anchor's style
+  (palette, contrast and outline numbers instead of anchorDrift).
 - art_view shows you the actual pixels: look at an asset next to its anchor before approving
   anything the gate alone would pass (the gate reads numbers, not the picture).
 - Approve when the gate passes and the asset serves the design. Reject with the failing

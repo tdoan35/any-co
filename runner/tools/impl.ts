@@ -16,9 +16,9 @@ import { studioStatusTools } from "./studio-status.ts";
 import { decodePng, encodePng, type RgbaImage } from "../../tools/art/png.ts";
 import { addOutline, contactSheet, lockPalette, snapToGrid, splitStrip, upscaleNearest } from "../../tools/art/ops.ts";
 import { runGate } from "../../tools/art/gate.ts";
-import { ChargedFailure, DEFAULT_CANDIDATES, MAX_CANDIDATES, ProviderExhausted, balance as providerBalance, generate, type Balance, isAnimation, quote as providerQuote, type GenerateResult, type ProviderName } from "../../tools/art/generate.ts";
+import { ChargedFailure, DEFAULT_CANDIDATES, MAX_CANDIDATES, ProviderExhausted, ProviderUnavailable, balance as providerBalance, generate, type Balance, isAnimation, quote as providerQuote, type GenerateResult, type ProviderName } from "../../tools/art/generate.ts";
 import {
-  LOW_GENERATIONS, MAX_REGENERATIONS, PROVIDERS, anchorWinner, countGeneration, generationCount, isExhausted, markExhausted, other, readCredits, readGallery,
+  LOW_GENERATIONS, MAX_REGENERATIONS, PROVIDERS, anchorWinner, checkPixellabFloor, pixellabCallEstimate, pixellabFloor, type FloorVerdict, countGeneration, generationCount, isExhausted, markExhausted, other, readCredits, readGallery,
   readProviders, recordAnchorWinner, recordCredit, statePaths,
 } from "../../tools/art/credits.ts";
 import { capture as mediaCapture, POLICY as MEDIA_POLICY, type CaptureMode } from "../../tools/media/capture.ts";
@@ -530,18 +530,41 @@ export function resolveGameRepo(root: string, repo?: string): { name: string; di
 }
 
 
-async function gameCloneDir(ctx: ToolContext, repo?: string): Promise<{ clone: string; branch: string; src: { name: string; dir: string } }> {
+/**
+ * The run's clone on `agent/<name>`. The branch continues from origin's `agent/<name>` when one exists
+ * (earlier runs pushed there), so the agent's own pushes and the end-of-run checkpoint fast-forward;
+ * origin/main is then merged in (no-ff) so it starts current. A conflicting merge is aborted and the
+ * branch stays at origin's tip, with a note. `base` says which start was used (T28).
+ */
+async function gameCloneDir(ctx: ToolContext, repo?: string): Promise<{ clone: string; branch: string; src: { name: string; dir: string }; base: string }> {
   const src = resolveGameRepo(ctx.gameRepoRoot ?? path.join(ROOT, "games"), repo);
   const clone = path.join(ctx.workspace, "game");
   const branch = `agent/${ctx.agent ?? "unknown"}`;
+  let base = "existing clone (unchanged)";
   if (!existsSync(clone)) {
     const { code, err } = await execText("git", ["clone", "--quiet", src.dir, clone], 60_000);
     if (code !== 0) throw new Error(`git clone failed: ${err}`);
-    const b = await execText("git", ["-C", clone, "checkout", "--quiet", "-b", branch], 30_000);
+    const remote = `origin/${branch}`;
+    const reused = (await execText("git", ["-C", clone, "rev-parse", "--verify", "--quiet", `refs/remotes/${remote}`], 15_000)).code === 0;
+    const b = await execText("git", ["-C", clone, "checkout", "--quiet", "-b", branch, ...(reused ? [remote] : [])], 30_000);
     if (b.code !== 0) throw new Error(`git checkout -b failed: ${b.err}`);
+    base = "main (no earlier agent branch on origin)";
+    if (reused) {
+      const hasMain = (await execText("git", ["-C", clone, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/main"], 15_000)).code === 0;
+      if (!hasMain) base = `${remote} (no origin/main to merge)`;
+      else {
+        const id = ["-c", "user.name=any-co harness (game_clone)", "-c", "user.email=harness@any-co.invalid"];
+        const m = await execText("git", ["-C", clone, ...id, "merge", "--no-ff", "--no-edit", "-q", "-m", `Merge origin/main into ${branch} (game_clone: start current)`, "origin/main"], 60_000);
+        if (m.code === 0) base = `${remote} + origin/main merged in (your pushes fast-forward)`;
+        else {
+          await execText("git", ["-C", clone, "merge", "--abort"], 30_000);
+          base = `${remote} only: merging origin/main conflicted and was aborted, so this branch is behind main. Resolve it yourself (git merge origin/main) before relying on main's latest`;
+        }
+      }
+    }
   }
   await copyContracts(ctx.workspace);
-  return { clone, branch, src };
+  return { clone, branch, src, base };
 }
 
 /** The harness contracts (docs/contracts/) the game must implement, copied read-only into the run's workspace at
@@ -559,15 +582,16 @@ async function copyContracts(workspace: string) {
 const gameClone: ToolImpl = {
   description:
     "Clone the studio's game repo into this run (idempotent) on your own agent branch, and return the clone's path and branch. " +
+    "Your branch continues from origin's agent/<you> when earlier runs pushed it (with origin/main merged in), so `git push origin HEAD` fast-forwards; `base` says which start was used. " +
     "Read/write/run there with game_read, game_write, game_exec. You never touch the main repo directly; the Tech Lead merges branches.",
   input: z.object({ repo: z.string().min(1).max(80).optional().describe("Repo name under games/; omit when the studio has exactly one") }).strict(),
   async run({ repo }, ctx) {
     try {
-      const { clone, branch, src } = await gameCloneDir(ctx, repo);
+      const { clone, branch, src, base } = await gameCloneDir(ctx, repo);
       const head = await execText("git", ["-C", clone, "rev-parse", "--short", "HEAD"], 15_000);
       return {
         content: JSON.stringify({
-          game: src.name, clone: path.relative(ctx.workspace, clone), branch, head: head.out.trim(), main: "main",
+          game: src.name, clone: path.relative(ctx.workspace, clone), branch, base, head: head.out.trim(), main: "main",
           contracts: "contracts/ in your workspace (read with workspace_read): the harness contracts the game must implement, start at contracts/README.md. Read-only copies: implement them, never rewrite them in the game repo.",
         }),
       };
@@ -962,7 +986,7 @@ async function applyArtPostprocess(
   return steps;
 }
 
-const providerEnum = z.enum(["pixellab", "retrodiffusion"]);
+const providerEnum = z.enum(["pixellab", "retrodiffusion", "comfy"]);
 
 /** Log a reported balance; write ONE ledger note per low threshold per provider per day. */
 function noteCredits(
@@ -989,6 +1013,19 @@ function noteCredits(
   return { provider, remaining: bal.remaining, unit: bal.unit, total: bal.total, generations_used: generationsUsed, low_notes: notes.map((n) => n.threshold) };
 }
 const LOW_PCT = 20;
+
+/** ONE ledger decision per day when the PixelLab floor stops a call (deduplicated by its refs key, like the low notes). */
+function noteFloor(ctx: ToolContext, v: FloorVerdict): void {
+  const ledgerFile = ctx.ledgerFile ?? LEDGER_FILE;
+  const ref = `pixellab-floor:${new Date().toISOString().slice(0, 10)}`;
+  if (ledgerRead(ledgerFile).some((e) => e.kind === "decision" && e.topic === "spend.pixellab_floor" && (e.refs ?? []).includes(ref))) return;
+  ledgerAppend({
+    kind: "decision", ts: new Date().toISOString(), agent: ctx.agent ?? "art_generate", run_id: ctx.run_id ?? "unknown", topic: "spend.pixellab_floor",
+    decision: `PixelLab floor stops pixellab generation: remaining ${v.remaining ?? "unreadable"}, floor ${v.floor} (PIXELLAB_MIN_REMAINING), call estimate ${v.estimate}`,
+    rationale: "PixelLab is one generations balance shared across studios; the floor keeps a reserve. Calls go to comfy or the procedural floor until the balance is above floor + estimate.",
+    refs: [ref],
+  }, ledgerFile);
+}
 
 /**
  * Collect a PixelLab background job that an earlier call submitted (and was billed for) but stopped
@@ -1027,10 +1064,16 @@ const artGenerate: ToolImpl = {
     `Each asset gets one generation plus ${MAX_REGENERATIONS} regenerations. Animation (frames or rd_animation/rd_advanced_animation styles) needs justify. Quote batches with art_quote first. ` +
     "A PixelLab job that timed out or lost its poll keeps running and is billed: the error names its job_id; never regenerate, call again with the same inputs plus resume_job_id to collect it for free. " +
     `max_candidates (default ${DEFAULT_CANDIDATES}, max ${MAX_CANDIDATES}) caps the images kept per call to keep the gallery reviewable; it does not save generations. ` +
-    "PixelLab results report generations_used (subscription balance before vs after).",
+    "PixelLab results report generations_used (subscription balance before vs after). " +
+    "With PIXELLAB_MIN_REMAINING set, pixellab is refused (no request) at or below that floor, or when this call's estimate would cross it; the call moves to comfy " +
+    "or the procedural floor and the result's pixellab_floor says so: then use provider comfy with your reference image, or stop and report. " +
+    "provider comfy = the local lab ComfyUI (frozen IP-Adapter recipe on `reference`, seed = identity, default 42): free (cost 0, cost_source local), stills only, " +
+    "always 768x768 with an opaque background, so pass postprocess (snap/lock/outline) to reach the manifest size and palette. Use it when the task or the anchor " +
+    "winner names comfy; when the lab is down the call falls back to pixellab once and comfy is tried again next call. " +
+    "Cost rule: comfy is free/local and needs a reference; pixellab costs 10-30 generations per call — default to comfy, spend pixellab only where it earns it, and pass max_candidates 1 with a justification when you do.",
   input: z
     .object({
-      provider: providerEnum.optional().describe("omit to use the anchor-winning provider of `reference` (art_anchor_winner)"),
+      provider: providerEnum.optional().describe("omit to use the anchor-winning provider of `reference` (art_anchor_winner); comfy = the local lab (free, stills, 768x768)"),
       prompt: z.string().min(1).max(2000),
       width: z.number().int().min(12).max(792),
       height: z.number().int().min(12).max(792),
@@ -1040,6 +1083,7 @@ const artGenerate: ToolImpl = {
       frames: z.number().int().optional().describe("animation frames. retrodiffusion: frames_duration 4|6|8|10|12|16. pixellab: 4-16 even (4|6|8|10|12|14|16); animates `reference` (required, the start frame, at most 256x256, width/height = its size) with `prompt` as the action; w*h*frames <= 524288. Output: one horizontal strip (frames x width, 1 row)"),
       transparent: z.boolean().optional().describe("transparent background (default true)"),
       style: z.string().max(120).optional().describe("Retro Diffusion prompt_style id"),
+      negative: z.string().max(2000).optional().describe("comfy only: negative prompt (default empty)"),
       max_candidates: z.number().int().min(1).max(MAX_CANDIDATES).default(DEFAULT_CANDIDATES).describe(`keep at most this many returned images (default ${DEFAULT_CANDIDATES}); extras are discarded unwritten. Keeps the gallery reviewable; it does NOT save generations (the provider bills what it made)`),
       justify: z.string().min(10).max(300).optional().describe("required for animation: why the cheaper ladder steps (cutout parts, in-engine motion) won't do"),
       resume_job_id: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/).optional().describe("PixelLab only: after a timeout or poll failure, the error names a job_id. Call again with the SAME inputs plus resume_job_id to collect that job: no new generation, no charge, no regeneration count"),
@@ -1071,24 +1115,52 @@ const artGenerate: ToolImpl = {
     }
 
     const exhausted: ProviderName[] = [];
+    const unavailable: ProviderName[] = []; // transient (comfy down): skipped this call only, never persisted
     const notes: string[] = [];
     let result: GenerateResult | null = null;
     let credits: ReturnType<typeof noteCredits> | null = null;
     let before: Balance | null = null;
-    for (const p of [requested, other(requested)]) {
+    let floored: FloorVerdict | null = null; // T35: the PixelLab floor stopped pixellab for this call (never persisted)
+    let floor: number | null;
+    try {
+      floor = pixellabFloor();
+    } catch (e) {
+      return { content: errText(e), is_error: true };
+    }
+    const chain: ProviderName[] = [requested, other(requested)];
+    for (let k = 0; k < chain.length; k++) {
+      const p = chain[k];
       if (isExhausted(paths.providers, p)) {
         exhausted.push(p);
         continue;
+      }
+      if (p === "pixellab" && floor !== null) {
+        // the live balance before EVERY pixellab call (free GET /v2/balance), never a cached one
+        before = await providerBalance("pixellab", {}).catch(() => null);
+        const v = checkPixellabFloor(before, floor, pixellabCallEstimate(paths.credits));
+        if (v.blocked) {
+          floored = v;
+          notes.push(v.message);
+          noteFloor(ctx, v);
+          // like an exhausted provider for this call only: no request; comfy next (stills), then the rest of the chain
+          if (i.frames === undefined && !chain.includes("comfy")) chain.splice(k + 1, 0, "comfy");
+          else if (i.frames !== undefined) notes.push("comfy makes stills only, so there is no comfy fallback for an animation");
+          continue;
+        }
       }
       if (p !== requested && i.frames !== undefined && p === "pixellab" && !i.reference) {
         notes.push("pixellab animates only from a reference still, and none was given, so there is no animation fallback");
         continue;
       }
-      if (p !== requested) notes.push(`${requested} is exhausted; tried ${p} once instead (same prompt and size)`);
+      if (p !== requested) {
+        const why = floored && requested === "pixellab" ? "at its floor" : unavailable.includes(requested) ? "unavailable" : "exhausted";
+        notes.push(`${requested} is ${why}; tried ${p} once instead (same prompt and size)`);
+      }
       try {
         const { justify: _j, postprocess: _p, max_candidates, ...gen } = i;
-        // PixelLab: read the (free) balance before and after, so the result says what the call used
-        before = p === "pixellab" ? await providerBalance("pixellab", {}).catch(() => null) : null;
+        // PixelLab: read the (free) balance before and after, so the result says what the call used (already read when a floor is set)
+        if (p === "pixellab" && floor === null) before = await providerBalance("pixellab", {}).catch(() => null);
+        else if (p !== "pixellab") before = null;
         result = await generate({ ...gen, provider: p, maxCandidates: max_candidates }, { workspace: ctx.workspace });
         break;
       } catch (e) {
@@ -1096,6 +1168,11 @@ const artGenerate: ToolImpl = {
           markExhausted(paths.providers, p, { remaining_balance: e.remaining_balance, reason: e.message });
           noteCredits(ctx, p, { remaining: e.remaining_balance ?? 0, unit: p === "pixellab" && before?.unit === "generations" ? "generations" : "usd", total: before?.total ?? null }, "exhausted");
           exhausted.push(p);
+          continue;
+        }
+        if (e instanceof ProviderUnavailable) {
+          notes.push(e.message);
+          unavailable.push(p);
           continue;
         }
         if (e instanceof ChargedFailure) {
@@ -1106,26 +1183,31 @@ const artGenerate: ToolImpl = {
       }
     }
     if (!result) {
-      const all = PROVIDERS.every((p) => exhausted.includes(p));
+      const all = PROVIDERS.every((p) => exhausted.includes(p) || (p === "pixellab" && floored !== null));
       return {
         content: JSON.stringify({
-          exhausted: all ? "all" : exhausted, fallback: "procedural", cost_micro_usd: 0, notes,
-          next: "Take the fallback ladder's floor: simple shapes animated in engine (bob, flash, squash-and-stretch, particles). Log it with log_decision (topic art.provider_fallback). This is a guaranteed outcome, not a failure.",
+          exhausted: all ? "all" : exhausted, ...(unavailable.length ? { unavailable } : {}), ...(floored ? { pixellab_floor: floored } : {}), fallback: "procedural", cost_micro_usd: 0, notes,
+          next: floored
+            ? `${floored.message}. Otherwise take the fallback ladder's floor: simple shapes animated in engine (bob, flash, squash-and-stretch, particles); log it with log_decision (topic art.provider_fallback).`
+            : "Take the fallback ladder's floor: simple shapes animated in engine (bob, flash, squash-and-stretch, particles). Log it with log_decision (topic art.provider_fallback). This is a guaranteed outcome, not a failure.",
         }),
         cost_micro_usd: 0,
       };
     }
     const generation = countGeneration(paths.gallery, i.out);
-    const after: Balance | null = typeof result.metadata.remaining_balance === "number"
-      ? { remaining: result.metadata.remaining_balance as number, unit: "usd", total: null }
-      : await providerBalance(result.provider, {}).catch(() => null);
+    // comfy is local: no balance read and no credits line
+    const after: Balance | null = result.provider === "comfy"
+      ? null
+      : typeof result.metadata.remaining_balance === "number"
+        ? { remaining: result.metadata.remaining_balance as number, unit: "usd", total: null }
+        : await providerBalance(result.provider, {}).catch(() => null);
     // generations used: the balance delta (T21); else the job's own usage when it reports generations
     const usage = result.metadata.usage as { type?: string; generations?: number } | null | undefined;
     const used = before && after && before.unit === "generations" && after.unit === "generations"
       ? Math.round((before.remaining - after.remaining) * 1000) / 1000
       : usage?.type === "generations" && typeof usage.generations === "number" ? usage.generations : null;
     credits = noteCredits(ctx, result.provider, after, "generation", used);
-    const extra = { generation: `${generation} of ${1 + MAX_REGENERATIONS}`, credits, ...(used !== null ? { generations_used: used } : {}), ...(result.provider !== requested ? { fallback_from: requested } : {}), ...(notes.length ? { notes } : {}) };
+    const extra = { generation: `${generation} of ${1 + MAX_REGENERATIONS}`, credits, ...(used !== null ? { generations_used: used } : {}), ...(result.provider !== requested ? { fallback_from: requested } : {}), ...(floored ? { pixellab_floor: floored } : {}), ...(notes.length ? { notes } : {}) };
     try {
       let postprocess: Record<string, unknown> | null = null;
       if (i.postprocess && (i.postprocess.snap || i.postprocess.lock || i.postprocess.outline))
@@ -1309,6 +1391,7 @@ const itchPush: ToolImpl = {
       dry_run: z.boolean().default(true).describe("Default true (no upload); false pushes for real, after operator approval"),
     })
     .strict(),
+  dryRunField: "dry_run", // a dry run uploads nothing: no approval needed (T27)
   async run({ dir, target, build_id, dry_run = true }, ctx) {
     try {
       if (!process.env.BUTLER_API_KEY) throw new Error(noKey);
@@ -1516,12 +1599,12 @@ export function validateLaunchArgv(argv: unknown, clone: string): string[] {
   return argv;
 }
 
-type QaMode = "smoke" | "check" | "determinism" | "export-check";
+type QaMode = "smoke" | "check" | "determinism" | "export-check" | "ui-lint";
 
 async function runQa(mode: QaMode, input: Record<string, unknown>, ctx: ToolContext): Promise<{ content: string; is_error?: boolean }> {
   try {
     const clone = path.join(ctx.workspace, "game");
-    if (!existsSync(path.join(clone, "project.godot")) && mode !== "check") {
+    if (!existsSync(path.join(clone, "project.godot")) && mode !== "check" && mode !== "ui-lint") {
       throw new Error(`no game clone at ${path.relative(ctx.workspace, clone)}; call game_clone first`);
     }
     if (mode === "export-check") {
@@ -1529,10 +1612,14 @@ async function runQa(mode: QaMode, input: Record<string, unknown>, ctx: ToolCont
       if (input["frames"] !== undefined) args.push("--frames", String(input["frames"]));
       args.push("--timeout-ms", String(input["timeout_ms"] ?? 180_000));
       if (input["run"] === false) args.push("--run", "false");
+      if (input["save_frames"] !== undefined) args.push("--save-frames", String(input["save_frames"]), "--save-dir", mediaOut(ctx.workspace, "media/export-frames"));
       const tsxLoader = fileURLToPath(import.meta.resolve("tsx"));
       const proc = await execText(process.execPath, ["--import", `file://${tsxLoader}`, path.join(ROOT, "tools", "qa", "qa.ts"), "export-check", ...args], 15 * 60_000);
       try {
-        return { content: clip(JSON.stringify(JSON.parse(proc.out)), MAX_RESULT_CHARS) };
+        const result = JSON.parse(proc.out);
+        // saved frames are reported workspace-relative, the paths image_view takes
+        for (const p of result.packs ?? []) if (Array.isArray(p.run?.saved_frames)) p.run.saved_frames = p.run.saved_frames.map((f: string) => path.relative(ctx.workspace, f));
+        return { content: clip(JSON.stringify(result), MAX_RESULT_CHARS) };
       } catch {
         throw new Error(`qa export-check produced no JSON (exit ${proc.code}): ${proc.err.slice(-400)}`);
       }
@@ -1543,19 +1630,25 @@ async function runQa(mode: QaMode, input: Record<string, unknown>, ctx: ToolCont
       if (!Number.isFinite(n) || n < 0) throw new Error(`${k} must be a non-negative number`);
       return n;
     };
-    if (mode !== "check") {
+    if (mode === "check" || mode === "ui-lint") {
+      const dir = input["qa_dir"];
+      // ui-lint wants the clone root (its CLI resolves <dir>/state.json); check wants <dir>/qa.
+      cli["dir"] = typeof dir === "string" ? resolveInWorkspace(ctx.workspace, path.join("game", dir)) : mode === "ui-lint" ? clone : path.join(clone, "qa");
+    } else {
       const cmd = validateLaunchArgv(input["cmd"], clone);
       cli["cmd"] = JSON.stringify(cmd);
       cli["dir"] = clone;
       cli["seed"] = numArg("seed", input["seed"] ?? 0);
       cli["ticks"] = numArg("ticks", input["ticks"] ?? 0);
       if (input["policy"] !== undefined) cli["policy"] = String(input["policy"]);
-    } else {
-      const dir = input["qa_dir"];
-      cli["dir"] = typeof dir === "string" ? resolveInWorkspace(ctx.workspace, path.join("game", dir, "qa")) : path.join(clone, "qa");
     }
     // Mandatory caps (ms): a QA run can't hang the agent loop.
     cli["ack-timeout-ms"] = numArg("ack_timeout_ms", input["ack_timeout_ms"] ?? 30_000);
+    if (mode === "ui-lint") {
+      if (input["viewport"] !== undefined) cli["viewport"] = String(input["viewport"]);
+      if (input["min_text_px"] !== undefined) cli["min-text-px"] = numArg("min_text_px", input["min_text_px"]);
+      if (input["grid_px"] !== undefined) cli["grid-px"] = numArg("grid_px", input["grid_px"]);
+    }
     if (input["ready_timeout_ms"] !== undefined) cli["ready-timeout-ms"] = numArg("ready_timeout_ms", input["ready_timeout_ms"]);
     cli["end-wait-ms"] = numArg("end_wait_ms", input["end_wait_ms"] ?? 120_000);
     if (input["step_frames"] !== undefined) cli["step-frames"] = numArg("step_frames", input["step_frames"]);
@@ -1644,6 +1737,7 @@ const qaExportCheck: ToolImpl = {
       frames: z.number().int().min(10).max(600).optional().describe("frames to render before the still (default 90 at 30 fps)"),
       timeout_ms: z.number().int().positive().max(10 * 60_000).optional().describe("per-pack engine timeout (default 180000)"),
       run: z.boolean().optional().describe("false = pack-table check only (no engine run)"),
+      save_frames: z.number().int().min(1).max(12).optional().describe("copy this many evenly spaced rendered frames (always including the last) to media/export-frames/<pack>/ in your workspace, for image_view (UI review of the exported build)"),
     })
     .strict(),
   async run(input, ctx) {
@@ -1651,7 +1745,23 @@ const qaExportCheck: ToolImpl = {
   },
 };
 
-const qaHarnessTools = { qa_smoke: qaSmoke, qa_check: qaCheck, qa_determinism: qaDeterminism, qa_export_check: qaExportCheck };
+const qaUiLint: ToolImpl = {
+  description:
+    "UI layout lint over the ui[] of the clone's qa/state.json (release-gate layer when the game emits ui[]): overlapping visible non-overlay elements, off-screen/clipped rects, text below min px, optional grid snap. Absent ui[] => ui_lint_not_implemented (reported, not a pass). Verdict JSON {ok, exitCode, checks[], ui:{status,findings[],dumpsChecked}} — findings carry {check, ids, rects, tick, detail}.",
+  input: z
+    .object({
+      qa_dir: z.string().optional().describe("game-clone dir holding qa/; default the clone root"),
+      viewport: z.string().optional().describe("WxH, default 1280x720 (the --resolution backbuffer)"),
+      min_text_px: z.number().min(1).max(72).optional().describe("minimum font size (default 10)"),
+      grid_px: z.number().min(1).max(512).optional().describe("require x/y on this grid, e.g. 8"),
+    })
+    .strict(),
+  async run(input, ctx) {
+    return runQa("ui-lint", input, ctx);
+  },
+};
+
+const qaHarnessTools = { qa_smoke: qaSmoke, qa_check: qaCheck, qa_determinism: qaDeterminism, qa_export_check: qaExportCheck, qa_ui_lint: qaUiLint };
 
 // ---------- media_capture (tools/media): stills, footage, and deterministic edits for marketing ----------
 // Built against docs/contracts only. Inputs are workspace-relative (the game clone is <workspace>/game);

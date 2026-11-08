@@ -58,7 +58,10 @@ truth, without loading the game:
 | frames | strip width divides by `frames` |
 | anchor | non-anchor sprites name an existing, non-self anchor id |
 | frame_drift | max fraction of differing pixels between consecutive frames ≤ threshold |
-| anchor_drift | asset frame 0 vs anchor frame 0 differing fraction ≤ threshold (null/skip when frame sizes differ or the anchor layout is invalid) |
+| anchor_mode | an asset with an anchor has a drift basis: declared `same-subject` / `style`, or `same-subject` by default for strips; a single-frame asset with an anchor and no mode fails, and so does a mode on an anchor sheet |
+| anchor_drift | `same-subject`: asset frame 0 vs anchor frame 0 differing fraction ≤ threshold (null/skip when frame sizes differ or the anchor layout is invalid); `style`: skipped |
+| style_similarity | `style` only: color-mix distance (total variation of the color histograms of **non-outline** opaque pixels, 0 = same mix, 1 = no color shared; the resolved outline color is excluded) ≤ `maxPaletteDistance`, and \|luma range − anchor luma range\| ≤ `maxLumaRangeDelta` (range = p95 − p5 of opaque-pixel luma, 0..1); sizes may differ |
+| style_outline | `style` only: share of frame-0 edge pixels (opaque, 4-adjacent to transparent) in the outline color ≥ `minOutlineShare`. Color = entry `outline`, else manifest `outline`, else the anchor's dominant edge color (when it covers ≥ `minOutlineShare` of the anchor's edge); `null` = no outline expected |
 
 Non-PNG assets (audio, .ttf fonts) are checked for existence only; malformed frame
 layouts skip the drift checks (the `frames` check already fails).
@@ -66,10 +69,13 @@ layouts skip the drift checks (the `frames` check already fails).
 Thresholds (options to `runGate` / defaults):
 
 ```json
-{ "maxOffPaletteShare": 0, "maxFrameDrift": 0.5, "maxAnchorDrift": 0.5 }
+{ "maxOffPaletteShare": 0, "maxFrameDrift": 0.5, "maxAnchorDrift": 0.5,
+  "maxPaletteDistance": 0.95, "maxLumaRangeDelta": 0.4, "minOutlineShare": 0.8 }
 ```
 
 Report shape: `{ ok, manifest, files, assets: [{ id, path, type, pass, checks[], numbers }], thresholds }`.
+`numbers`: `offPaletteShare`, `frameDrift[]`, `anchorDrift`, `anchorMode`, and in `style` mode `paletteDistance`,
+`lumaRange`, `anchorLumaRange`, `outlineColor`, `outlineShare`.
 `ok` is false when the manifest is invalid, files are missing/unlisted, or any check fails.
 
 ## Runner capability
@@ -85,6 +91,9 @@ of regenerating: no new generation or charge. If a strip can't be built, the raw
 trials (PROVIDERS.md "Credits"): `art_generate`, `art_quote` (free cost check), `art_anchor_winner`,
 `art_providers` (read-only state). State: `runs/art-providers.json`, `runs/art-credits.jsonl`,
 `runs/art-gallery.json` (env `ART_PROVIDERS_FILE` / `ART_CREDITS_FILE` / `ART_GALLERY_FILE`).
+PixelLab floor: set `PIXELLAB_MIN_REMAINING` (generations) and every pixellab call checks the live balance first;
+at or below the floor, or if the call's estimate would cross it, the call goes to comfy or the procedural floor
+without a PixelLab request (PROVIDERS.md "PixelLab floor").
 
 
 `art_tools` (runner/tools/registry.ts) exposes `art_lock`, `art_snap`, `art_outline`,

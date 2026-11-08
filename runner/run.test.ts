@@ -89,6 +89,37 @@ test("a declined approval deploys nothing to the site", async () => {
   assert.match(JSON.stringify(fake.requests[1].messages.at(-1)), /a human declined this action/);
 });
 
+test("T27: an itch_push dry run (explicit or defaulted) runs under an \"ask\" grant without an approval, and is ledgered as auto", async () => {
+  const spec = await loadAgent("send-agent", FIX); // itch_push: ask
+  for (const input of [{ dir: "web", target: "any-co/game:html5", build_id: "20261107-2115-abc1234", dry_run: true }, { dir: "web", target: "any-co/game:html5", build_id: "20261107-2115-abc1234" }]) {
+    const asked: unknown[] = [];
+    const runsDir = tmp();
+    const fake = new FakeProvider([{ content: [use("itch_push", input)] }, { content: [use("submit_result", { ok: true })] }]);
+    const r = await runAgent(spec, { task: "t", provider: fake, naive: null, runsDir, approver: async (req) => (asked.push(req), false) });
+    assert.equal(r.status, "done");
+    assert.equal(asked.length, 0, "no approval was requested for a dry run");
+    const result = JSON.stringify(fake.requests[1].messages.at(-1));
+    assert.doesNotMatch(result, /a human declined this action/);
+    assert.match(result, /BUTLER_API_KEY|build_id|dist/, "the tool itself ran (and stopped on its own checks)");
+    const ledger = readFileSync(path.join(runsDir, "ledger.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.deepEqual(ledger.map((e) => [e.kind, e.tool, e.decision, e.who]), [["approval", "itch_push", "approved", "auto (dry run: no approval needed)"]]);
+  }
+});
+
+test("T27: a real itch_push (dry_run:false) still goes through the full ask gate", async () => {
+  const spec = await loadAgent("send-agent", FIX);
+  const asked: Array<{ tool: string; input: unknown }> = [];
+  const fake = new FakeProvider([
+    { content: [use("itch_push", { dir: "web", target: "any-co/game:html5", build_id: "20261107-2115-abc1234", dry_run: false })] },
+    { content: [use("submit_result", { ok: true })] },
+  ]);
+  const r = await runAgent(spec, { task: "t", provider: fake, naive: null, runsDir: tmp(), approver: async (req) => (asked.push(req), false) });
+  assert.equal(r.status, "done");
+  assert.equal(asked.length, 1);
+  assert.equal(asked[0].tool, "itch_push");
+  assert.match(JSON.stringify(fake.requests[1].messages.at(-1)), /a human declined this action/);
+});
+
 test("run stops at the per-run budget before overspending", async () => {
   const spec = await loadAgent("good-agent", FIX); // max_task_usd 0.5
   const fake = new FakeProvider(Array.from({ length: 10 }, () => ({ content: [use("workspace_read", {})] })), 200_000);

@@ -12,7 +12,7 @@
 //      the frame a player sees, which is what screenshot.md asks for. A non-zero exit, no frames,
 //      or the engine's load-failure lines (missing scene/script) fail too.
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { decodePng, type RgbaImage } from "../art/png.ts";
@@ -129,6 +129,8 @@ export interface PackRun {
   timedOut: boolean;
   frames: number;
   lastFrame: string | null;
+  /** Every rendered frame, in order (absolute paths in the run dir). */
+  framePaths: string[];
   loadErrors: string[];
   outputTail: string;
 }
@@ -172,7 +174,7 @@ export async function runPack(pck: string, opts: { frames?: number; fps?: number
   const loadErrors = out.split("\n").filter((l) => LOAD_FAILURE.test(l)).slice(0, 10).map((l) => l.trim());
   const run: PackRun = {
     exitCode: end.code, signal: end.signal, timedOut, frames: pngs.length,
-    lastFrame: pngs.length ? path.join(framesDir, pngs.at(-1)!) : null, loadErrors, outputTail: out.slice(-1500),
+    lastFrame: pngs.length ? path.join(framesDir, pngs.at(-1)!) : null, framePaths: pngs.map((f) => path.join(framesDir, f)), loadErrors, outputTail: out.slice(-1500),
   };
   if (!opts.keepDir && !run.lastFrame) rmSync(dir, { recursive: true, force: true });
   return run;
@@ -187,10 +189,22 @@ export interface PackReport {
   files?: number;
   autoloads: string[];
   missing_autoloads: string[];
-  run?: Omit<PackRun, "outputTail" | "lastFrame"> & { last_frame: string | null; stats?: FrameStats };
+  run?: Omit<PackRun, "outputTail" | "lastFrame" | "framePaths"> & { last_frame: string | null; stats?: FrameStats; saved_frames?: string[] };
 }
 export interface ExportCheckResult { ok: boolean; exitCode: 0 | 1 | 2; checks: Check[]; packs: PackReport[]; error?: string }
-export interface ExportCheckOptions { gameDir: string; distDir?: string; frames?: number; timeoutMs?: number; run?: boolean; godot?: string; thresholds?: typeof BLANK_DEFAULTS }
+export interface ExportCheckOptions {
+  gameDir: string; distDir?: string; frames?: number; timeoutMs?: number; run?: boolean; godot?: string; thresholds?: typeof BLANK_DEFAULTS;
+  /** Copy this many evenly spaced frames (always including the last) into saveDir/<pack>/ (UI review of the exported build). */
+  saveFrames?: number;
+  saveDir?: string;
+}
+
+/** `count` frame indices out of `n`, evenly spaced, ascending, always ending at the last frame. */
+export function pickFrames(n: number, count: number): number[] {
+  if (n <= 0 || count <= 0) return [];
+  const k = Math.min(n, Math.floor(count));
+  return [...new Set(Array.from({ length: k }, (_, i) => Math.round(((i + 1) * n) / k) - 1))].sort((a, b) => a - b);
+}
 
 /** The packs a release ships: dist/web/index.pck (required) and any dist/windows/*.pck. */
 export function shippedPacks(distDir: string): string[] {
@@ -236,6 +250,15 @@ export async function exportCheck(o: ExportCheckOptions): Promise<ExportCheckRes
       const run = await runPack(pck, { frames: o.frames, timeoutMs: o.timeoutMs, godot: o.godot });
       const stats = run.lastFrame ? frameStats(decodePng(new Uint8Array(readFileSync(run.lastFrame)))) : undefined;
       report.run = { exitCode: run.exitCode, signal: run.signal, timedOut: run.timedOut, frames: run.frames, loadErrors: run.loadErrors, last_frame: run.lastFrame, ...(stats ? { stats } : {}) };
+      if (o.saveFrames && o.saveDir && run.framePaths.length) {
+        const dest = path.join(o.saveDir, rel.replace(/\.pck$/i, "").replace(/[^A-Za-z0-9_-]+/g, "-"));
+        mkdirSync(dest, { recursive: true });
+        report.run.saved_frames = pickFrames(run.framePaths.length, o.saveFrames).map((i) => {
+          const to = path.join(dest, `frame-${String(i).padStart(4, "0")}.png`);
+          copyFileSync(run.framePaths[i], to);
+          return to;
+        });
+      }
       const runIssues = [
         ...(run.timedOut ? ["timed out"] : []),
         ...(run.exitCode !== 0 ? [`engine exit ${run.exitCode}${run.signal ? ` (${run.signal})` : ""}`] : []),

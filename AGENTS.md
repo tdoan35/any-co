@@ -80,6 +80,7 @@ TODO: fill in as they exist.
 - eval Market Analyst: `npm run eval:market-analyst -- runs/<run_id>` (see `agents/market-analyst/eval/`)
 - eval Pitch Writer pitches: `npm run eval:pitch-writer -- runs/<run_id>`
 - eval Game Design Director design doc: `npm run eval:game-design-director -- runs/<run_id>` (design hand-off: `node --import tsx scripts/greenlight-handoff.ts --design runs/<chair-run>`)
+- eval UI/UX Designer: `npm run eval:ui-ux-designer -- runs/<run_id>` (ui-spec sections, findings cite real frames + elements, writes only docs/ui-spec.md)
 - kill switch: `touch runs/KILL` (remove to resume); or `STUDIO_KILL=1`
 
 ## Conventions

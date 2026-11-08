@@ -38,7 +38,8 @@
     "art": "node --import tsx tools/art/art.ts",
     "eval:art-director": "node --env-file-if-exists=.env --import tsx scripts/eval-art-director.ts",
     "eval:sprite-artist": "node --env-file-if-exists=.env --import tsx scripts/eval-artists.ts",
-    "eval:env-ui-artist": "node --env-file-if-exists=.env --import tsx scripts/eval-artists.ts"
+    "eval:env-ui-artist": "node --env-file-if-exists=.env --import tsx scripts/eval-artists.ts",
+    "eval:ui-ux-designer": "node --env-file-if-exists=.env --import tsx scripts/eval-ui-ux-designer.ts"
   },
   "dependencies": {
     "@usenaive-sdk/managed-agents": "^0.12.1",
