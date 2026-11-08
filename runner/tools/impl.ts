@@ -1567,10 +1567,14 @@ async function runQa(mode: QaMode, input: Record<string, unknown>, ctx: ToolCont
       if (input["frames"] !== undefined) args.push("--frames", String(input["frames"]));
       args.push("--timeout-ms", String(input["timeout_ms"] ?? 180_000));
       if (input["run"] === false) args.push("--run", "false");
+      if (input["save_frames"] !== undefined) args.push("--save-frames", String(input["save_frames"]), "--save-dir", mediaOut(ctx.workspace, "media/export-frames"));
       const tsxLoader = fileURLToPath(import.meta.resolve("tsx"));
       const proc = await execText(process.execPath, ["--import", `file://${tsxLoader}`, path.join(ROOT, "tools", "qa", "qa.ts"), "export-check", ...args], 15 * 60_000);
       try {
-        return { content: clip(JSON.stringify(JSON.parse(proc.out)), MAX_RESULT_CHARS) };
+        const result = JSON.parse(proc.out);
+        // saved frames are reported workspace-relative, the paths image_view takes
+        for (const p of result.packs ?? []) if (Array.isArray(p.run?.saved_frames)) p.run.saved_frames = p.run.saved_frames.map((f: string) => path.relative(ctx.workspace, f));
+        return { content: clip(JSON.stringify(result), MAX_RESULT_CHARS) };
       } catch {
         throw new Error(`qa export-check produced no JSON (exit ${proc.code}): ${proc.err.slice(-400)}`);
       }
@@ -1682,6 +1686,7 @@ const qaExportCheck: ToolImpl = {
       frames: z.number().int().min(10).max(600).optional().describe("frames to render before the still (default 90 at 30 fps)"),
       timeout_ms: z.number().int().positive().max(10 * 60_000).optional().describe("per-pack engine timeout (default 180000)"),
       run: z.boolean().optional().describe("false = pack-table check only (no engine run)"),
+      save_frames: z.number().int().min(1).max(12).optional().describe("copy this many evenly spaced rendered frames (always including the last) to media/export-frames/<pack>/ in your workspace, for image_view (UI review of the exported build)"),
     })
     .strict(),
   async run(input, ctx) {

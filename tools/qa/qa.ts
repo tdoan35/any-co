@@ -41,7 +41,7 @@ function usage(): never {
       "                [--max-entities N] [--identical-dumps N] [--tick-rate N] [--ack-timeout-ms N] [--ready-timeout-ms N] [--end-wait-ms N]",
       "       qa check --dir <qa dir> [--max-entities N] [--identical-dumps N] [--tick-rate N]",
       "       qa determinism --cmd '<json argv>' --dir <game dir> --seed N --ticks N [same options as smoke]",
-      "       qa export-check --dir <game dir> [--dist <dist dir, default <dir>/dist>] [--frames N] [--timeout-ms N] [--run true|false]",
+      "       qa export-check --dir <game dir> [--dist <dist dir, default <dir>/dist>] [--frames N] [--timeout-ms N] [--run true|false] [--save-frames N --save-dir <dir>]",
     ].join("\n"),
   );
   process.exit(2);
@@ -324,6 +324,8 @@ export function parseExportArgv(argv: string[]): ExportCheckOptions {
       case "--frames": o.frames = num(v); break;
       case "--timeout-ms": o.timeoutMs = num(v); break;
       case "--run": if (v !== "true" && v !== "false") usage(); o.run = v === "true"; break;
+      case "--save-frames": o.saveFrames = num(v); break;
+      case "--save-dir": o.saveDir = path.resolve(v); break;
       default: usage();
     }
   }
