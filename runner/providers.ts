@@ -199,8 +199,82 @@ export class OpenAICompatibleProvider implements Provider {
     private apiKey: string,
     private model: string,
     private price: { input: number; output: number },
+    private api: "chat_completions" | "responses" = "chat_completions",
   ) {
     this.label = `openai:${model}`;
+  }
+
+  /** POST to the API with the shared retry policy; a non-2xx answer throws with its status. */
+  private async post(route: string, payload: string): Promise<Response> {
+    return withRetry(async () => {
+      const r = await fetch(`${this.baseUrl.replace(/\/$/, "")}${route}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${this.apiKey}` },
+        body: payload,
+        signal: AbortSignal.timeout(300_000),
+      });
+      if (!r.ok) throw Object.assign(new Error(`${this.label} HTTP ${r.status}: ${(await r.text()).slice(0, 500)}`), { status: r.status });
+      return r;
+    }, this.label);
+  }
+
+  /**
+   * OpenAI Responses API (POST /responses), stateless: the whole history goes in `input` every turn (store: false).
+   * Tool calls come back as `function_call` output items; results go back as `function_call_output`; a tool's
+   * images ride a user message right after (same rule as Chat Completions). Function tools are sent with
+   * strict: false, because strict mode demands schemas the runner's model-safe schemas don't promise.
+   */
+  private async completeResponses(req: ModelRequest): Promise<ModelReply> {
+    const payload = JSON.stringify({
+      model: this.model,
+      instructions: req.system,
+      input: toResponsesInput(req.messages),
+      max_output_tokens: req.max_tokens,
+      store: false,
+      ...(req.tools.length ? { tools: req.tools.map((t) => ({ type: "function", name: t.name, description: t.description, parameters: t.input_schema, strict: false })) } : {}),
+    });
+    if (process.env.ANYCO_PROVIDER_DEBUG_DIR) writeFileSync(path.join(process.env.ANYCO_PROVIDER_DEBUG_DIR, `req-${Date.now()}.json`), payload); // no key in the body
+    const res = await this.post("/responses", payload);
+    interface OutputItem {
+      type?: string;
+      content?: Array<{ type?: string; text?: string }>;
+      call_id?: string;
+      name?: string;
+      arguments?: string;
+    }
+    const body = (await res.json()) as {
+      id?: string; model?: string; status?: string; incomplete_details?: { reason?: string } | null;
+      output?: OutputItem[]; usage?: { input_tokens?: number; output_tokens?: number };
+    };
+    const content: Block[] = [];
+    for (const item of body.output ?? []) {
+      if (item.type === "message")
+        for (const part of item.content ?? []) if (part.type === "output_text" && part.text) content.push({ type: "text", text: part.text });
+      if (item.type === "function_call") {
+        let input: Record<string, unknown> = {};
+        try {
+          input = JSON.parse(item.arguments || "{}") as Record<string, unknown>;
+        } catch {
+          input = { _unparseable_arguments: String(item.arguments) };
+        }
+        content.push({ type: "tool_use", id: item.call_id ?? "", name: item.name ?? "", input });
+      }
+    }
+    if (process.env.ANYCO_PROVIDER_DEBUG && content.length === 0) console.error(`[${this.label}] raw reply: ${JSON.stringify(body).slice(0, 4000)}`);
+    const inTok = body.usage?.input_tokens ?? 0;
+    const outTok = body.usage?.output_tokens ?? 0; // includes reasoning tokens, which are billed as output
+    return {
+      content,
+      stop_reason: content.some((b) => b.type === "tool_use")
+        ? "tool_use"
+        : body.status === "incomplete" && body.incomplete_details?.reason === "max_output_tokens"
+          ? "max_tokens"
+          : "end_turn",
+      usage: { input_tokens: inTok, output_tokens: outTok },
+      cost_micro_usd: Math.ceil(inTok * this.price.input + outTok * this.price.output),
+      request_id: body.id ?? "",
+      model: body.model ?? this.model,
+    };
   }
 
   /** OpenAI's current models refuse `max_tokens` on Chat Completions and want `max_completion_tokens`; most other
@@ -208,6 +282,7 @@ export class OpenAICompatibleProvider implements Provider {
   private completionTokens = false;
 
   async complete(req: ModelRequest): Promise<ModelReply> {
+    if (this.api === "responses") return this.completeResponses(req);
     const payloadFor = () => JSON.stringify({
       model: this.model,
       ...(this.completionTokens ? { max_completion_tokens: req.max_tokens } : { max_tokens: req.max_tokens }),
@@ -297,6 +372,9 @@ export function toOpenAIMessages(system: string, messages: Message[]): any[] {
       const calls = m.content
         .filter((b): b is ToolUseBlock => b.type === "tool_use")
         .map((b) => ({ id: b.id, type: "function", function: { name: b.name, arguments: JSON.stringify(b.input) } }));
+      // An empty reply (no text, no tool calls) is dropped: {content: null} without tool_calls is a 400 on
+      // OpenAI ("expected a string, got null"), which killed ui-ux-designer 20261107-214504 at turn 17.
+      if (!text && calls.length === 0) continue;
       out.push({ role: "assistant", content: text || null, ...(calls.length ? { tool_calls: calls } : {}) });
     } else {
       for (const b of m.content) {
@@ -324,6 +402,50 @@ export function toOpenAIMessages(system: string, messages: Message[]): any[] {
         pendingToolImages = [];
       }
     }
+  }
+  return out;
+}
+
+const inputImage = (b: ImageBlock): Record<string, unknown> => {
+  if (b.source.type !== "base64") throw new Error("toResponsesInput got an unexpanded image ref; call wireMessages() first");
+  return { type: "input_image", image_url: `data:${b.source.media_type};base64,${b.source.data}` };
+};
+
+/**
+ * Runner messages → Responses API input items. Assistant tool_use → function_call (call_id only: no item id, so the
+ * API takes it as fresh input, not a reference to a stored item); tool_result → function_call_output (text);
+ * a tool's images → one user message right after the outputs, each named by its call_id.
+ */
+export function toResponsesInput(messages: Message[]): any[] {
+  const out: any[] = [];
+  for (const m of messages) {
+    if (typeof m.content === "string") {
+      out.push({ role: m.role, content: m.content });
+      continue;
+    }
+    if (m.role === "assistant") {
+      const text = m.content.filter((b) => b.type === "text").map((b) => b.text).join("\n");
+      if (text) out.push({ role: "assistant", content: text });
+      for (const b of m.content)
+        if (b.type === "tool_use") out.push({ type: "function_call", call_id: b.id, name: b.name, arguments: JSON.stringify(b.input) });
+      continue;
+    }
+    const images: Array<{ id: string; img: ImageBlock }> = [];
+    const parts: any[] = [];
+    for (const b of m.content) {
+      if (b.type === "tool_result") {
+        if (typeof b.content === "string") out.push({ type: "function_call_output", call_id: b.tool_use_id, output: b.content });
+        else {
+          const text = b.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
+          const imgs = b.content.filter((c): c is ImageBlock => c.type === "image");
+          out.push({ type: "function_call_output", call_id: b.tool_use_id, output: imgs.length ? `${text}\n[image follows]` : text });
+          for (const img of imgs) images.push({ id: b.tool_use_id, img });
+        }
+      } else if (b.type === "text") parts.push({ type: "input_text", text: b.text });
+      else if (b.type === "image") parts.push(inputImage(b));
+    }
+    if (images.length) out.push({ role: "user", content: images.flatMap(({ id, img }) => [{ type: "input_text", text: `image from tool_call ${id}` }, inputImage(img)]) });
+    if (parts.length) out.push({ role: "user", content: parts });
   }
   return out;
 }
@@ -359,5 +481,5 @@ export function providerFor(spec: AgentSpec, client: NaiveClient | null, modelOv
   const baseUrl = process.env[p.base_url_env]?.trim() || p.base_url_default;
   const apiKey = process.env[p.api_key_env];
   if (!baseUrl || !apiKey) throw new Error(`${spec.name}: set ${baseUrl ? "" : `${p.base_url_env} and `}${p.api_key_env} in .env`);
-  return new OpenAICompatibleProvider(baseUrl, apiKey, modelOverride ?? p.model, p.usd_per_mtok);
+  return new OpenAICompatibleProvider(baseUrl, apiKey, modelOverride ?? p.model, p.usd_per_mtok, p.api);
 }

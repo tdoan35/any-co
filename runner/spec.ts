@@ -29,6 +29,8 @@ export const Provider = z.discriminatedUnion("kind", [
       model: z.string().min(1), // provider's own model id
       base_url_env: z.string().regex(/^[A-Z][A-Z0-9_]*$/),
       base_url_default: z.string().url().optional(), // used when base_url_env is unset or empty (e.g. https://api.openai.com/v1)
+      // Wire API: Chat Completions (default; every gateway) or OpenAI's Responses API (models whose tool calling requires it, e.g. gpt-6.1-*)
+      api: z.enum(["chat_completions", "responses"]).default("chat_completions"),
       api_key_env: z.string().regex(/^[A-Z][A-Z0-9_]*$/),
       usd_per_mtok: z.object({ input: z.number().nonnegative(), output: z.number().nonnegative() }).strict(),
     })
