@@ -30,6 +30,12 @@ const SPECS: Record<string, GameSpec> = {
     covers: ["store/cover-630x500-titled.png", "store/cover-630x500.png"],
     capsules: ["assets/capsule/capsule-store.png", "assets/capsule/capsule-store-v2.png", "assets/capsule/capsule-store-v3.png"],
     storeMd: "store/itch-page.md",
+    // v3s (Nov 8): agent v3 cut with new moving gameplay, spliced by the operator (breakroom + 4 s end card from v1).
+    trailer: {
+      rel: "trailer-soul-shift-v3s.mp4",
+      abs: (_root, runsDir) => path.join(runsDir, "handoff", "crd_9cd3ee3b-c29", "media", "trailer-soul-shift-v3s.mp4"),
+      base: (_root, runsDir) => path.join(runsDir, "handoff", "crd_9cd3ee3b-c29", "media"),
+    },
   },
   "caravan-cargo-cult": {
     name: "Caravan Cargo Cult",
