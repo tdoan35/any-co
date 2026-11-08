@@ -6,9 +6,10 @@ export const UI_SPEC_SECTIONS = ["Screen regions", "Visual hierarchy", "Panel st
 export const UI_SEVERITIES = ["blocker", "major", "minor", "polish"] as const;
 
 // UI/UX review needs eyes on the exported build's frames. The Naïve proxy rejects image blocks, so this agent
-// runs on OpenAI directly (T33, Ty's OpenAI budget): gpt-5.4-mini is image-in, serves Chat Completions with
-// function calling at its default reasoning effort (none), $0.75 / $4.50 per MTok (OpenAI pricing page,
-// 2026-11-08). Live check: a 16x16 PNG as an image_view result → it called the tool with "red" (231 micro-USD).
+// runs on OpenAI directly (T33, Ty's OpenAI budget). T33b, Ty's call: the gpt-6.1 tier. gpt-6.1-terra ("A fast,
+// efficient model for visual reasoning, precise computer use…", input modalities text + image) at $1.00 in /
+// $5.00 out per MTok (short context, developers.openai.com/api/docs/pricing, 2026-11-08), half of gpt-6.1-sol.
+// "Tool calling requires the Responses API", so the provider speaks /v1/responses (api: "responses").
 export default defineAgent({
   name: "ui-ux-designer",
   description: "Design: owns docs/ui-spec.md (regions, hierarchy, panel style, type scale, spacing, genre conventions) and reviews exported-build frames for severity-ranked UI findings.",
@@ -17,11 +18,12 @@ export default defineAgent({
   model: "anthropic/claude-opus-5.5", // Naïve catalogue id, used only if this agent is ever hosted (the proxy rejects images)
   provider: {
     kind: "openai_compatible",
-    model: "gpt-5.4-mini",
+    model: "gpt-6.1-terra",
+    api: "responses",
     base_url_env: "OPENAI_BASE_URL",
     base_url_default: "https://api.openai.com/v1",
     api_key_env: "OPENAI_API_KEY",
-    usd_per_mtok: { input: 0.75, output: 4.5 },
+    usd_per_mtok: { input: 1, output: 5 },
   },
   budget: { cap_usd: 15, max_task_usd: 3, period: "day" },
   tools: {

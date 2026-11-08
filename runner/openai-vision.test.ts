@@ -108,3 +108,98 @@ test("T33: base_url_default applies when the base-URL env is unset or empty; the
     }
   }
 });
+
+// ---- T33b: OpenAI Responses API (gpt-6.1-*: "Tool calling requires the Responses API") ----
+
+const fnCall = (name: string, args: unknown, id: string) => ({
+  status: 200,
+  json: { id: `resp-${id}`, model: "gpt-6.1-terra", status: "completed", output: [{ type: "reasoning", summary: [] }, { type: "function_call", id: `fc-${id}`, call_id: id, name, arguments: JSON.stringify(args) }], usage: { input_tokens: 100, output_tokens: 20 } },
+});
+
+test("T33b: Responses API mode: tools, function_call / function_call_output items, and the tool's image as input_image after the output", async () => {
+  const api = await fakeOpenAI([() => fnCall("art_view", { path: "frame.png" }, "v1"), () => fnCall("submit_result", { answer: "red pixel" }, "s1")]);
+  try {
+    const spec = await loadAgent("image-agent", FIX);
+    const runsDir = mkdtempSync(path.join(tmpdir(), "t33b-"));
+    mkdirSync(path.join(runsDir, "r", "workspace"), { recursive: true });
+    writeFileSync(path.join(runsDir, "r", "workspace", "frame.png"), PNG);
+    const provider = new OpenAICompatibleProvider(api.base, "k", "gpt-6.1-terra", { input: 1, output: 5 }, "responses");
+    const r = await runAgent(spec, { task: "Look at frame.png", provider, naive: null, runsDir, runId: "r" });
+    assert.equal(r.status, "done", JSON.stringify(r));
+    assert.deepEqual(r.output, { answer: "red pixel" });
+    assert.equal(api.seen.length, 2);
+
+    const first = api.seen[0].body;
+    assert.equal(first.model, "gpt-6.1-terra");
+    assert.equal(typeof first.instructions, "string");
+    assert.equal(first.store, false);
+    assert.equal(first.max_output_tokens, spec.limits.max_output_tokens);
+    assert.ok(!("max_tokens" in first) && !("messages" in first));
+    const viewTool = first.tools.find((t: any) => t.name === "art_view");
+    assert.deepEqual([viewTool.type, viewTool.strict, typeof viewTool.parameters], ["function", false, "object"]);
+
+    const input = api.seen[1].body.input as any[];
+    const call = input.findIndex((i) => i.type === "function_call" && i.call_id === "v1");
+    assert.ok(call >= 0, JSON.stringify(input).slice(0, 600));
+    assert.equal(input[call].name, "art_view");
+    assert.equal(input[call].id, undefined, "no stored-item id: the call is fresh input");
+    const outIdx = input.findIndex((i) => i.type === "function_call_output" && i.call_id === "v1");
+    assert.equal(outIdx, call + 1);
+    assert.match(input[outIdx].output, /\[image follows\]$/);
+    const img = input[outIdx + 1];
+    assert.equal(img.role, "user");
+    assert.deepEqual(img.content[0], { type: "input_text", text: "image from tool_call v1" });
+    assert.deepEqual(img.content[1], { type: "input_image", image_url: `data:image/png;base64,${PNG.toString("base64")}` });
+    assert.equal(r.spent_micro_usd ?? 0, 2 * Math.ceil(100 * 1 + 20 * 5));
+  } finally {
+    await api.close();
+  }
+});
+
+test("T33b: Responses text replies, an output-token cutoff, and the designer spec's provider", async () => {
+  const api = await fakeOpenAI([
+    () => ({ status: 200, json: { id: "r1", status: "completed", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "hello" }] }], usage: { input_tokens: 5, output_tokens: 1 } } }),
+    () => ({ status: 200, json: { id: "r2", status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, output: [{ type: "reasoning", summary: [] }], usage: { input_tokens: 5, output_tokens: 64 } } }),
+  ]);
+  try {
+    const p = new OpenAICompatibleProvider(api.base, "k", "m", { input: 1, output: 5 }, "responses");
+    const req = { system: "s", messages: [{ role: "user" as const, content: "hi" }], tools: [], max_tokens: 64 };
+    const a = await p.complete(req);
+    assert.deepEqual(a.content, [{ type: "text", text: "hello" }]);
+    assert.equal(a.stop_reason, "end_turn");
+    assert.equal(a.cost_micro_usd, 10);
+    const b = await p.complete(req);
+    assert.equal(b.stop_reason, "max_tokens");
+    assert.deepEqual(b.content, []);
+    assert.equal(api.seen[0].body.tools, undefined);
+    assert.deepEqual(api.seen[0].body.input, [{ role: "user", content: "hi" }]);
+  } finally {
+    await api.close();
+  }
+  const spec = await loadAgent("ui-ux-designer");
+  assert.deepEqual(
+    spec.provider.kind === "openai_compatible" && [spec.provider.model, spec.provider.api, spec.provider.usd_per_mtok],
+    ["gpt-6.1-terra", "responses", { input: 1, output: 5 }],
+  );
+  const prev = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "sk-test";
+  try {
+    assert.equal((providerFor(spec, null) as any).api, "responses");
+  } finally {
+    if (prev === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = prev;
+  }
+});
+
+test("T33b: an empty assistant reply is dropped from Chat Completions history (null content without tool_calls is a 400)", async () => {
+  const { toOpenAIMessages, toResponsesInput } = await import("./providers.ts");
+  const msgs = [
+    { role: "user" as const, content: "go" },
+    { role: "assistant" as const, content: [] },
+    { role: "user" as const, content: "You must finish by calling the submit_result tool with your result." },
+  ];
+  const oa = toOpenAIMessages("s", msgs);
+  assert.deepEqual(oa.map((m: any) => m.role), ["system", "user", "user"]);
+  assert.ok(oa.every((m: any) => m.content !== null || m.tool_calls));
+  assert.deepEqual(toResponsesInput(msgs).map((m: any) => m.role), ["user", "user"]);
+});
