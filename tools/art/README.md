@@ -91,6 +91,8 @@ of regenerating: no new generation or charge. If a strip can't be built, the raw
 trials (PROVIDERS.md "Credits"): `art_generate`, `art_quote` (free cost check), `art_anchor_winner`,
 `art_providers` (read-only state). State: `runs/art-providers.json`, `runs/art-credits.jsonl`,
 `runs/art-gallery.json` (env `ART_PROVIDERS_FILE` / `ART_CREDITS_FILE` / `ART_GALLERY_FILE`).
+Default provider (T39b): `ART_DEFAULT_PROVIDER=comfy` makes a call with no provider comfy-only (reference required, no paid
+fallback); unset keeps the anchor-winner rule (PROVIDERS.md "Default provider").
 Guards (T39): `out` must be a named PNG under `game/assets/`; postprocess needs the manifest entry first; the per-asset cap
 (1 + 2) is exact and race-free; past it, a new out path or an operator-approved redo (`art_redo` / `npm run art -- redo`).
 PixelLab floor: set `PIXELLAB_MIN_REMAINING` (generations) and every pixellab call checks the live balance first;
