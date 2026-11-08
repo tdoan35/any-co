@@ -32,6 +32,13 @@ The adapter restarts are manual: agent specs are read once at startup.
 
 Chat is the one write path. Every message you send after the event start (`STUDIO_EVENT_START`, default Sat Nov 7 1:00 PM PT) is appended to `runs/ledger.jsonl` as a human intervention, even a status question. Sessions are stored in `runs/chat/`. Before the event, wipe `runs/` once; never after it starts.
 
+## Watching another folder's runs (mirror)
+`STUDIO_RUNS_DIR=<path>` points the adapter at another runs folder (relative paths resolve against the repo root);
+approvals, chat, the board, the ledger and the file watcher all follow it, and the adapter logs the effective dir at
+startup. A window on a runs dir outside this repo's own `runs/` is read-only (also forced by `STUDIO_WINDOW_READONLY=1`):
+the chat POSTs answer 403 `read-only window (mirror)`. A mirror is rsync'd with `--delete`, so writes there vanish,
+and a chat turn would spend the viewer's key and append interventions to a ledger copy.
+
 ## How it fits together
 
 ```

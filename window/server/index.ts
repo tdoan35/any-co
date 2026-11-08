@@ -28,6 +28,9 @@ export interface ServerOptions {
   ledgerFile?: string; eventStart?: string; now?: () => Date;
   /** Approvals queue read by weave items; defaults to approvals.jsonl inside runsDir (STUDIO_APPROVALS_FILE wins). */
   approvalsFile?: string;
+  /** Refuse chat writes (403). Default: STUDIO_WINDOW_READONLY=1, or STUDIO_RUNS_DIR pointing outside this repo's runs/
+   *  (a mirror: rsync --delete drops writes, and a chat turn would spend the viewer's key into a ledger copy). */
+  readOnly?: boolean;
   /** The studio board shared by chat turns and the weave view; defaults to boardFromEnv (STUDIO_BOARD*). */
   board?: Board;
 }
@@ -51,8 +54,24 @@ const readJson = (req: http.IncomingMessage, max = 100_000) =>
     req.on("error", reject);
   });
 
+/** The runs dir a window reads: opts, then STUDIO_RUNS_DIR (relative to the repo root), then <repo>/runs. */
+export function windowRunsDir(opts: Pick<ServerOptions, "runsDir"> = {}, env: NodeJS.ProcessEnv = process.env): { runsDir: string; fromEnv: boolean } {
+  if (opts.runsDir) return { runsDir: opts.runsDir, fromEnv: false };
+  if (env.STUDIO_RUNS_DIR) return { runsDir: path.resolve(ROOT, env.STUDIO_RUNS_DIR), fromEnv: true };
+  return { runsDir: path.join(ROOT, "runs"), fromEnv: false };
+}
+
+/** Read-only when asked (opts / STUDIO_WINDOW_READONLY=1) or implied by an env runs dir outside this repo's runs/. */
+export function windowReadOnly(opts: Pick<ServerOptions, "readOnly">, runsDir: string, fromEnv: boolean, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (opts.readOnly !== undefined) return opts.readOnly;
+  if (env.STUDIO_WINDOW_READONLY === "1") return true;
+  const own = path.join(ROOT, "runs");
+  return fromEnv && path.resolve(runsDir) !== own && !path.resolve(runsDir).startsWith(own + path.sep);
+}
+
 export async function startServer(opts: ServerOptions = {}) {
-  const runsDir = opts.runsDir ?? path.join(ROOT, "runs");
+  const { runsDir, fromEnv } = windowRunsDir(opts);
+  const readOnly = windowReadOnly(opts, runsDir, fromEnv);
   const gamesRoot = opts.gamesRoot ?? process.env.STUDIO_GAMES_DIR ?? path.join(ROOT, "games");
   const approvalsFile = opts.approvalsFile ?? process.env.STUDIO_APPROVALS_FILE ?? path.join(runsDir, "approvals.jsonl");
   const { ok: specs, errors } = await loadAllAgents(opts.agentsDir);
@@ -99,7 +118,7 @@ export async function startServer(opts: ServerOptions = {}) {
       if (!naive && spec.provider.kind === "naive") throw new Error("NAIVE_API_KEY is not set (add it to .env and restart the adapter)");
       return providerFor(spec, naive);
     }),
-    ledgerFile: opts.ledgerFile,
+    ledgerFile: opts.ledgerFile ?? process.env.STUDIO_LEDGER_FILE ?? path.join(runsDir, "ledger.jsonl"),
     eventStart: opts.eventStart ?? process.env.STUDIO_EVENT_START,
     now: opts.now,
     onChange: (sessionId, messageId) => emit({ type: "session.message", sessionId, messageId }),
@@ -151,6 +170,7 @@ export async function startServer(opts: ServerOptions = {}) {
     const seg = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
     try {
       if (req.method === "POST") {
+        if (readOnly) return json(403, { error: "read-only window (mirror)" });
         if (url.pathname === "/api/sessions") {
           const body = CreateSessionRequestSchema.safeParse(await readJson(req));
           if (!body.success) return json(400, { error: body.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
@@ -223,6 +243,8 @@ export async function startServer(opts: ServerOptions = {}) {
   const { port } = server.address() as { port: number };
   return {
     port,
+    runsDir,
+    readOnly,
     close: () => new Promise<void>((resolve) => {
       clearInterval(heartbeat); clearTimeout(timer); watcher?.close();
       for (const c of clients) c.end();
@@ -235,7 +257,8 @@ export async function startServer(opts: ServerOptions = {}) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     const s = await startServer({ port: Number(process.env.PORT) || 8787 });
-    console.log(`[window] adapter (read-only except chat) on http://127.0.0.1:${s.port}  (runs/ + agents/)`);
+    console.log(`[window] adapter (${s.readOnly ? "read-only, chat disabled" : "read-only except chat"}) on http://127.0.0.1:${s.port}`);
+    console.log(`[window] runs dir: ${s.runsDir}${s.readOnly ? "  (mirror: chat writes refused)" : ""}`);
   } catch (e) {
     console.error(`[window] ${(e as Error).message}`);
     process.exit(1);
