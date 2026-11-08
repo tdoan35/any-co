@@ -2,14 +2,21 @@
 // so one spec works on both runners (docs/naive-notes.md: "write prompts by capability").
 //   naive: the Naïve built-in tools that provide it on the hosted harness.
 //   local: whether the local runner implements it (runner/tools/impl.ts).
+import { LANES } from "./lanes/index.ts";
+import { mergeCapabilities } from "./lanes/merge.ts";
+
 export interface Capability {
   summary: string;
   naive: string[];
   local: boolean;
   note?: string;
+  /** Sends or spends outside the studio: spec validation refuses "allow", so every grant is "ask"
+   *  (approval gate + ledger, AGENTS.md rule 4). */
+  outward?: boolean;
 }
 
-export const CAPABILITIES = {
+/** The core capabilities. Lane capabilities (runner/tools/lanes/) are merged in below. */
+export const CORE_CAPABILITIES = {
   catalog_query: {
     summary: "Fixed queries over the Steam catalog (tools/catalog/query.py)",
     naive: ["bash", "read"],
@@ -92,6 +99,7 @@ export const CAPABILITIES = {
   },
   // ----- gated sends (T7): every send is ask-gated by the spec and ledgered via the approval gate -----
   itch_push: {
+    outward: true,
     summary: "Push a built dist/ channel to itch.io with butler (dry-run by default; a real push needs the operator's approval)",
     naive: ["bash"],
     local: true,
@@ -104,12 +112,14 @@ export const CAPABILITIES = {
     note: "Env only: BUTLER_BIN + BUTLER_API_KEY.",
   },
   email_send: {
+    outward: true,
     summary: "Send one outreach email from the studio's Naïve identity inbox",
     naive: [],
     local: true,
     note: "SDK emails.send: needs NAIVE_EMAIL_IDENTITY_ID + NAIVE_EMAIL_INBOX_ID in env; STUDIO_EMAIL_BLOCKLIST refuses addresses/domains. No reply_to in the SDK shape.",
   },
   site_deploy: {
+    outward: true,
     summary: "Publish the studio site (web build + marketing pages) to the studio's Naïve App; rollback to an earlier deployment",
     naive: [],
     local: true,
@@ -129,4 +139,9 @@ export const CAPABILITIES = {
   },
 } as const satisfies Record<string, Capability>;
 
-export type CapabilityName = keyof typeof CAPABILITIES;
+type Lanes = typeof LANES;
+export type LaneCapabilityName = { [L in keyof Lanes]: keyof Lanes[L]["CAPABILITIES"] & string }[keyof Lanes];
+export type CapabilityName = keyof typeof CORE_CAPABILITIES | LaneCapabilityName;
+
+/** Core + every lane's capabilities (a lane can't redefine an existing one: merge.ts throws at load). */
+export const CAPABILITIES = mergeCapabilities(CORE_CAPABILITIES, LANES) as Record<CapabilityName, Capability>;
