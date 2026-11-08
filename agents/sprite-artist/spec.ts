@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { defineAgent } from "../../runner/spec.ts";
+import { COMPLETE, defineAgent } from "../../runner/spec.ts";
 
 // Characters/enemies from the anchors: generation-heavy work. RD Pro reference-image runs
 // are ~$0.18 each and animation retries are real, so $15/day with $5/task keeps a full
@@ -16,6 +16,7 @@ export default defineAgent({
   tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", art_tools: "allow", art_generate: "allow", studio_ledger: "allow" },
   output_schema: z
     .object({
+      complete: COMPLETE,
       generated: z
         .array(
           z

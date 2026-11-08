@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { defineAgent } from "../../runner/spec.ts";
+import { COMPLETE, defineAgent } from "../../runner/spec.ts";
 
 // The content itself lives in workspace files (validated against the Game Director's schemas
 // by QA); this output is only the manifest the studio routes and the balance rationale.
@@ -13,6 +13,7 @@ export default defineAgent({
   tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow" },
   output_schema: z
     .object({
+      complete: COMPLETE,
       files: z
         .array(
           z

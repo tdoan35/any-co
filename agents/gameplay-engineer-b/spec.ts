@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { defineAgent } from "../../runner/spec.ts";
+import { COMPLETE, defineAgent } from "../../runner/spec.ts";
 
 // Second gameplay engineer (Nov 7, Ty via EA B): the board runs one card per agent, so a second spec lets two engineer
 // cards run at once. Same prompt/tools/model; its own branch (agent/gameplay-engineer-b) and its own budget line.
@@ -16,6 +16,7 @@ export default defineAgent({
   tools: { game_repo: "allow", workspace_read: "allow", workspace_write: "allow", studio_ledger: "allow" },
   output_schema: z
     .object({
+      complete: COMPLETE,
       ticket: z.string().min(3).max(120).describe("The ticket id/title from the task, copied exactly"),
       summary: z.string().min(20).max(600).describe("What you built and the design choices worth knowing"),
       files: z
