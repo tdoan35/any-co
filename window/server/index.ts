@@ -3,7 +3,7 @@
 // (chat.ts). Run: `npm run window:server` (port 8787, PORT to change).
 // Only the window's own origins may call it (localhost, the Electron app); a web page you happen to visit may not.
 import http from "node:http";
-import { existsSync, readdirSync, readFileSync, statSync, watch } from "node:fs";
+import { createReadStream, existsSync, readdirSync, readFileSync, statSync, watch } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { CreateSessionRequestSchema, PostMessageRequestSchema, encodeFrame, type AppEvent } from "@fabric/contracts";
@@ -17,6 +17,7 @@ import type { Board } from "../../runner/board/index.ts";
 import { boardCards, countsByGame, importedCardGames, knownGames, summarizeBoard } from "./board-summary.ts";
 import { buildRegistry, PROJECT } from "./registry.ts";
 import { galleryRoute } from "./gallery.ts";
+import { CONTENT_TYPES, allowedFiles, gapmapFile, showcase } from "./showcase.ts";
 import { gameOfRun, mapRun, parseTranscript, type MappedRun } from "./runs.ts";
 import { buildWeave } from "./weave.ts";
 
@@ -38,6 +39,23 @@ export interface ServerOptions {
 
 const EXTRA_ORIGINS = (process.env.WINDOW_ALLOWED_ORIGINS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 /** No Origin header = not a browser (curl, tests). Browsers must come from localhost or the Electron app. */
+/** Stream a file with a content type; honours a single "Range: bytes=a-b" so <video> can seek (206 + Content-Range). */
+function sendFile(req: http.IncomingMessage, res: http.ServerResponse, file: string, type: string): void {
+  const size = statSync(file).size;
+  const m = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range ?? ""));
+  if (m && (m[1] || m[2])) {
+    let start = m[1] ? Number(m[1]) : Math.max(0, size - Number(m[2]));
+    let end = m[1] && m[2] ? Number(m[2]) : size - 1;
+    end = Math.min(end, size - 1);
+    if (start > end || start >= size) { res.writeHead(416, { "content-range": `bytes */${size}` }).end(); return; }
+    res.writeHead(206, { "content-type": type, "accept-ranges": "bytes", "content-range": `bytes ${start}-${end}/${size}`, "content-length": end - start + 1, "cache-control": "no-cache" });
+    createReadStream(file, { start, end }).pipe(res);
+    return;
+  }
+  res.writeHead(200, { "content-type": type, "accept-ranges": "bytes", "content-length": size, "cache-control": "no-cache" });
+  createReadStream(file).pipe(res);
+}
+
 export const originAllowed = (origin: string | undefined) =>
   origin === undefined || origin === "app://fabric" || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin) || EXTRA_ORIGINS.includes(origin);
 
@@ -216,6 +234,20 @@ export async function startServer(opts: ServerOptions = {}) {
           res.write(f.kind === "event" ? encodeFrame({ event: "event", id: f.event.seq, data: f.event }) : encodeFrame({ event: "delta", data: f.delta })));
         const ping = setInterval(() => res.write(encodeFrame({ event: "ping" })), 15_000);
         req.on("close", () => { unsubscribe(); clearInterval(ping); });
+        return;
+      }
+      if (url.pathname === "/api/gapmap" || url.pathname === "/api/showcase" || (seg[0] === "api" && seg[1] === "showcase" && seg[3] === "file")) {
+        if (url.pathname === "/api/showcase") return json(200, showcase(gamesRoot, runsDir));
+        let file: string | null = null;
+        let type = "text/html; charset=utf-8";
+        if (url.pathname === "/api/gapmap") file = gapmapFile(ROOT);
+        else {
+          const rel = seg.slice(4).join("/");
+          file = allowedFiles(seg[2], gamesRoot, runsDir).get(rel) ?? null;
+          type = CONTENT_TYPES[path.extname(rel).toLowerCase()] ?? "application/octet-stream";
+        }
+        if (!file) return json(404, { error: "not found" });
+        sendFile(req, res, file, type);
         return;
       }
       const r = await route(url.pathname);

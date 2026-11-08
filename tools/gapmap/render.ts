@@ -1,5 +1,5 @@
 // Render the gap map as one self-contained HTML file (canvas, no external assets).
-//   node --import tsx tools/gapmap/render.ts [--run runs/<market-analyst run>] [--out data/gapmap/map.html] [--regions 40]
+//   node --import tsx tools/gapmap/render.ts [--run runs/<market-analyst run>[=Label]]... (repeatable) [--out data/gapmap/map.html] [--regions 40]
 // Dots: every mapped game (brighter = 50+ reviews). Rings: top indie-reachable regions by
 // opportunity. Pins: a Market Analyst run's gaps (from its eval.json re-probe positions).
 // Navigate: scroll/pinch to zoom, drag to pan, double-click to zoom in, + − 0 keys.
@@ -9,7 +9,7 @@ import { parseArgs } from "node:util";
 import { GAPMAP_DIR } from "./embed.ts";
 import { indieShare, loadMap } from "./query.ts";
 
-const { values } = parseArgs({ options: { run: { type: "string" }, out: { type: "string" }, regions: { type: "string", default: "40" } } });
+const { values } = parseArgs({ options: { run: { type: "string", multiple: true }, out: { type: "string" }, regions: { type: "string", default: "40" } } });
 const { map, games } = loadMap();
 if (!map.games[0]?.xy) throw new Error("map.json has no layout; rebuild without --no-layout");
 
@@ -67,10 +67,13 @@ for (const r of regs.filter((x) => x.open)) for (const [b, s] of r.adj as Array<
   if (!seen.has(key)) { seen.add(key); openEdges.push([r.id, b, s]); }
 }
 
+// Pins: one or more Market Analyst runs (--run dir, repeatable; "dir=Label" prefixes that run's pins, e.g. the studio/game).
 let pins: any[] = [];
-if (values.run && existsSync(path.join(values.run, "eval.json"))) {
-  const ev = JSON.parse(readFileSync(path.join(values.run, "eval.json"), "utf8"));
-  pins = (ev.code_ranking ?? []).filter((g: any) => g.map?.xy).map((g: any) => ({ rank: g.rank, label: g.label, xy: g.map.xy }));
+for (const spec of values.run ?? []) {
+  const [dir, tag] = spec.split("=");
+  if (!existsSync(path.join(dir, "eval.json"))) continue;
+  const ev = JSON.parse(readFileSync(path.join(dir, "eval.json"), "utf8"));
+  pins.push(...(ev.code_ranking ?? []).filter((g: any) => g.map?.xy).map((g: any) => ({ rank: g.rank, label: tag ? `${tag}: ${g.label}` : g.label, xy: g.map.xy })));
 }
 
 const data = { X, Y, T, V, R, N, YR, top, pins, KN, KS, EK: hasEdges ? map.games[0].knn!.length : 0, regs, openEdges, built: map.meta.built_at.slice(0, 10), window: map.meta.window, games: games.length };

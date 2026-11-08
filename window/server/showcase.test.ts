@@ -1,0 +1,31 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { allowedFiles, showcase } from "./showcase.ts";
+
+test("showcase: only allow-listed files, titled cover preferred, symlinks out of the repo refused", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "showcase-"));
+  const games = path.join(root, "games"), runs = path.join(root, "runs");
+  const ss = path.join(games, "soul-shift");
+  mkdirSync(path.join(ss, ".git"), { recursive: true });
+  mkdirSync(path.join(ss, "store"), { recursive: true });
+  mkdirSync(path.join(ss, "assets", "capsule"), { recursive: true });
+  writeFileSync(path.join(ss, "store", "cover-630x500.png"), "old");
+  writeFileSync(path.join(ss, "store", "itch-page.md"), "# page");
+  writeFileSync(path.join(root, "secret.png"), "S");
+  symlinkSync(path.join(root, "secret.png"), path.join(ss, "assets", "capsule", "capsule-store.png"));
+  let rows = showcase(games, runs);
+  assert.equal(rows.length, 1, "caravan has no repo here");
+  assert.equal(rows[0].cover, "/api/showcase/soul-shift/file/store/cover-630x500.png");
+  assert.deepEqual(rows[0].capsules, [], "a symlink out of the repo is not served");
+  assert.equal(rows[0].storeMd, "/api/showcase/soul-shift/file/store/itch-page.md");
+  writeFileSync(path.join(ss, "store", "cover-630x500-titled.png"), "new");
+  rows = showcase(games, runs);
+  assert.equal(rows[0].cover, "/api/showcase/soul-shift/file/store/cover-630x500-titled.png", "titled cover wins once present");
+  const files = allowedFiles("soul-shift", games, runs);
+  assert.equal(files.has("../secret.png"), false);
+  assert.equal(files.has("src/main.gd"), false);
+  assert.equal(allowedFiles("nope", games, runs).size, 0);
+});
