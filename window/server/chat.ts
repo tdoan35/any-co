@@ -149,6 +149,7 @@ export class ChatEngine {
       who: "operator",
       action: `chat message to ${s.agentId}`,
       reason: message.length > 300 ? `${message.slice(0, 300)}…` : message,
+      category: "steering", // a human directing an agent (T17)
     };
     ledgerAppend(entry, this.ledgerFile);
   }
@@ -259,9 +260,25 @@ export class ChatEngine {
   }
 
   /** Interventions the ledger holds from the event start on (what judges will count). */
-  interventions(): { eventStart: string; count: number; entries: InterventionEntry[] } {
+  interventions(): {
+    eventStart: string;
+    count: number;
+    by_category: Record<string, number>; // missing category on old lines counts as "uncategorized"
+    steering: number; // the headline autonomy number (T17)
+    entries: InterventionEntry[];
+  } {
     const entries = ledgerRead(this.ledgerFile).filter((e): e is InterventionEntry => e.kind === "intervention" && Date.parse(e.ts) >= this.eventStart);
-    return { eventStart: new Date(this.eventStart).toISOString(), count: entries.length, entries: entries.slice(-50) };
+    const by_category = entries.reduce<Record<string, number>>((a, e) => {
+      const k = e.category ?? "uncategorized";
+      return ((a[k] = (a[k] ?? 0) + 1), a);
+    }, {});
+    return {
+      eventStart: new Date(this.eventStart).toISOString(),
+      count: entries.length,
+      by_category,
+      steering: by_category["steering"] ?? 0,
+      entries: entries.slice(-50),
+    };
   }
 }
 

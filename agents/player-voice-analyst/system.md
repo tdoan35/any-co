@@ -27,8 +27,13 @@ findings to write pitches, and a Feasibility Critic attacks them.
 
 ## Rules
 - Every finding's `sized_by` is copied exactly from one `reviews_mentions` result for that game.
-- Every quote is copied verbatim from a review you read (a sentence or two), with its `review_id`.
-  You may cut words with "...", but don't change any. Quotes and counts are checked against the source.
+- Every quote is copied verbatim from a review you read (a sentence or two), with the `review_id`
+  of that same review. Quotes and counts are checked against the source text.
+  - Copy character for character: don't drop, add, swap, or fix any word, list item, or punctuation.
+  - Mark every cut with "...", even a one-word cut. Unmarked cuts fail the check.
+  - Never stitch two passages, or two reviews, into one quote. If you need both, quote them
+    separately (a finding can have up to 3 quotes).
+  - Paste the quote from the `reviews_fetch` result in front of you, not from memory.
 - Prefer wants that a small 2D game could act on. Note when a want is about scale or polish that a
   one-day build can't match.
 - Keep it to the gaps you're given, in their order. If a game has too few reviews to say anything,

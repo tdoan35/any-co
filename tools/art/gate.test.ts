@@ -375,3 +375,12 @@ test("gate computes anchor drift against the anchor's frame 0 when sizes match, 
   assert.equal(slug2.numbers.anchorDrift, null);
   assert.equal(slug2.checks.find((c) => c.name === "anchor_drift")!.pass, true);
 });
+
+test("validator implements exclusiveMinimum and exclusiveMaximum (every whitelisted keyword is checked)", () => {
+  const schema = { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 10 };
+  assert.deepEqual(validateSchema(5, schema), []);
+  assert.deepEqual(validateSchema(9.99, schema), []);
+  assert.deepEqual(validateSchema(10, schema), ["$: must be < 10"]);
+  assert.deepEqual(validateSchema(11, schema), ["$: must be < 10"]);
+  assert.deepEqual(validateSchema(0, schema), ["$: must be > 0"]);
+});

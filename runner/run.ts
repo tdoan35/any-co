@@ -2,6 +2,7 @@
 // Writes everything to runs/<run_id>/: run.json (status, spend), transcript.jsonl (every request,
 // reply, tool call, approval), output.json (validated result), workspace/ (agent files).
 import { mkdirSync, writeFileSync, appendFileSync } from "node:fs";
+import { hostname } from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import { ROOT, outputJsonSchema, specHash } from "./load.ts";
@@ -9,10 +10,14 @@ import type { AgentSpec, Permission } from "./spec.ts";
 import type { CapabilityName } from "./tools/registry.ts";
 import { IMPLS, TOOL_INDEX, clip, type ToolContext } from "./tools/impl.ts";
 import { SpendLedger, killSwitchOn, limitsFor } from "./spend.ts";
+import { checkpointGameClone } from "./checkpoint.ts";
+import { wireMessages } from "./images.ts";
 import type { Block, Message, Provider, ToolDef, ToolResultBlock, ToolUseBlock } from "./types.ts";
 import type { NaiveClient } from "./providers.ts";
+import type { Board } from "./board/index.ts";
 
-export const RUNS_DIR = path.join(ROOT, "runs");
+/** Run dirs root; STUDIO_RUNS_DIR moves it (must agree with STUDIO_APPROVALS_FILE's parent and the window's runsDir). */
+export const RUNS_DIR = process.env.STUDIO_RUNS_DIR ? path.resolve(process.env.STUDIO_RUNS_DIR) : path.join(ROOT, "runs");
 const SUBMIT = "submit_result";
 const MAX_NUDGES = 2;
 
@@ -76,6 +81,28 @@ export interface RunOptions {
   history?: Message[];
   /** Called for every transcript event as it is written (type + data). Errors in it never stop the run. */
   onEvent?: (type: string, data: Record<string, unknown>) => void;
+  /** Continue a crashed run under the same run id, workspace and spend. Built by resumeRun(). */
+  resume?: ResumeState;
+  /** Heartbeat refresh interval for run.json liveness (default 60 s; also refreshed per turn). */
+  heartbeatMs?: number;
+  /** Studio board for board_* tools, when this run should reach it (the dispatcher passes one). */
+  board?: Board;
+}
+
+/** State carried over from a crashed run; only runner/resume.ts builds one. */
+export interface ResumeState {
+  runId: string;
+  /** The run's original started_at, kept across resumes. */
+  startedAt: string;
+  /** The exact message list rebuilt from transcript.jsonl, including the interrupted-turn repair. */
+  messages: Message[];
+  turns: number;
+  spentMicroUsd: number;
+  /** Most expensive model call before the crash; the pre-flight budget estimate continues from it. */
+  maxCallCost: number;
+  wrapUp: boolean;
+  /** Why the run was considered dead (from liveness.ts). */
+  reason: string;
 }
 
 export interface RunResult {
@@ -90,17 +117,25 @@ export interface RunResult {
 
 export async function runAgent(spec: AgentSpec, opts: RunOptions): Promise<RunResult> {
   const runsDir = opts.runsDir ?? RUNS_DIR;
-  const runId = opts.runId ?? `${stamp()}-${spec.name}`;
+  const rs = opts.resume;
+  const runId = rs?.runId ?? opts.runId ?? `${stamp()}-${spec.name}`;
   const dir = path.join(runsDir, runId);
   const workspace = path.join(dir, "workspace");
   mkdirSync(workspace, { recursive: true });
   const log = opts.log ?? (() => {});
   const approver = opts.approver ?? denyAll;
   const ledger = new SpendLedger(path.join(runsDir, "spend.jsonl"));
-  const limits = limitsFor(spec, ledger, opts.runCapUsd);
+  // On resume the ledger already holds this run's earlier spend; the period/day caps count it,
+  // and headroom() subtracts state.spent_micro_usd again — add it back exactly once.
+  const limits = (() => {
+    const base = limitsFor(spec, ledger, opts.runCapUsd);
+    return rs
+      ? { ...base, agent_period_left: base.agent_period_left + rs.spentMicroUsd, global_day_left: base.global_day_left + rs.spentMicroUsd }
+      : base;
+  })();
   const schema = outputJsonSchema(spec);
   const tools = toolDefs(spec, schema);
-  const ctx: ToolContext = { workspace, naive: opts.naive, agent: spec.name, run_id: runId, runsDir };
+  const ctx: ToolContext = { workspace, naive: opts.naive, agent: spec.name, run_id: runId, runsDir, board: opts.board };
 
   const transcript = path.join(dir, "transcript.jsonl");
   const event = (type: string, data: Record<string, unknown>) => {
@@ -109,17 +144,28 @@ export async function runAgent(spec: AgentSpec, opts: RunOptions): Promise<RunRe
   };
 
   const state: RunResult & Record<string, unknown> = {
-    run_id: runId, dir, status: "running", output: null, spent_micro_usd: 0, turns: 0,
+    run_id: runId, dir, status: "running", output: null,
+    spent_micro_usd: rs?.spentMicroUsd ?? 0, turns: rs?.turns ?? 0,
+    pid: process.pid, host: hostname(), heartbeat_at: new Date().toISOString(),
   };
   const meta = {
     agent: spec.name, spec_hash: specHash(spec), provider: opts.provider.label, task: opts.task,
-    limits, started_at: new Date().toISOString(),
+    limits, started_at: rs?.startedAt ?? new Date().toISOString(),
   };
   const saveRun = () => writeFileSync(path.join(dir, "run.json"), JSON.stringify({ ...meta, ...state, dir: undefined }, null, 2));
+  /** Liveness: run.json is what `runs orphans` reads; refreshed per turn AND on a timer, so a
+ *  stale heartbeat really means the process is gone even during a long tool call or approval wait. */
+  const beat = () => {
+    state.heartbeat_at = new Date().toISOString();
+    saveRun();
+  };
   saveRun();
-  event("start", { ...meta, system: spec.system, tools: tools.map((t) => t.name) });
+  const heartbeat = setInterval(beat, opts.heartbeatMs ?? 60_000);
+  heartbeat.unref?.(); // the run's own lifecycle decides when the process exits, not this timer
+  if (rs) event("resume", { from_turn: rs.turns, reason: rs.reason, spent_micro_usd: rs.spentMicroUsd });
+  else event("start", { ...meta, system: spec.system, tools: tools.map((t) => t.name), history: opts.history ?? [] });
 
-  let maxCallCost = 0;
+  let maxCallCost = rs?.maxCallCost ?? 0;
   const charge = (kind: "model" | "tool", what: string, micro: number) => {
     if (!micro) return;
     state.spent_micro_usd += micro;
@@ -135,13 +181,21 @@ export async function runAgent(spec: AgentSpec, opts: RunOptions): Promise<RunRe
   };
 
   const system = systemPrompt(spec, schema !== null);
-  const messages: Message[] = [...(opts.history ?? []), { role: "user", content: opts.task }];
+  // A resumed run rebuilds the exact message list from its transcript (runner/resume.ts);
+  // nudges and loop-guard counters start fresh — max_turns still bounds the total.
+  const messages: Message[] = rs ? [...rs.messages] : [...(opts.history ?? []), { role: "user", content: opts.task }];
   let nudges = 0;
   let lastFailKey = "";
   let repeats = 0;
-  let wrapUp = false;
+  let wrapUp = rs?.wrapUp ?? false;
+  /** Record every message exactly as the model saw it, so a crashed run can be rebuilt verbatim. */
+  const pushMsg = (role: "user" | "assistant", content: string | Block[]) => {
+    messages.push({ role, content });
+    event("msg", { role, content });
+  };
   /** Add a runtime note to the last user turn (keeps user/assistant turns alternating). */
   const noteToLastUser = (text: string) => {
+    event("note", { text });
     const last = messages[messages.length - 1];
     if (last?.role !== "user") messages.push({ role: "user", content: text });
     else if (typeof last.content === "string") last.content += "\n\n" + text;
@@ -150,6 +204,7 @@ export async function runAgent(spec: AgentSpec, opts: RunOptions): Promise<RunRe
 
   try {
     while (state.status === "running") {
+      beat();
       if (killSwitchOn(runsDir)) { stop("killed", "kill switch is on"); break; }
       if (state.turns >= spec.limits.max_turns) { stop("max_turns"); break; }
       if (schema && !wrapUp && state.turns > 0 && (state.spent_micro_usd >= WRAP_UP_SPENT * limits.run_cap || headroom() < WRAP_UP_CALLS * maxCallCost || state.turns >= spec.limits.max_turns - 2)) {
@@ -165,12 +220,14 @@ export async function runAgent(spec: AgentSpec, opts: RunOptions): Promise<RunRe
       }
       state.turns++;
       event("request", { turn: state.turns, messages: messages.length });
-      const reply = await opts.provider.complete({ system, messages, tools, max_tokens: spec.limits.max_output_tokens });
+      // Image refs become base64 only here, on the wire: the transcript and any resume keep refs.
+      const reply = await opts.provider.complete({ system, messages: wireMessages(messages), tools, max_tokens: spec.limits.max_output_tokens });
       maxCallCost = Math.max(maxCallCost, reply.cost_micro_usd);
       charge("model", reply.model, reply.cost_micro_usd);
       event("reply", { turn: state.turns, ...reply });
+      beat();
       log(`turn ${state.turns}: ${summarize(reply.content)} ($${(reply.cost_micro_usd / 1e6).toFixed(5)})`);
-      messages.push({ role: "assistant", content: reply.content.length ? reply.content : [{ type: "text", text: "" }] });
+      pushMsg("assistant", reply.content.length ? reply.content : [{ type: "text", text: "" }]);
 
       const uses = reply.content.filter((b): b is ToolUseBlock => b.type === "tool_use");
       if (!uses.length) {
@@ -184,7 +241,7 @@ export async function runAgent(spec: AgentSpec, opts: RunOptions): Promise<RunRe
             reply.stop_reason === "max_tokens"
               ? `Your last reply hit the ${spec.limits.max_output_tokens}-token output limit and was discarded whole; nothing in it ran. Do not repeat it. Work in small turns: one tool call at a time (write each file separately), then call ${SUBMIT} with a compact result.`
               : `You must finish by calling the ${SUBMIT} tool with your result.`;
-          messages.push({ role: "user", content: why });
+          pushMsg("user", why);
         } else {
           stop("error", `agent ended without calling ${SUBMIT}`);
         }
@@ -244,7 +301,7 @@ export async function runAgent(spec: AgentSpec, opts: RunOptions): Promise<RunRe
         stop("stuck", `repeated the same failing call ${LOOP_STOP} times: ${lastFailKey.slice(0, 200)}`);
         break;
       }
-      messages.push({ role: "user", content: results });
+      pushMsg("user", results);
       if (state.status === "running" && headroom() <= 0) stop("budget_exceeded", "tool spend used the remaining budget");
     }
   } catch (e: any) {
@@ -253,6 +310,13 @@ export async function runAgent(spec: AgentSpec, opts: RunOptions): Promise<RunRe
   }
 
   if (state.output !== null) writeFileSync(path.join(dir, "output.json"), JSON.stringify(state.output, null, 2));
+  // Game work left uncommitted (out of turns, budget, error) is committed and pushed to the agent's branch.
+  const cp = await checkpointGameClone(workspace, spec.name, runId, String(state.status));
+  if (cp) {
+    event("checkpoint", { ...cp });
+    if (cp.checkpointed || cp.pushed) log(`checkpoint: ${cp.note} ${cp.branch ?? ""} ${cp.commit ?? ""}`.trim());
+  }
+  clearInterval(heartbeat);
   Object.assign(state, { finished_at: new Date().toISOString() });
   saveRun();
   event("end", { status: state.status, spent_micro_usd: state.spent_micro_usd, turns: state.turns, error: state.error });
@@ -286,8 +350,11 @@ async function callTool(
   const t0 = Date.now();
   const out = await impl.run(parsed.data, ctx);
   charge("tool", use.name, out.cost_micro_usd ?? 0);
-  event("tool", { id: use.id, name: use.name, input: parsed.data, ms: Date.now() - t0, is_error: !!out.is_error, cost_micro_usd: out.cost_micro_usd ?? 0, content: clip(out.content, 100_000) });
-  return { type: "tool_result", tool_use_id: use.id, content: out.content, ...(out.is_error ? { is_error: true } : {}) };
+  // `clipped` tells resume.ts the recorded content is not the exact result anymore. An image
+  // result records its ref block separately (small, no base64); the model gets text + image.
+  const content = out.image ? [{ type: "text" as const, text: out.content }, out.image] : out.content;
+  event("tool", { id: use.id, name: use.name, input: parsed.data, ms: Date.now() - t0, is_error: !!out.is_error, cost_micro_usd: out.cost_micro_usd ?? 0, content: clip(out.content, 100_000), clipped: out.content.length > 100_000, ...(out.image ? { image: out.image } : {}) });
+  return { type: "tool_result", tool_use_id: use.id, content, ...(out.is_error ? { is_error: true } : {}) };
 }
 
 /**
@@ -350,7 +417,7 @@ function summarize(content: Block[]): string {
     .join(", ") || "(empty)";
 }
 
-function stamp(d = new Date()): string {
+export function stamp(d = new Date()): string {
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }

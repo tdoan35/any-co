@@ -2,7 +2,7 @@
 // endpoint (fast external inference, local-only), and a scripted fake for tests.
 import { createClient } from "@usenaive-sdk/managed-agents";
 import type { AgentSpec } from "./spec.ts";
-import type { Block, Message, ModelReply, ModelRequest, Provider } from "./types.ts";
+import type { Block, ImageBlock, Message, ModelReply, ModelRequest, Provider, ToolUseBlock } from "./types.ts";
 
 export type NaiveClient = ReturnType<typeof createClient>;
 
@@ -22,13 +22,24 @@ export function isTransient(e: any): boolean {
   return /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|network|UND_ERR|aborted|timeout/i.test(msg);
 }
 
+/** Rate limits (429) reset per minute on gateways like Neon's (1.2M input tokens/min per account), so they get a
+ *  slower, longer schedule than other transient errors: 15 s, 30 s, 45 s, then 60 s, up to RATE_LIMIT_TRIES tries. */
+export const RATE_LIMIT_TRIES = 8;
+export function retryWaitMs(e: unknown, attempt: number, baseMs: number): number {
+  const status = (e as any)?.status ?? (e as any)?.response?.status;
+  if (status === 429) return Math.min(15_000 * attempt, 60_000) + Math.floor(Math.random() * 1000);
+  return baseMs * 2 ** (attempt - 1) + Math.floor(Math.random() * 250);
+}
+
 export async function withRetry<T>(fn: () => Promise<T>, label: string, tries = 5, baseMs = 1000): Promise<T> {
   for (let i = 1; ; i++) {
     try {
       return await fn();
     } catch (e) {
-      if (i >= tries || !isTransient(e)) throw e;
-      const wait = baseMs * 2 ** (i - 1) + Math.floor(Math.random() * 250);
+      const status = (e as any)?.status ?? (e as any)?.response?.status;
+      const limit = status === 429 ? Math.max(tries, RATE_LIMIT_TRIES) : tries;
+      if (i >= limit || !isTransient(e)) throw e;
+      const wait = retryWaitMs(e, i, baseMs);
       console.warn(`  ${label}: transient error (${String((e as any)?.message ?? e).slice(0, 120)}), retry ${i}/${tries - 1} in ${wait} ms`);
       await sleep(wait);
     }
@@ -61,26 +72,43 @@ export class NaiveProvider implements Provider {
       content: (reply.content ?? []).filter((b: any) => b.type === "text" || b.type === "tool_use") as Block[],
       stop_reason: reply.stop_reason ?? null,
       usage: { input_tokens: reply.usage?.input_tokens ?? 0, output_tokens: reply.usage?.output_tokens ?? 0 },
-      cost_micro_usd: await this.billed(reply.id),
+      ...(await this.billedOrEstimate(reply.id, reply.usage?.input_tokens ?? 0, reply.usage?.output_tokens ?? 0)),
       request_id: reply.id,
       model: reply.resolved_model ?? reply.model ?? this.model,
     };
   }
 
-  // Replies carry no cost; the call trace does (docs/naive-notes.md). Without a cost the budget
-  // math is blind, so a missing trace fails the call instead of guessing.
-  private async billed(id: string): Promise<number> {
+  /** Highest billed rate seen from this provider, micro-USD per token, for conservative estimates. */
+  private maxRate = { input: 0, output: 0 };
+  /** Waits between call-trace lookups; the trace can lag the reply (seen Nov 7: one trace never appeared within 5 s). */
+  static TRACE_WAITS_MS = [1000, 2000, 4000, 8000, 15000, 30000];
+  /** Per-token ceiling used when nothing has been billed yet ($5 / $25 per MTok, above any model this studio uses). */
+  static CEILING = { input: 5, output: 25 };
+
+  // Replies carry no cost; the call trace does (docs/naive-notes.md). The budget math must never be blind:
+  // wait for the trace, and if it never comes, charge a conservative estimate (marked) instead of failing a long run.
+  private async billedOrEstimate(id: string, inTok: number, outTok: number): Promise<{ cost_micro_usd: number; cost_estimated?: true }> {
     let lastErr: unknown;
-    for (let i = 0; i < 6; i++) {
+    for (const wait of NaiveProvider.TRACE_WAITS_MS) {
       try {
         const t: any = await this.client.proxy.call(id);
-        if (typeof t.billed_micro_usd === "number") return t.billed_micro_usd;
+        if (typeof t.billed_micro_usd === "number") {
+          const tok = inTok + outTok;
+          if (tok > 0) {
+            const r = t.billed_micro_usd / tok; // blended rate is a safe upper bound for either side's estimate
+            this.maxRate = { input: Math.max(this.maxRate.input, r), output: Math.max(this.maxRate.output, r) };
+          }
+          return { cost_micro_usd: t.billed_micro_usd };
+        }
       } catch (e) {
         lastErr = e;
       }
-      await sleep(250 * (i + 1));
+      await sleep(wait);
     }
-    throw new Error(`no billed cost for ${id} after retries: ${String(lastErr ?? "trace missing billed_micro_usd")}`);
+    const rate = this.maxRate.input > 0 ? { input: this.maxRate.input * 1.5, output: this.maxRate.output * 1.5 } : NaiveProvider.CEILING;
+    const est = Math.ceil(inTok * rate.input + outTok * rate.output);
+    console.warn(`  ${this.label}: no billed cost for ${id} (${String(lastErr ?? "trace missing billed_micro_usd").slice(0, 120)}); charging a conservative estimate of ${est} micro-USD`);
+    return { cost_micro_usd: est, cost_estimated: true };
   }
 }
 
@@ -113,18 +141,29 @@ export class OpenAICompatibleProvider implements Provider {
       if (!r.ok) throw Object.assign(new Error(`${this.label} HTTP ${r.status}: ${(await r.text()).slice(0, 500)}`), { status: r.status });
       return r;
     }, this.label);
-    const body: any = await res.json();
+    // OpenAI chat-completions reply; parsed once, fields read from the typed shape.
+    interface ChatChoiceMessage {
+      content?: unknown;
+      tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }>;
+    }
+    interface ChatReply {
+      choices?: Array<{ message?: ChatChoiceMessage; finish_reason?: string }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number };
+      id?: string;
+      model?: string;
+    }
+    const body = (await res.json()) as ChatReply;
     const msg = body.choices?.[0]?.message ?? {};
     const content: Block[] = [];
     if (msg.content) content.push({ type: "text", text: String(msg.content) });
     for (const tc of msg.tool_calls ?? []) {
       let input: Record<string, unknown> = {};
       try {
-        input = JSON.parse(tc.function?.arguments || "{}");
+        input = JSON.parse(tc.function?.arguments || "{}") as Record<string, unknown>;
       } catch {
         input = { _unparseable_arguments: String(tc.function?.arguments) };
       }
-      content.push({ type: "tool_use", id: tc.id, name: tc.function?.name, input });
+      content.push({ type: "tool_use", id: tc.id ?? "", name: tc.function?.name ?? "", input });
     }
     const inTok = body.usage?.prompt_tokens ?? 0;
     const outTok = body.usage?.completion_tokens ?? 0;
@@ -140,23 +179,49 @@ export class OpenAICompatibleProvider implements Provider {
   }
 }
 
+const imagePart = (b: ImageBlock): Record<string, unknown> => {
+  if (b.source.type !== "base64") throw new Error("toOpenAIMessages got an unexpanded image ref; call wireMessages() first");
+  return { type: "image_url", image_url: { url: `data:${b.source.media_type};base64,${b.source.data}` } };
+};
+
 export function toOpenAIMessages(system: string, messages: Message[]): any[] {
   const out: any[] = [{ role: "system", content: system }];
+  let pendingToolImages: Array<{ id: string; img: ImageBlock }> = [];
   for (const m of messages) {
     if (typeof m.content === "string") {
       out.push({ role: m.role, content: m.content });
       continue;
     }
     if (m.role === "assistant") {
-      const text = m.content.filter((b) => b.type === "text").map((b: any) => b.text).join("\n");
+      const text = m.content.filter((b) => b.type === "text").map((b) => b.text).join("\n");
       const calls = m.content
-        .filter((b) => b.type === "tool_use")
-        .map((b: any) => ({ id: b.id, type: "function", function: { name: b.name, arguments: JSON.stringify(b.input) } }));
+        .filter((b): b is ToolUseBlock => b.type === "tool_use")
+        .map((b) => ({ id: b.id, type: "function", function: { name: b.name, arguments: JSON.stringify(b.input) } }));
       out.push({ role: "assistant", content: text || null, ...(calls.length ? { tool_calls: calls } : {}) });
     } else {
       for (const b of m.content) {
-        if (b.type === "tool_result") out.push({ role: "tool", tool_call_id: b.tool_use_id, content: b.content });
-        else if (b.type === "text") out.push({ role: "user", content: b.text });
+        if (b.type === "tool_result") {
+          // OpenAI tool messages carry TEXT only (string or text parts) — image_url parts in a
+          // `tool` message are refused or dropped by many gateways (R13 A1). Text stays on the
+          // tool message; every image of this turn goes into one user message right after the
+          // tool messages, each preceded by a text part naming the tool_call_id it belongs to.
+          if (typeof b.content === "string") out.push({ role: "tool", tool_call_id: b.tool_use_id, content: b.content });
+          else {
+            const text = b.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
+            const images = b.content.filter((c): c is ImageBlock => c.type === "image");
+            out.push({ role: "tool", tool_call_id: b.tool_use_id, content: images.length ? `${text}\n[image follows]` : text });
+            for (const img of images) pendingToolImages.push({ id: b.tool_use_id, img });
+          }
+        } else if (b.type === "text") out.push({ role: "user", content: b.text });
+        else if (b.type === "image") out.push({ role: "user", content: [imagePart(b)] });
+      }
+      if (pendingToolImages.length) {
+        // Valid order: assistant tool_calls -> tool results -> user images (the turn's images).
+        out.push({
+          role: "user",
+          content: pendingToolImages.flatMap(({ id, img }) => [{ type: "text", text: `image from tool_call ${id}` }, imagePart(img)]),
+        });
+        pendingToolImages = [];
       }
     }
   }

@@ -5,17 +5,24 @@
 //     → runs/<pv-run>/handoff-pitches.md       (task for the Game Director)
 //   node --import tsx scripts/greenlight-handoff.ts --pitches runs/<game-director-run>
 //     → runs/<gd-run>/handoff-critic.md        (task for the Feasibility Critic)
-//   node --import tsx scripts/greenlight-handoff.ts --pick runs/greenlight-<stamp>
-//     → runs/greenlight-<stamp>/handoff-pick.md (task for the Greenlight Chair)
+//   node --import tsx scripts/greenlight-handoff.ts --design runs/<chair-run>
+//     → runs/<chair-run>/handoff-design.md  (task for the Game Director's design-doc mode)
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { criticTask, pickTask } from "../tools/greenlight/handoff.ts";
+import { criticTask, designTask, findingsSection, pickTask } from "../tools/greenlight/handoff.ts";
 
-const { values, positionals } = parseArgs({ allowPositionals: true, options: { top: { type: "string", default: "3" }, voice: { type: "string" }, pitches: { type: "string" }, pick: { type: "string" } } });
+const { values, positionals } = parseArgs({ allowPositionals: true, options: { top: { type: "string", default: "3" }, voice: { type: "string" }, pitches: { type: "string" }, pick: { type: "string" }, design: { type: "string" } } });
 if (values.pick) {
   const file = path.join(values.pick, "handoff-pick.md");
   writeFileSync(file, pickTask(values.pick));
+  console.log(file);
+  process.exit(0);
+}
+if (values.design) {
+  const id = values.design.replace(/^runs\//, "");
+  const file = path.join(values.design, "handoff-design.md");
+  writeFileSync(file, designTask(id));
   console.log(file);
   process.exit(0);
 }
@@ -55,16 +62,10 @@ if (!values.voice) {
     "# Market gaps (from the Market Analyst)",
     "",
     ...lines.slice(3),
-    "# Player findings (from the Player Voice Analyst)",
+    "# Player findings (from the Player Voice Analyst; cite one by its [id], e.g. W2)",
     "",
   ];
-  const fmt = (f: any) => `- ${f.statement} (${Math.round(f.sized_by.share * 100)}% of ${f.sized_by.sample_size} ${f.sized_by.kind} reviews of appid ${f.sized_by.appid} mention "${f.sized_by.term}") — ${f.why_it_matters}`;
-  for (const seg of pv.segments) {
-    out2.push(`## ${seg.gap_label}`, `Read: ${seg.games_read.map((g: any) => g.name).join(", ")}`, "Wants:", ...seg.wants.map(fmt), "Loves:", ...seg.loves.map(fmt));
-    if (seg.deal_breakers.length) out2.push("Deal-breakers:", ...seg.deal_breakers.map(fmt));
-    out2.push(`Attention: ${seg.attention.summary}`, "");
-  }
-  if (pv.cross_segment?.length) out2.push("## Across segments", ...pv.cross_segment.map((c: string) => `- ${c}`), "");
+  out2.push(...findingsSection(pv));
   const file = path.join(values.voice, "handoff-pitches.md");
   writeFileSync(file, out2.join("\n"));
   console.log(file);
