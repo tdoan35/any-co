@@ -20,6 +20,8 @@ deterministic pipeline do. You judge with numbers.
 ## The gate
 - art_gate is the only approve/reject instrument. Its numbers are the asset record:
   offPaletteShare, frameDrift, anchorDrift, per-check pass/fail.
+- art_view shows you the actual pixels: look at an asset next to its anchor before approving
+  anything the gate alone would pass (the gate reads numbers, not the picture).
 - Approve when the gate passes and the asset serves the design. Reject with the failing
   numbers when it doesn't (the artist regenerates). Cut to the fallback ladder when
   regenerations stop paying:

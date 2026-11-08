@@ -141,18 +141,29 @@ export class OpenAICompatibleProvider implements Provider {
       if (!r.ok) throw Object.assign(new Error(`${this.label} HTTP ${r.status}: ${(await r.text()).slice(0, 500)}`), { status: r.status });
       return r;
     }, this.label);
-    const body: any = await res.json();
+    // OpenAI chat-completions reply; parsed once, fields read from the typed shape.
+    interface ChatChoiceMessage {
+      content?: unknown;
+      tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }>;
+    }
+    interface ChatReply {
+      choices?: Array<{ message?: ChatChoiceMessage; finish_reason?: string }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number };
+      id?: string;
+      model?: string;
+    }
+    const body = (await res.json()) as ChatReply;
     const msg = body.choices?.[0]?.message ?? {};
     const content: Block[] = [];
     if (msg.content) content.push({ type: "text", text: String(msg.content) });
     for (const tc of msg.tool_calls ?? []) {
       let input: Record<string, unknown> = {};
       try {
-        input = JSON.parse(tc.function?.arguments || "{}");
+        input = JSON.parse(tc.function?.arguments || "{}") as Record<string, unknown>;
       } catch {
         input = { _unparseable_arguments: String(tc.function?.arguments) };
       }
-      content.push({ type: "tool_use", id: tc.id, name: tc.function?.name, input });
+      content.push({ type: "tool_use", id: tc.id ?? "", name: tc.function?.name ?? "", input });
     }
     const inTok = body.usage?.prompt_tokens ?? 0;
     const outTok = body.usage?.completion_tokens ?? 0;
@@ -175,6 +186,7 @@ const imagePart = (b: ImageBlock): Record<string, unknown> => {
 
 export function toOpenAIMessages(system: string, messages: Message[]): any[] {
   const out: any[] = [{ role: "system", content: system }];
+  let pendingToolImages: Array<{ id: string; img: ImageBlock }> = [];
   for (const m of messages) {
     if (typeof m.content === "string") {
       out.push({ role: m.role, content: m.content });
@@ -189,15 +201,27 @@ export function toOpenAIMessages(system: string, messages: Message[]): any[] {
     } else {
       for (const b of m.content) {
         if (b.type === "tool_result") {
-          // A tool result with an image carries content parts: text plus image_url. Plain-text
-          // results stay strings, so existing runs are byte-identical to before.
+          // OpenAI tool messages carry TEXT only (string or text parts) — image_url parts in a
+          // `tool` message are refused or dropped by many gateways (R13 A1). Text stays on the
+          // tool message; every image of this turn goes into one user message right after the
+          // tool messages, each preceded by a text part naming the tool_call_id it belongs to.
           if (typeof b.content === "string") out.push({ role: "tool", tool_call_id: b.tool_use_id, content: b.content });
           else {
-            const parts = b.content.map((c) => (c.type === "image" ? imagePart(c) : { type: "text", text: c.text }));
-            out.push({ role: "tool", tool_call_id: b.tool_use_id, content: parts });
+            const text = b.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
+            const images = b.content.filter((c): c is ImageBlock => c.type === "image");
+            out.push({ role: "tool", tool_call_id: b.tool_use_id, content: images.length ? `${text}\n[image follows]` : text });
+            for (const img of images) pendingToolImages.push({ id: b.tool_use_id, img });
           }
         } else if (b.type === "text") out.push({ role: "user", content: b.text });
         else if (b.type === "image") out.push({ role: "user", content: [imagePart(b)] });
+      }
+      if (pendingToolImages.length) {
+        // Valid order: assistant tool_calls -> tool results -> user images (the turn's images).
+        out.push({
+          role: "user",
+          content: pendingToolImages.flatMap(({ id, img }) => [{ type: "text", text: `image from tool_call ${id}` }, imagePart(img)]),
+        });
+        pendingToolImages = [];
       }
     }
   }

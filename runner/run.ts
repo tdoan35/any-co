@@ -16,7 +16,8 @@ import type { Block, Message, Provider, ToolDef, ToolResultBlock, ToolUseBlock }
 import type { NaiveClient } from "./providers.ts";
 import type { Board } from "./board/index.ts";
 
-export const RUNS_DIR = path.join(ROOT, "runs");
+/** Run dirs root; STUDIO_RUNS_DIR moves it (must agree with STUDIO_APPROVALS_FILE's parent and the window's runsDir). */
+export const RUNS_DIR = process.env.STUDIO_RUNS_DIR ? path.resolve(process.env.STUDIO_RUNS_DIR) : path.join(ROOT, "runs");
 const SUBMIT = "submit_result";
 const MAX_NUDGES = 2;
 

@@ -509,12 +509,15 @@ const artView: ToolImpl = {
       if (st.size > MAX_PNG_BYTES) return { content: `image is too large: ${st.size} bytes (cap ${MAX_PNG_BYTES})`, is_error: true };
       let bytes: Uint8Array = new Uint8Array(await readFile(p));
       let img: RgbaImage = decodePng(bytes);
+      const src = `${img.width}x${img.height}`;
+      if (Math.max(img.width, img.height) > MAX_IMAGE_SIDE && !upscale)
+        return { content: `image is ${img.width}x${img.height}: over the ${MAX_IMAGE_SIDE}px per-side cap. Make a smaller sheet (or pass \`upscale\` only on a small source).`, is_error: true };
       let scaleNote = "";
       if (upscale) {
         const k = Math.min(upscale, Math.floor(MAX_IMAGE_SIDE / Math.max(img.width, img.height)));
         if (k > 1) {
           const up = upscaleNearest(img, k);
-          scaleNote = ` → ${up.width}×${up.height} (x${k} nearest-neighbour)`;
+          scaleNote = ` (${src}, x${k} nearest-neighbour)`;
           img = up;
           bytes = encodePng(img);
         }
