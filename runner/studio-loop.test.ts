@@ -205,3 +205,130 @@ test("end to end with the real agent specs: the Studio Head cycle assigns a card
   assert.equal(bad.is_error, true);
   assert.match(bad.content, /known agents: .*market-analyst/);
 });
+
+// ----- T47: an early studio-head cycle when a card closes and the board goes idle -----
+
+/** A run that closes its card done at once (fake provider submits immediately). */
+function closingProvider(counter: { n: number }): Provider {
+  return {
+    label: "closer",
+    async complete() {
+      counter.n++;
+      return reply([submit(`done-${counter.n}`)]);
+    },
+  };
+}
+
+async function withEnvT47<T>(vars: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
+  const prev = { ...process.env };
+  for (const [k, v] of Object.entries(vars)) (v === undefined ? delete process.env[k] : (process.env[k] = v));
+  try {
+    return await fn();
+  } finally {
+    for (const [k, v] of Object.entries(prev)) (v === undefined ? delete process.env[k] : (process.env[k] = v));
+  }
+}
+
+const headEarlyEntries = (runsDir: string): number => {
+  const f = path.join(runsDir, "ledger.jsonl");
+  if (!existsSync(f)) return 0;
+  return readFileSync(f, "utf8").split("\n").filter(Boolean).filter((l) => l.includes('"studio.head_early"')).length;
+};
+
+test("T47: a close on an idle board triggers exactly one early head cycle (ledger + log)", async () => {
+  const runsDir = tmpDir();
+  const board = new LocalBoard(path.join(runsDir, "board.jsonl"));
+  await board.create({ title: "only card", assignee: "alpha-agent" });
+  const { head, turns } = await countingHead();
+  const closes = { n: 0 };
+  const logs: string[] = [];
+  let clock = 0;
+  let polls = 0;
+  await withEnvT47({ STUDIO_HEAD_EARLY_MIN: "3" }, async () => {
+    await studioLoop({
+      board,
+      specs: new Map([["alpha-agent", await loadAgent("alpha-agent", DISPATCH)]]),
+      provider: () => closingProvider(closes),
+      log: (l: string) => logs.push(l),
+      runsDir,
+      head, headEveryMin: 10_000, // backstop far away: any cycle in this test is early
+      now: () => clock,
+      sleep: async () => {
+        clock += 1000; // 1 s polls: inside the 3-min debounce window
+        polls++;
+        await new Promise((r) => setImmediate(r));
+      },
+      shouldStop: () => polls >= 40 || (closes.n >= 1 && turns.started >= 1 && headEarlyEntries(runsDir) >= 1 && polls >= 6),
+    });
+  });
+  assert.equal(closes.n, 1, "the single card ran and closed");
+  assert.equal(turns.started, 1, `exactly one early cycle; logs: ${logs.join(" | ").slice(0, 300)}`);
+  assert.equal(headEarlyEntries(runsDir), 1, "one studio.head_early ledger decision");
+  assert.ok(logs.some((l) => l.includes("head: early cycle")), `log line present: ${logs.join(" | ").slice(0, 200)}`);
+});
+
+test("T47: a close while another todo card can start triggers NO early cycle", async () => {
+  const runsDir = tmpDir();
+  const board = new LocalBoard(path.join(runsDir, "board.jsonl"));
+  const { head, turns } = await countingHead();
+  const closes = { n: 0 };
+  let clock = 0;
+  let polls = 0;
+  // two cards for one agent, maxParallel 1: while A runs, B is todo+startable; A's close leaves
+  // work for the next pass, so the board is NOT idle and the early cycle must not fire. B then
+  // runs and closes with nothing left -> exactly one early cycle, from B's close.
+  await board.create({ title: "a", assignee: "alpha-agent" });
+  await board.create({ title: "b", assignee: "alpha-agent" });
+  await withEnvT47({ STUDIO_HEAD_EARLY_MIN: "3" }, async () => {
+    await studioLoop({
+      board,
+      specs: new Map([["alpha-agent", await loadAgent("alpha-agent", DISPATCH)]]),
+      provider: () => closingProvider(closes),
+      maxParallel: 1,
+      runsDir,
+      head, headEveryMin: 10_000,
+      now: () => clock,
+      sleep: async () => {
+        clock += 1000;
+        polls++;
+        await new Promise((r) => setImmediate(r));
+      },
+      shouldStop: () => closes.n >= 2 && polls >= 8,
+    });
+  });
+  assert.equal(closes.n, 2);
+  assert.equal(turns.started, 1, "only the final idle close cycles; the mid-board close does not");
+  assert.equal(headEarlyEntries(runsDir), 1);
+});
+
+test("T47: STUDIO_HEAD_EARLY_MIN=0 disables the early cycle; the timed backstop still fires", async () => {
+  const runsDir = tmpDir();
+  const board = new LocalBoard(path.join(runsDir, "board.jsonl"));
+  await board.create({ title: "only card", assignee: "alpha-agent" });
+  const { head, turns } = await countingHead();
+  const closes = { n: 0 };
+  const logs: string[] = [];
+  let clock = 0;
+  let polls = 0;
+  await withEnvT47({ STUDIO_HEAD_EARLY_MIN: "0" }, async () => {
+    await studioLoop({
+      board,
+      specs: new Map([["alpha-agent", await loadAgent("alpha-agent", DISPATCH)]]),
+      provider: () => closingProvider(closes),
+      log: (l: string) => logs.push(l),
+      runsDir,
+      head, headEveryMin: 1, // backstop: 1 min of fake clock
+      now: () => clock,
+      sleep: async () => {
+        clock += 20_000; // 20 s polls: the backstop is due on the 4th tick (80 s)
+        polls++;
+        await new Promise((r) => setImmediate(r));
+      },
+      shouldStop: () => polls >= 6 && turns.started >= 1,
+    });
+  });
+  assert.equal(closes.n, 1, "the card ran and closed (would be idle: the early path is what is disabled)");
+  assert.equal(headEarlyEntries(runsDir), 0, "no studio.head_early decision when disabled");
+  assert.equal(turns.started, 1, "the timed backstop fired once");
+  assert.equal(logs.some((l) => l.includes("head: early cycle")), false, "no early-cycle log line");
+});
