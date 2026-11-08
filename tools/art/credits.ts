@@ -9,7 +9,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ProviderName } from "./generate.ts";
+import type { Balance, ProviderName } from "./generate.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 /** The paid (credit-tracked) providers; comfy is local and never exhausted. */
@@ -153,4 +153,54 @@ export function countGeneration(file: string, out: string): number {
   g.generations[k] = (g.generations[k] ?? 0) + 1;
   writeAtomic(file, g);
   return g.generations[k];
+}
+
+// ---------- PixelLab floor (T35): one shared generations balance across studios, enforced in code ----------
+
+/** Generations a pixellab call is assumed to use when none has been measured yet (animations ran 10-30). */
+export const PIXELLAB_DEFAULT_CALL_ESTIMATE = 30;
+
+/** PIXELLAB_MIN_REMAINING as a non-negative integer, or null when unset/empty. A malformed value throws (a floor must not silently vanish). */
+export function pixellabFloor(env: Record<string, string | undefined> = process.env): number | null {
+  const raw = env.PIXELLAB_MIN_REMAINING?.trim();
+  if (!raw) return null;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0) throw new Error(`PIXELLAB_MIN_REMAINING must be a non-negative integer (generations), got "${raw}"`);
+  return n;
+}
+
+/** The per-call estimate: the most generations one pixellab call has used (credits log, T21), else the default. */
+export function pixellabCallEstimate(creditsFile: string): number {
+  const used = readCredits(creditsFile)
+    .filter((c) => c.provider === "pixellab" && typeof c.generations_used === "number" && c.generations_used > 0)
+    .map((c) => c.generations_used as number);
+  return used.length ? Math.ceil(Math.max(...used)) : PIXELLAB_DEFAULT_CALL_ESTIMATE;
+}
+
+export interface FloorVerdict {
+  blocked: boolean;
+  floor: number;
+  remaining: number | null;
+  estimate: number;
+  /** "at_floor" (remaining <= floor), "would_cross" (remaining - estimate < floor), "unreadable" (no generations balance: fail closed), or "ok". */
+  reason: "at_floor" | "would_cross" | "unreadable" | "ok";
+  message: string;
+}
+
+/**
+ * The rule: refuse a pixellab call when remaining <= floor, or when remaining - estimate < floor (the call itself
+ * would cross it). An unreadable balance fails closed while a floor is set. A USD (credits, not subscription)
+ * balance is outside a generations floor and passes.
+ */
+export function checkPixellabFloor(bal: Balance | null, floor: number, estimate: number): FloorVerdict {
+  const base = { floor, estimate, remaining: bal?.remaining ?? null };
+  const stop = "use provider comfy with your reference image, or stop and report";
+  if (bal === null || !Number.isFinite(bal.remaining))
+    return { ...base, blocked: true, reason: "unreadable", message: `PixelLab floor ${floor} is set but the balance could not be read (fails closed): ${stop}` };
+  if (bal.unit !== "generations") return { ...base, blocked: false, reason: "ok", message: `balance is ${bal.unit}, not generations: the generations floor does not apply` };
+  if (bal.remaining <= floor)
+    return { ...base, blocked: true, reason: "at_floor", message: `PixelLab floor reached (remaining ${bal.remaining} <= ${floor}): ${stop}` };
+  if (bal.remaining - estimate < floor)
+    return { ...base, blocked: true, reason: "would_cross", message: `PixelLab floor reached (remaining ${bal.remaining} - up to ${estimate} for this call < ${floor}): ${stop}` };
+  return { ...base, blocked: false, reason: "ok", message: `remaining ${bal.remaining}, floor ${floor}, call estimate ${estimate}` };
 }
