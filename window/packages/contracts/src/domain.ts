@@ -261,3 +261,20 @@ export interface Report {
   /** "illustrative" reports are labelled in the UI (REP-2). */
   kind?: RecordingKind;
 }
+
+/** One kept art candidate or contact sheet (T18): review material served read-only by the
+ *  adapter from the studio game repo's art/gallery/, never a game asset. */
+export interface ArtGalleryEntry {
+  asset: string;
+  /** Repo-relative PNG path under art/gallery/. */
+  file: string;
+  /** URL the adapter serves the pixels at. */
+  url: string;
+  provider: string;
+  verdict: "accepted" | "rejected";
+  reason: string;
+  /** art_gate numbers copied verbatim; null for contact sheets. */
+  gate: Record<string, number | boolean | null> | null;
+  runId: string;
+  ts: string;
+}

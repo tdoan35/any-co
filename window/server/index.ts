@@ -13,11 +13,14 @@ import { naiveClient, providerFor, type NaiveClient } from "../../runner/provide
 import type { Provider } from "../../runner/types.ts";
 import { ChatEngine, ChatError } from "./chat.ts";
 import { buildRegistry, PROJECT } from "./registry.ts";
+import { galleryRoute } from "./gallery.ts";
 import { mapRun, parseTranscript, type MappedRun } from "./runs.ts";
 import { buildWeave } from "./weave.ts";
 
 export interface ServerOptions {
   runsDir?: string; agentsDir?: string; port?: number; host?: string;
+  /** Studio game repo root (games/): the art gallery is served from the repo(s) under it. */
+  gamesRoot?: string;
   /** Tests inject a fake provider; default builds the real one from the agent spec and NAIVE_API_KEY. */
   providerFor?: (spec: AgentSpec) => Provider;
   ledgerFile?: string; eventStart?: string; now?: () => Date;
@@ -46,6 +49,7 @@ const readJson = (req: http.IncomingMessage, max = 100_000) =>
 
 export async function startServer(opts: ServerOptions = {}) {
   const runsDir = opts.runsDir ?? path.join(ROOT, "runs");
+  const gamesRoot = opts.gamesRoot ?? process.env.STUDIO_GAMES_DIR ?? path.join(ROOT, "games");
   const approvalsFile = opts.approvalsFile ?? process.env.STUDIO_APPROVALS_FILE ?? path.join(runsDir, "approvals.jsonl");
   const { ok: specs, errors } = await loadAllAgents(opts.agentsDir);
   for (const e of errors) console.warn(`[window] skipping agent spec: ${e.message}`);
@@ -103,6 +107,7 @@ export async function startServer(opts: ServerOptions = {}) {
     const ok = (body: unknown) => ({ status: 200, body });
     const missing = { status: 404, body: { error: "not found" } };
     const runs = () => allRuns();
+    if (a === "art-gallery") return galleryRoute(seg.slice(1), gamesRoot);
     if (a === "registry" && !b) return ok(buildRegistry(specs, new Set(runs().filter((r) => r.run.status === "running").map((r) => r.agent)), engine.list()));
     if (a === "interventions" && !b) return ok(engine.interventions());
     if (a === "weave" && !b) return ok(buildWeave(runs(), specs.map((s) => s.name), approvalsFile, runsDir));
@@ -171,8 +176,12 @@ export async function startServer(opts: ServerOptions = {}) {
         req.on("close", () => { unsubscribe(); clearInterval(ping); });
         return;
       }
-      const { status, body } = route(url.pathname);
-      json(status, body);
+      const r = route(url.pathname);
+      if ("png" in r && r.png) {
+        res.writeHead(r.status, { "content-type": "image/png", "cache-control": "no-cache" }).end(r.png);
+        return;
+      }
+      json(r.status, r.body);
     } catch (e) {
       if (e instanceof ChatError) return json(e.status, { error: e.message });
       console.error("[window] request failed", url.pathname, e);

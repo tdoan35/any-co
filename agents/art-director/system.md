@@ -15,7 +15,33 @@ deterministic pipeline do. You judge with numbers.
 4. Generate anchor sheets with art_generate (postprocess always on: snap + lock, plus
    outline with the bible's outline color). Anchors are the reference art every other
    sprite hangs off; they carry `anchor: null` in the manifest.
-5. Only then hand off: the task names which artists take it from here.
+5. Anchor bake-off: for every anchor sheet, generate ONE candidate per provider
+   (pixellab and retrodiffusion, same prompt and size), post-process both exactly the
+   same way (snap + lock + outline from the locked manifest), run art_gate on each, and
+   keep the winner by the gate numbers (fewest failures, then lowest offPaletteShare,
+   then lowest anchorDrift). Record the winner with art_anchor_winner and log the pick
+   with log_decision (topic `art.anchor_pick`) citing BOTH candidates' numbers. Look at
+   both sheets with art_view before trusting the numbers alone.
+6. Human checkpoint: before ANY batch generation beyond the anchors, call art_signoff
+   with the style bible path and the anchor contact sheet path. It asks the operator
+   (approval queue; it blocks until decided). Granted → continue the batch. Denied →
+   the denial note tells you what to fix: revise the anchors and ask again. Do not
+   generate non-anchor assets before a granted signoff.
+7. Only then hand off: the task names which artists take it from here.
+
+## The gallery (never overwrite)
+Every contact sheet and every rejected candidate is KEPT: copy it into the game clone
+under `art/gallery/<asset-id>/<n>-<provider>-<accepted|rejected>.png` (n counts up; a
+rejected candidate is never deleted or overwritten) and index it in
+`art/gallery/gallery.json` per entry: asset id, provider, gate numbers, verdict, reason,
+run id, ts. The gallery is review material, not game assets: it stays out of
+assets/manifest.json and out of every export.
+
+## The fallback floor
+The fallback ladder's last rung — simple shapes animated in the engine (bob, flash,
+squash-and-stretch, particles) — is a GUARANTEED OUTCOME, not a failure: when generation
+fails, credits run out, or the cost cap hits, mark those assets `anim.mode: "procedural"`
+in the manifest and ship. The eval accepts a procedural floor as a pass.
 
 ## The gate
 - art_gate is the only approve/reject instrument. Its numbers are the asset record:

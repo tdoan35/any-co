@@ -46,6 +46,7 @@ export function evalDirector(dir: string): EvalSummary {
   };
 
   const clone = path.join(dir, "workspace", "game");
+  let manifestAssets: Array<{ id: string; anim?: { mode?: string } }> | null = null;
   check(existsSync(clone), "no game clone at workspace/game (game_clone before reporting)");
   const biblePath = path.join(clone, ...out.style_bible.split("/"));
   check(existsSync(biblePath), `style bible ${out.style_bible} not found in the clone`);
@@ -58,14 +59,16 @@ export function evalDirector(dir: string): EvalSummary {
     // Compare against the clone's REAL manifest, not what the agent reported. Palettes compare
     // exactly (same colors, same order, case-insensitive): the bible's order is the lock order.
     const manifestPath = path.join(clone, "assets", "manifest.json");
-    let real: { grid?: { w: number; h: number }; palette?: string[] } | null = null;
+    let real: { grid?: { w: number; h: number }; palette?: string[]; assets?: Array<{ id: string; anim?: { mode?: string } }> } | null = null;
     try {
       real = JSON.parse(readFileSync(manifestPath, "utf8"));
     } catch {
       real = null;
     }
-    check(real !== null, "clone has no readable assets/manifest.json");
+      check(real !== null, "clone has no readable assets/manifest.json");
     if (real) {
+      const realAssets = real.assets ?? null;
+      manifestAssets = realAssets;
       const realPalette = (real.palette ?? []).map((c) => c.toLowerCase());
       const realGrid = real.grid ? `${real.grid.w}x${real.grid.h}` : "none";
       check(!!bible.palette && JSON.stringify(bible.palette) === JSON.stringify(realPalette), `real manifest palette [${realPalette.join(", ")}] ≠ style bible palette [${(bible.palette ?? []).join(", ")}]`);
@@ -102,6 +105,12 @@ export function evalDirector(dir: string): EvalSummary {
       check(Math.abs((reported.maxFrameDrift ?? -1) - (freshFrame ?? -1)) < eps, `asset "${reported.id}": maxFrameDrift ${reported.maxFrameDrift} ≠ gate ${freshFrame}`);
       check((reported.anchorDrift ?? null) === (fresh.numbers.anchorDrift ?? null) || Math.abs((reported.anchorDrift ?? -1) - (fresh.numbers.anchorDrift ?? -1)) < eps, `asset "${reported.id}": anchorDrift ${reported.anchorDrift} ≠ gate ${fresh.numbers.anchorDrift}`);
       check(!(reported.verdict === "approve" && !fresh.pass), `asset "${reported.id}": approved although the gate fails`);
+      // Fallback floor (T18): a cut asset marked anim.mode "procedural" is a pass — simple shapes
+      // animated in engine are the guaranteed outcome when generation fails or the cap hits.
+      if (reported.verdict === "cut") {
+        const manifestAsset = manifestAssets?.find((a) => a.id === reported.id);
+        check(manifestAsset?.anim?.mode === "procedural", `asset "${reported.id}": cut but the manifest does not mark anim.mode "procedural" (the floor is a pass only there)`);
+      }
     }
   }
 
