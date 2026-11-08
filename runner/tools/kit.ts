@@ -2,6 +2,7 @@
 // (runner/tools/lanes/). It imports no capability code, so lane modules can import it without a
 // load cycle: impl.ts and registry.ts merge the lanes while they load, so a lane must never import them.
 import { lstatSync, realpathSync } from "node:fs";
+import { isIP } from "node:net";
 import path from "node:path";
 import type { z } from "zod";
 import type { NaiveClient } from "../providers.ts";
@@ -39,6 +40,12 @@ export interface ToolImpl {
    * so an omitted field is the safe case (checked at load, lanes/merge.ts).
    */
   dryRunField?: string;
+  /**
+   * For an "allow" grant: a pre-call check that returns a reason when THIS call must go through the approval gate anyway
+   * (T50: a Monid run estimated over MONID_APPROVAL_USD); null runs it ungated. It only ever adds a gate, never skips one
+   * ("ask" grants always ask). A check that throws counts as needing approval.
+   */
+  approvalWhen?: (input: any, ctx: ToolContext) => Promise<string | null>;
 }
 
 export const MAX_RESULT_CHARS = 40_000;
@@ -104,3 +111,15 @@ export function lstatOk(p: string): boolean {
   }
 }
 
+
+/** Hosts a tool must never fetch from: loopback, link-local, private ranges, *.local/*.internal (SSRF guard for web_fetch and Monid). */
+export function blockedHost(host: string): boolean {
+  const h = host.toLowerCase().replace(/^\[|\]$/g, "");
+  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal")) return true;
+  if (isIP(h) === 4) {
+    const [a, b] = h.split(".").map(Number);
+    return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+  }
+  if (isIP(h) === 6) return h === "::1" || h.startsWith("fc") || h.startsWith("fd") || h.startsWith("fe80");
+  return false;
+}
