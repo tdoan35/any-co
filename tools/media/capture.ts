@@ -10,6 +10,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { decodePng } from "../art/png.ts";
+import { blankIssues, frameStats } from "../qa/export.ts";
 import { QaClient } from "./protocol.ts";
 import { track } from "../proc/reaper.ts";
 
@@ -126,6 +127,9 @@ export async function capture(o: CaptureOptions): Promise<CaptureResult> {
       const img = decodePng(new Uint8Array(readFileSync(dst)));
       if (img.width !== o.resolution.w || img.height !== o.resolution.h)
         notes.push(`${name} is ${img.width}x${img.height}, not the requested ${o.resolution.w}x${o.resolution.h} (screenshot.md)`);
+      // T43: a placeholder or blank frame (same floor as the export check) is useless for a trailer; say so
+      const blank = blankIssues(frameStats(img));
+      if (blank.length) notes.push(`${name} looks blank (${blank.join("; ")}): screenshot.md wants the frame a player sees; check the game's screenshot command`);
     } catch (e) {
       notes.push(`${name} is not a readable PNG: ${(e as Error).message}`);
     }

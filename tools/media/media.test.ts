@@ -55,7 +55,9 @@ test("ticks mode: pauses, steps to each tick exactly, screenshots, quits cleanly
   }
   assert.equal(r.exit.killed, false);
   assert.equal(r.exit.code, 0);
-  assert.deepEqual(r.notes, []);
+  // the fake game's shots are solid colour, so each one is flagged as blank (T43); nothing else is noted
+  assert.equal(r.notes.length, 3);
+  for (const n of r.notes) assert.match(n, /^shot-\d{6}-\d\.png looks blank \(.*\): screenshot\.md wants the frame a player sees/);
   const argv = JSON.parse(readFileSync(path.join(game, "qa", "argv.json"), "utf8"));
   assert.deepEqual(argv, ["--qa", "--seed", "7", "--time-scale", "1", "--autoplay", "--policy", "script:trailer.jsonl", "--resolution", "64x36"]);
 });
@@ -265,4 +267,18 @@ test("R16-4: playlists and non-media containers are refused before ffmpeg reads 
   const ts = path.join(root, "media", "a.ts");
   execFileSync(FFMPEG(), ["-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=64x48:rate=10", "-t", "1", "-pix_fmt", "yuv420p", ts]);
   await assert.rejects(edit({ schema_version: 1, clips: [{ source: "media/a.ts", start_s: 0, end_s: 0.5 }], output: out }, confined(root)), /allowed containers/);
+});
+
+test("T43: an engine launch may name one res:// scene that exists in the clone (a game whose qa/ protocol lives outside the main scene)", () => {
+  const ws = mkdtempSync(path.join(tmpdir(), "media-scene-"));
+  const clone = path.join(ws, "game");
+  mkdirSync(path.join(clone, "qa"), { recursive: true });
+  writeFileSync(path.join(clone, "qa", "driver.tscn"), "[gd_scene]\n");
+  assert.deepEqual(mediaLaunch(clone, ["godot", "--path", ".", "res://qa/driver.tscn"]), ["godot", "--path", clone, "res://qa/driver.tscn"]);
+  assert.deepEqual(mediaLaunch(clone, ["godot", "--headless", "res://qa/driver.tscn"]), ["godot", "--headless", "res://qa/driver.tscn"]);
+  assert.throws(() => mediaLaunch(clone, ["godot", "res://qa/missing.tscn"]), /does not exist in the game clone/);
+  assert.throws(() => mediaLaunch(clone, ["godot", "res://qa/driver.tscn", "res://qa/driver.tscn"]), /not allowed/, "one scene only");
+  assert.throws(() => mediaLaunch(clone, ["godot", "res://../outside.tscn"]), /not allowed|escapes|does not exist/);
+  assert.throws(() => mediaLaunch(clone, ["godot", "res://qa/driver.gd"]), /not allowed/, "a script is not a scene");
+  assert.throws(() => mediaLaunch(clone, ["godot", "qa/driver.tscn"]), /not allowed/, "only the res:// form");
 });
