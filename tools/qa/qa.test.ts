@@ -5,8 +5,14 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { launch, waitReady } from "./driver.ts";
+import { CLI_DEFAULTS, check, determinism, driveRun, smoke, type Cli, type QaResult } from "./qa.ts";
 import { firstDifference, runInvariants, validateValue, type RunFiles } from "./invariants.ts";
-import { CLI_DEFAULTS, check, determinism, smoke, type Cli, type QaResult } from "./qa.ts";
+
+function numField(state: unknown, key: string): number | undefined {
+  if (!state || typeof state !== "object" || !(key in state)) return undefined;
+  const v = (state as Record<string, unknown>)[key];
+  return typeof v === "number" ? v : undefined;
+}
 
 // The fake game is a separate Node process (test double, tools/qa/test/emulator.mjs); mode via env.
 const EMULATOR = path.join(import.meta.dirname, "test", "emulator.mjs");
@@ -208,6 +214,21 @@ test("ack timeout on a live game is a harness error (exit 2)", async () => {
   const r = await withMode("slow-ack", () => smoke(cli(gameDir(), { ackTimeoutMs: 300 })));
   assert.equal(r.exitCode, 2, JSON.stringify(r));
   assert.match(r.error!, /ack timeout: no ack with id 1/);
+});
+
+test("R8b F1: the step grid is anchored to the tick count, not the pause wall-clock moment", async () => {
+  // Drive runs directly and assert every dump tick sits on the stepFrames grid regardless of
+  // when the pause landed (the emulator's slow-start mode shifts it).
+  for (const mode of ["happy", "slow-start"]) {
+    const run = await withMode(mode, () => driveRun(cli(gameDir(), { stepFrames: 10, ticks: 50 })));
+    const ticks = run.files.states.map((s) => numField(s, "tick") ?? -1);
+    assert.ok(ticks.length >= 2, `no dumps: ${ticks}`);
+    const start = ticks[0]!;
+    // states[0] is the pre-step anchor dump (pause tick); every later dump is on the 10-grid
+    ticks.slice(1).forEach((t, i) => assert.equal(t % 10, 0, `dump ${i + 1} tick ${t} off the 10-grid: ${ticks.join(",")}`));
+    assert.ok(ticks.length >= 3, `too few dumps: ${ticks}`);
+  }
+  // ...and the two runs' dump ticks agree, which is what determinism needs.
 });
 
 test("D10: step acks only after the frames ran (ack = finished), so back-to-back steps never hit 'already running'", async () => {

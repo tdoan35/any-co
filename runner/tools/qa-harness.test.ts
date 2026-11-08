@@ -15,18 +15,23 @@ function workspace(mode: string): { ws: string; clone: string } {
   mkdirSync(clone, { recursive: true });
   writeFileSync(path.join(clone, "project.godot"), ""); // the clone marker
   const entry = path.join(clone, "qa-entry.cjs");
-  writeFileSync(entry, `process.env.QA_EMULATOR_MODE=${JSON.stringify(mode)};\nrequire(${JSON.stringify(EMULATOR)});`);
+  // executable shebang script: the driver spawns argv[0] directly, and the launch binary must
+  // live in the clone (contract), so the fake game is an executable, not a node -inline
+  writeFileSync(entry, `#!/usr/bin/env node\nprocess.env.QA_EMULATOR_MODE=${JSON.stringify(mode)};\nrequire(${JSON.stringify(EMULATOR)});\n`, { mode: 0o755 });
   return { ws, clone };
 }
 const ctx = (ws: string) => ({ workspace: ws, naive: null });
 
 test("validateLaunchArgv: godot by name, paths in the clone; rejects shell strings and outside binaries", () => {
-  const clone = "/tmp/w/game";
+  const clone = mkdtempSync(path.join(tmpdir(), "qa-val-"));
+  writeFileSync(path.join(clone, "qa-entry.cjs"), "", { mode: 0o755 });
+  mkdirSync(path.join(clone, "bin"), { recursive: true });
+  writeFileSync(path.join(clone, "bin", "run"), "", { mode: 0o755 });
   assert.deepEqual(validateLaunchArgv(["godot", "--headless", "res://qa/driver.tscn", "--"], clone).length, 4);
   assert.deepEqual(validateLaunchArgv(["./qa-entry.cjs"], clone), ["./qa-entry.cjs"]);
-  assert.deepEqual(validateLaunchArgv([path.join(clone, "bin/run")], clone).length, 1);
+  assert.deepEqual(validateLaunchArgv([path.join(clone, "bin", "run")], clone).length, 1);
   assert.throws(() => validateLaunchArgv("godot --headless", clone), /string\[\] argv/);
-  assert.throws(() => validateLaunchArgv(["sh", "-c", "echo hi"], clone), /inside the clone/);
+  assert.throws(() => validateLaunchArgv(["sh", "-c", "echo hi"], clone), /not found/); // bare name = clone-relative
   assert.throws(() => validateLaunchArgv(["/usr/bin/env"], clone), /inside the clone/);
   assert.throws(() => validateLaunchArgv(["./missing"], clone), /not found/);
 });
