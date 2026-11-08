@@ -18,7 +18,7 @@ import { addOutline, contactSheet, lockPalette, snapToGrid, splitStrip, upscaleN
 import { runGate } from "../../tools/art/gate.ts";
 import { ChargedFailure, DEFAULT_CANDIDATES, MAX_CANDIDATES, ProviderExhausted, ProviderUnavailable, balance as providerBalance, generate, type Balance, isAnimation, quote as providerQuote, type GenerateResult, type ProviderName } from "../../tools/art/generate.ts";
 import {
-  LOW_GENERATIONS, MAX_REGENERATIONS, PROVIDERS, anchorWinner, checkPixellabFloor, pixellabCallEstimate, pixellabFloor, type FloorVerdict, generationsUsedSinceRedo, grantRedo, outPathProblem, releaseGeneration, reserveGeneration, isExhausted, markExhausted, other, readCredits, readGallery,
+  LOW_GENERATIONS, MAX_REGENERATIONS, PROVIDERS, anchorWinner, checkPixellabFloor, pixellabCallEstimate, pixellabFloor, type FloorVerdict, generationsUsedSinceRedo, grantRedo, outPathProblem, releaseGeneration, reserveGeneration, isExhausted, markExhausted, other, readCredits, readGallery, recordLocalGeneration, comfyLaneStats,
   readProviders, recordAnchorWinner, recordCredit, statePaths,
 } from "../../tools/art/credits.ts";
 import { capture as mediaCapture, POLICY as MEDIA_POLICY, type CaptureMode } from "../../tools/media/capture.ts";
@@ -1297,6 +1297,11 @@ const artGenerate: ToolImpl = {
       ? Math.round((before.remaining - after.remaining) * 1000) / 1000
       : usage?.type === "generations" && typeof usage.generations === "number" ? usage.generations : null;
     credits = noteCredits(ctx, result.provider, after, "generation", used);
+    if (result.provider === "comfy" && typeof result.metadata.lane === "string")
+      recordLocalGeneration(paths.credits, {
+        ts: new Date().toISOString(), provider: "comfy", unit: "local", lane: result.metadata.lane, images: result.images.length,
+        batch: typeof result.metadata.batch === "number" ? result.metadata.batch : null, run_id: ctx.run_id ?? "unknown", source: "generation",
+      });
     const extra = { generation: `${generation} of ${1 + MAX_REGENERATIONS}`, credits, ...(used !== null ? { generations_used: used } : {}), ...(result.provider !== requested ? { fallback_from: requested } : {}), ...(floored ? { pixellab_floor: floored } : {}), ...(notes.length ? { notes } : {}) };
     try {
       let postprocess: Record<string, unknown> | null = null;
@@ -1364,7 +1369,7 @@ const artProviders: ToolImpl = {
     const credits = readCredits(paths.credits);
     const latest = Object.fromEntries(PROVIDERS.map((p) => [p, credits.filter((c) => c.provider === p).at(-1) ?? null]));
     const g = readGallery(paths.gallery);
-    return { content: clip(JSON.stringify({ providers: readProviders(paths.providers), latest_balance: latest, anchors: g.anchors, generations: g.generations, max_regenerations: MAX_REGENERATIONS })) };
+    return { content: clip(JSON.stringify({ providers: readProviders(paths.providers), latest_balance: latest, comfy_lanes: comfyLaneStats(paths.credits), anchors: g.anchors, generations: g.generations, max_regenerations: MAX_REGENERATIONS })) };
   },
 };
 

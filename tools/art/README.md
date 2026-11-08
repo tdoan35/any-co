@@ -91,6 +91,8 @@ of regenerating: no new generation or charge. If a strip can't be built, the raw
 trials (PROVIDERS.md "Credits"): `art_generate`, `art_quote` (free cost check), `art_anchor_winner`,
 `art_providers` (read-only state). State: `runs/art-providers.json`, `runs/art-credits.jsonl`,
 `runs/art-gallery.json` (env `ART_PROVIDERS_FILE` / `ART_CREDITS_FILE` / `ART_GALLERY_FILE`).
+Comfy lanes (T41b): `COMFY_BASE_URLS=url|batch,url|batch` routes each call to the lane with the shortest /queue, failing over
+on errors; the lane is logged (PROVIDERS.md "Lanes").
 Default provider (T39b): `ART_DEFAULT_PROVIDER=comfy` makes a call with no provider comfy-only (reference required, no paid
 fallback); unset keeps the anchor-winner rule (PROVIDERS.md "Default provider").
 Guards (T39): `out` must be a named PNG under `game/assets/`; postprocess needs the manifest entry first; the per-asset cap
