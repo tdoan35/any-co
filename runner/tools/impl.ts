@@ -1309,6 +1309,7 @@ const itchPush: ToolImpl = {
       dry_run: z.boolean().default(true).describe("Default true (no upload); false pushes for real, after operator approval"),
     })
     .strict(),
+  dryRunField: "dry_run", // a dry run uploads nothing: no approval needed (T27)
   async run({ dir, target, build_id, dry_run = true }, ctx) {
     try {
       if (!process.env.BUTLER_API_KEY) throw new Error(noKey);

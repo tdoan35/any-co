@@ -32,6 +32,13 @@ export interface ToolImpl {
   description: string;
   input: z.ZodType<Record<string, unknown>>;
   run(input: any, ctx: ToolContext): Promise<ToolOutput>;
+  /**
+   * Boolean input field that makes a call a rehearsal (e.g. "dry_run"). When the parsed value is
+   * exactly `true`, an "ask" grant runs the call without an approval request (ledgered as an auto
+   * decision); anything else goes through the full gate. The field's schema must default to `true`,
+   * so an omitted field is the safe case (checked at load, lanes/merge.ts).
+   */
+  dryRunField?: string;
 }
 
 export const MAX_RESULT_CHARS = 40_000;

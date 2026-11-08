@@ -30,10 +30,30 @@ export function mergeCapabilities<C extends Record<string, Capability>>(core: C,
   return out;
 }
 
+/**
+ * A tool's dryRunField must be a boolean whose schema turns an omitted value into `true`, so the gate's
+ * "dry run, no approval" and the tool's own behaviour can never disagree (T27).
+ */
+export function assertDryRunField(owner: string, tool: string, impl: ToolImpl): void {
+  const f = impl.dryRunField;
+  if (f === undefined) return;
+  const shape = (impl.input as unknown as { shape?: Record<string, { safeParse(v: unknown): { success: boolean; data?: unknown } }> }).shape;
+  const field = shape?.[f];
+  if (!field) throw new Error(`${owner} tool "${tool}" declares dryRunField "${f}" but its input has no such field`);
+  const omitted = field.safeParse(undefined);
+  const explicitFalse = field.safeParse(false);
+  if (!omitted.success || omitted.data !== true || !explicitFalse.success || explicitFalse.data !== false)
+    throw new Error(`${owner} tool "${tool}": dryRunField "${f}" must be a boolean that defaults to true (an omitted field must mean dry run)`);
+}
+
 export function mergeImpls(core: Record<string, Record<string, ToolImpl>>, lanes: Record<string, LaneModule>): Record<string, Record<string, ToolImpl>> {
   const out: Record<string, Record<string, ToolImpl>> = { ...core };
   const toolOwner = new Map<string, string>();
-  for (const [cap, tools] of Object.entries(core)) for (const t of Object.keys(tools)) toolOwner.set(t, `core capability "${cap}"`);
+  for (const [cap, tools] of Object.entries(core))
+    for (const [t, impl] of Object.entries(tools)) {
+      toolOwner.set(t, `core capability "${cap}"`);
+      assertDryRunField(`core capability "${cap}"`, t, impl);
+    }
   for (const t of RESERVED_TOOLS) toolOwner.set(t, "the runner");
   for (const [lane, mod] of Object.entries(lanes)) {
     for (const [cap, tools] of Object.entries(mod.IMPLS)) {
@@ -43,6 +63,10 @@ export function mergeImpls(core: Record<string, Record<string, ToolImpl>>, lanes
         if (!NAME.test(tool)) throw new Error(`lane "${lane}": tool name "${tool}" must be snake_case (${NAME})`);
         if (toolOwner.has(tool)) throw new Error(`lane "${lane}" tool "${tool}" shadows the tool of ${toolOwner.get(tool)}`);
         if (typeof impl?.run !== "function" || typeof impl.description !== "string") throw new Error(`lane "${lane}": tool "${tool}" needs description and run()`);
+        // R31: the gate trusts a dryRunField declaration, not the tool's behavior, so only reviewed core tools may
+        // declare one. A lane tool with it could un-gate a real send without core review (the opposite of T24's rule).
+        if ((impl as { dryRunField?: unknown }).dryRunField !== undefined)
+          throw new Error(`lane "${lane}": tool "${tool}" may not declare dryRunField (core-only: dry-run gate skips need core review)`);
         toolOwner.set(tool, `lane "${lane}" capability "${cap}"`);
       }
       out[cap] = tools;
